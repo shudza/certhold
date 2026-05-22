@@ -71,14 +71,14 @@ USER_HOME="$HOME"
 [ -n "$USER_HOME" ] || { echo "no \$HOME" >&2; exit 1; }
 mkdir -p "$USER_HOME/.ssh"
 chmod 700 "$USER_HOME/.ssh"
-curl -fsSL %s/enroll/%s?user=$TARGET_USER | tar -xzC "$USER_HOME/.ssh"
+curl -kfsSL %s/enroll/%s?user=$TARGET_USER | tar -xzC "$USER_HOME/.ssh"
 chmod 600 "$USER_HOME/.ssh/id_ed25519"
 `, baseURL, token)
 		} else {
 			body = fmt.Sprintf(`#!/usr/bin/env bash
 set -e
 
-curl -fsSL %s/enroll/%s | tar -xzC /
+curl -kfsSL %s/enroll/%s | tar -xzC /
 
 sed -i '/^# BEGIN certhold$/,/^# END certhold$/d' /etc/ssh/sshd_config
 cat >> /etc/ssh/sshd_config <<'SSHD_EOF'

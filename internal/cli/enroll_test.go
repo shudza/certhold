@@ -38,7 +38,7 @@ func setupDB(t *testing.T) string {
 func extractToken(t *testing.T, stdout, baseURL string) string {
 	t.Helper()
 	line := strings.TrimRight(stdout, "\n")
-	prefix := "curl -fsSL " + baseURL + "/enroll/"
+	prefix := "curl -kfsSL " + baseURL + "/enroll/"
 	suffix := ".sh | bash"
 	if !strings.HasPrefix(line, prefix) {
 		t.Fatalf("output prefix mismatch: %q (want %q)", line, prefix)
