@@ -352,6 +352,89 @@ func TestEnrollScriptConsumedToken(t *testing.T) {
 	}
 }
 
+func TestEnrollUserMode_Tarball(t *testing.T) {
+	env := setupTestEnv(t)
+	ctx := context.Background()
+	const tok = "tok-user-vm"
+	if err := env.db.InsertTokenWithMode(ctx, tok, "vmU", "infra,databases", db.ModeUser, "alice"); err != nil {
+		t.Fatalf("InsertTokenWithMode: %v", err)
+	}
+	resp, err := http.Get(env.srv.URL + "/enroll/" + tok)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d; body=%s", resp.StatusCode, body)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	entries := extractTarball(t, body)
+	wantNames := []string{"id_ed25519", "id_ed25519-cert.pub", "authorized_keys", "known_hosts", "config"}
+	if len(entries) != 5 {
+		t.Errorf("user-mode tarball entries = %d, want 5: %v", len(entries), entries)
+	}
+	for _, n := range wantNames {
+		if _, ok := entries[n]; !ok {
+			t.Errorf("missing entry %q", n)
+		}
+	}
+	for n := range entries {
+		if strings.HasPrefix(n, "etc/") || strings.HasPrefix(n, "/") {
+			t.Errorf("user-mode entry has root path %q", n)
+		}
+	}
+	ak := string(entries["authorized_keys"])
+	if !strings.HasPrefix(ak, `cert-authority,principals="manager,infra,databases" `) {
+		t.Errorf("authorized_keys wrong: %q", ak)
+	}
+	peer, err := env.db.GetPeer(ctx, "vmU")
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if peer.Mode != db.ModeUser || peer.TargetUser != "alice" {
+		t.Errorf("peer.Mode=%q peer.TargetUser=%q", peer.Mode, peer.TargetUser)
+	}
+}
+
+func TestEnrollUserMode_Script(t *testing.T) {
+	env := setupTestEnv(t)
+	ctx := context.Background()
+	const tok = "tok-user-script"
+	if err := env.db.InsertTokenWithMode(ctx, tok, "vmU", "infra", db.ModeUser, "bob"); err != nil {
+		t.Fatalf("InsertTokenWithMode: %v", err)
+	}
+	resp, err := http.Get(env.srv.URL + "/enroll/" + tok + ".sh")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d; body=%s", resp.StatusCode, body)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	s := string(body)
+	mustContain := []string{
+		"TARGET_USER=\"bob\"",
+		`getent passwd "$TARGET_USER"`,
+		`chmod 700 "$USER_HOME/.ssh"`,
+		`tar -xzC "$USER_HOME/.ssh"`,
+		`chown -R "$TARGET_USER":"$TARGET_USER" "$USER_HOME/.ssh"`,
+		`chmod 600 "$USER_HOME/.ssh/id_ed25519"`,
+	}
+	for _, m := range mustContain {
+		if !strings.Contains(s, m) {
+			t.Errorf("script missing %q\nfull:\n%s", m, s)
+		}
+	}
+	for _, forbidden := range []string{"systemctl reload sshd", "/etc/ssh/sshd_config", "BEGIN certhold"} {
+		if strings.Contains(s, forbidden) {
+			t.Errorf("user-mode script should not contain %q\nfull:\n%s", forbidden, s)
+		}
+	}
+}
+
 func TestEnrollMethodNotAllowed(t *testing.T) {
 	env := setupTestEnv(t)
 	req, err := http.NewRequest(http.MethodPost, env.srv.URL+"/enroll/whatever", nil)

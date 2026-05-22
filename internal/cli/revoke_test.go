@@ -21,9 +21,10 @@ type revokeMockPusher struct {
 }
 
 type pushRecord struct {
-	mu     sync.Mutex
-	calls  []revokeMockCall
-	failOn map[string]error
+	mu       sync.Mutex
+	calls    []revokeMockCall
+	failOn   map[string]error
+	readData map[string][]byte
 }
 
 type revokeMockCall struct {
@@ -50,9 +51,19 @@ func (m *revokeMockPusher) WriteFileAtomic(ctx context.Context, p string, conten
 	m.rec.calls = append(m.rec.calls, revokeMockCall{host: m.host, path: p, content: content, mode: mode})
 	return nil
 }
-func (m *revokeMockPusher) ReloadSSHD(ctx context.Context) error  { return nil }
+func (m *revokeMockPusher) ReadFile(ctx context.Context, p string) ([]byte, error) {
+	m.rec.mu.Lock()
+	defer m.rec.mu.Unlock()
+	if m.rec.readData != nil {
+		if data, ok := m.rec.readData[m.host+":"+p]; ok {
+			return append([]byte(nil), data...), nil
+		}
+	}
+	return nil, nil
+}
+func (m *revokeMockPusher) ReloadSSHD(ctx context.Context) error   { return nil }
 func (m *revokeMockPusher) VerifyHealth(ctx context.Context) error { return nil }
-func (m *revokeMockPusher) Close() error                            { return nil }
+func (m *revokeMockPusher) Close() error                           { return nil }
 
 // setupRevokeEnv prepares a data-dir + db with a CA, three peers, and
 // installs the package-level injection points. Returns dataDir, dbPath,
@@ -195,6 +206,118 @@ func TestRevokeUnknownPeer(t *testing.T) {
 	}
 	if len(rec.calls_()) != 0 {
 		t.Errorf("no pushes expected for unknown peer, got %d", len(rec.calls_()))
+	}
+}
+
+// TestRevokeUserModeTriggersRekey verifies that revoking a user-mode peer
+// goes through the rekey path (rotates the CA) rather than pushing a KRL.
+func TestRevokeUserModeTriggersRekey(t *testing.T) {
+	dir := t.TempDir()
+	dataDir := filepath.Join(dir, "data")
+	dbPath := filepath.Join(dir, "state.db")
+	hostname := "mgr"
+
+	if err := os.MkdirAll(dataDir, 0700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	// init with root mode for the manager so the self files path resolves
+	// deterministically for the test.
+	cmd := NewRootCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", hostname, "--mode", "root"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("init: %v\n%s", err, buf.String())
+	}
+
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	ctx := context.Background()
+	// Insert two user-mode peers.
+	for _, name := range []string{"alpha", "beta"} {
+		_, pubAuth, sshPub, err := ca.GeneratePeerKey()
+		if err != nil {
+			t.Fatalf("GeneratePeerKey %s: %v", name, err)
+		}
+		_ = sshPub
+		if err := d.InsertPeerWithMode(ctx, name, 100, "fp-"+name, pubAuth, db.ModeUser, "root"); err != nil {
+			t.Fatalf("InsertPeerWithMode %s: %v", name, err)
+		}
+		if err := d.EnsureGroup(ctx, "infra"); err != nil {
+			t.Fatalf("EnsureGroup: %v", err)
+		}
+		if err := d.SetPeerGroups(ctx, name, []string{"infra"}); err != nil {
+			t.Fatalf("SetPeerGroups: %v", err)
+		}
+		if err := d.SetPeerAllowedGroups(ctx, name, []string{"infra"}); err != nil {
+			t.Fatalf("SetPeerAllowedGroups: %v", err)
+		}
+	}
+	d.Close()
+
+	rec := &rekeyRecorder{}
+	origRekeyDial := rekeyDial
+	rekeyDial = func(ctx context.Context, host string, opts sshpush.Options) (sshpush.Pusher, error) {
+		return &rekeyMockPusher{host: host, rec: rec}, nil
+	}
+	defer func() { rekeyDial = origRekeyDial }()
+
+	cmd2 := NewRootCmd()
+	var out, errBuf bytes.Buffer
+	cmd2.SetOut(&out)
+	cmd2.SetErr(&errBuf)
+	cmd2.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "revoke", "alpha", "--hostname", hostname})
+	if err := cmd2.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("revoke: err=%v stderr=%s stdout=%s", err, errBuf.String(), out.String())
+	}
+
+	calls := rec.snapshot()
+	sawBetaWriteAK := false
+	sawBetaWriteCert := false
+	sawAlphaPush := false
+	sawKRL := false
+	for _, c := range calls {
+		if c.host == "alpha" && c.op == "write" {
+			sawAlphaPush = true
+		}
+		if c.host == "beta" && c.op == "write" && c.path == "/root/.ssh/authorized_keys" {
+			sawBetaWriteAK = true
+		}
+		if c.host == "beta" && c.op == "write" && c.path == "/root/.ssh/id_ed25519-cert.pub" {
+			sawBetaWriteCert = true
+		}
+		if c.path == "/etc/ssh/krl" {
+			sawKRL = true
+		}
+	}
+	if sawAlphaPush {
+		t.Errorf("revoked peer alpha should not be pushed to")
+	}
+	if !sawBetaWriteAK {
+		t.Errorf("beta authorized_keys should be rewritten during user-mode revoke")
+	}
+	if !sawBetaWriteCert {
+		t.Errorf("beta cert should be pushed during user-mode revoke")
+	}
+	if sawKRL {
+		t.Errorf("user-mode revoke must not push KRL")
+	}
+
+	d2, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer d2.Close()
+	a, err := d2.GetPeer(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetPeer alpha: %v", err)
+	}
+	if !a.Revoked {
+		t.Errorf("alpha not marked revoked")
 	}
 }
 

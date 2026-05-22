@@ -5,11 +5,16 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 1
+const schemaVersion = 2
 
 // The peers table extends PLAN.md with authorized_key BLOB and created_at TIMESTAMP.
 // We persist the peer's pubkey so certhold can re-sign certs on update/rekey without
 // round-tripping to the peer to ask for it again.
+//
+// The base CREATE TABLE statements omit the T15 mode/target_user columns; they are
+// added by addModeColumns() so a pre-T15 db file (schema_version=1) migrates without
+// data loss. The DEFAULT 'root' on those columns means any rows that pre-date the
+// migration retain the v1 on-disk layout, matching the existing /etc/ssh files there.
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY,
@@ -66,11 +71,59 @@ func (db *DB) migrate(ctx context.Context) error {
 	if _, err := db.sql.ExecContext(ctx, schemaSQL); err != nil {
 		return fmt.Errorf("apply schema: %w", err)
 	}
+	if err := db.addModeColumns(ctx); err != nil {
+		return err
+	}
 	if _, err := db.sql.ExecContext(ctx,
-		`INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', ?)`,
+		`INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)`,
 		fmt.Sprintf("%d", schemaVersion),
 	); err != nil {
 		return fmt.Errorf("insert schema_version: %w", err)
 	}
 	return nil
+}
+
+func (db *DB) addModeColumns(ctx context.Context) error {
+	for _, t := range []string{"peers", "tokens"} {
+		has, err := db.tableHasColumns(ctx, t)
+		if err != nil {
+			return err
+		}
+		if !has["mode"] {
+			if _, err := db.sql.ExecContext(ctx,
+				fmt.Sprintf(`ALTER TABLE %s ADD COLUMN mode TEXT NOT NULL DEFAULT 'root'`, t)); err != nil {
+				return fmt.Errorf("alter %s add mode: %w", t, err)
+			}
+		}
+		if !has["target_user"] {
+			if _, err := db.sql.ExecContext(ctx,
+				fmt.Sprintf(`ALTER TABLE %s ADD COLUMN target_user TEXT NOT NULL DEFAULT ''`, t)); err != nil {
+				return fmt.Errorf("alter %s add target_user: %w", t, err)
+			}
+		}
+	}
+	return nil
+}
+
+func (db *DB) tableHasColumns(ctx context.Context, table string) (map[string]bool, error) {
+	rows, err := db.sql.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return nil, fmt.Errorf("pragma table_info(%s): %w", table, err)
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return nil, fmt.Errorf("scan pragma: %w", err)
+		}
+		out[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iter pragma: %w", err)
+	}
+	return out, nil
 }

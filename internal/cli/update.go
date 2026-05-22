@@ -11,6 +11,7 @@ import (
 
 	"github.com/shudza/certhold/internal/ca"
 	"github.com/shudza/certhold/internal/db"
+	"github.com/shudza/certhold/internal/peerfiles"
 	"github.com/shudza/certhold/internal/sshpush"
 )
 
@@ -106,22 +107,23 @@ func newUpdateCmd() *cobra.Command {
 				return fmt.Errorf("update peer cert serial: %w", err)
 			}
 
-			selfSSH := filepath.Join(dataDir, "self", "etc", "ssh")
-			pusher, err := dialFn(ctx, host, sshpush.Options{
-				CertPath:       filepath.Join(selfSSH, "peer_ed25519-cert.pub"),
-				KeyPath:        filepath.Join(selfSSH, "peer_ed25519"),
-				KnownHostsPath: filepath.Join(selfSSH, "ca_known_hosts"),
-			})
+			pusher, err := dialFn(ctx, host, selfPushOptions(dataDir, peer.Mode))
 			if err != nil {
 				return fmt.Errorf("ssh dial %s: %w", host, err)
 			}
 			defer pusher.Close()
 
-			if err := pusher.WriteFileAtomic(ctx, "/etc/ssh/peer_ed25519-cert.pub", certBytes, 0644); err != nil {
+			certPath := peerCertRemotePath(peer)
+			if err := pusher.WriteFileAtomic(ctx, certPath, certBytes, 0644); err != nil {
 				return fmt.Errorf("write cert: %w", err)
 			}
-			if err := pusher.ReloadSSHD(ctx); err != nil {
-				return fmt.Errorf("reload sshd: %w", err)
+			// User-mode peers do not need sshd reloaded — authorized_keys is
+			// read per-connection. Root-mode peers need a reload so sshd
+			// re-evaluates HostCertificate / TrustedUserCAKeys.
+			if peer.Mode != db.ModeUser {
+				if err := pusher.ReloadSSHD(ctx); err != nil {
+					return fmt.Errorf("reload sshd: %w", err)
+				}
 			}
 			if err := pusher.VerifyHealth(ctx); err != nil {
 				return fmt.Errorf("verify health: %w", err)
@@ -135,4 +137,50 @@ func newUpdateCmd() *cobra.Command {
 	cmd.Flags().String("host", "", "host to push the cert to (default: <name>)")
 	_ = cmd.MarkFlagRequired("groups")
 	return cmd
+}
+
+// selfPushOptions assembles the sshpush.Options that point at certhold's own
+// peer cert + key + known_hosts files. Manager's outbound files are written
+// by init/rekey to one of two layouts. Resolve at call time by checking which
+// one exists; prefer root layout (the historical default) when neither (yet)
+// exists so legacy tests that never wrote self files still get a deterministic
+// answer.
+func selfPushOptions(dataDir, _ string) sshpush.Options {
+	rootSSH := filepath.Join(dataDir, "self", "etc", "ssh")
+	userBase := filepath.Join(dataDir, "self", "home")
+	rootPresent := existsFile(filepath.Join(rootSSH, "peer_ed25519"))
+	if !rootPresent {
+		if user, ok := firstSelfHomeUser(userBase); ok {
+			userSSH := filepath.Join(userBase, user, ".ssh")
+			return sshpush.Options{
+				CertPath:       filepath.Join(userSSH, "id_ed25519-cert.pub"),
+				KeyPath:        filepath.Join(userSSH, "id_ed25519"),
+				KnownHostsPath: filepath.Join(userSSH, "known_hosts"),
+			}
+		}
+	}
+	return sshpush.Options{
+		CertPath:       filepath.Join(rootSSH, "peer_ed25519-cert.pub"),
+		KeyPath:        filepath.Join(rootSSH, "peer_ed25519"),
+		KnownHostsPath: filepath.Join(rootSSH, "ca_known_hosts"),
+	}
+}
+
+func peerCertRemotePath(p *db.Peer) string {
+	if p.Mode == db.ModeUser {
+		user := p.TargetUser
+		if user == "" {
+			user = "root"
+		}
+		return peerfiles.HomeOf(user) + "/.ssh/id_ed25519-cert.pub"
+	}
+	return "/etc/ssh/peer_ed25519-cert.pub"
+}
+
+func peerAuthorizedKeysRemotePath(p *db.Peer) string {
+	user := p.TargetUser
+	if user == "" {
+		user = "root"
+	}
+	return peerfiles.HomeOf(user) + "/.ssh/authorized_keys"
 }

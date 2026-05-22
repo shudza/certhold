@@ -37,7 +37,7 @@ func scriptHandler(database *db.DB) func(http.ResponseWriter, *http.Request, str
 			writeErr(w, http.StatusBadRequest, "missing token")
 			return
 		}
-		_, _, consumed, err := database.LookupToken(r.Context(), token)
+		_, _, mode, targetUser, consumed, err := database.LookupToken(r.Context(), token)
 		if err != nil {
 			if errors.Is(err, db.ErrTokenNotFound) {
 				writeErr(w, http.StatusNotFound, "token not found")
@@ -58,7 +58,25 @@ func scriptHandler(database *db.DB) func(http.ResponseWriter, *http.Request, str
 			scheme = p
 		}
 		baseURL := fmt.Sprintf("%s://%s", scheme, r.Host)
-		body := fmt.Sprintf(`#!/usr/bin/env bash
+		var body string
+		if mode == db.ModeUser {
+			user := targetUser
+			if user == "" {
+				user = "root"
+			}
+			body = fmt.Sprintf(`#!/usr/bin/env bash
+set -e
+TARGET_USER=%q
+USER_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
+[ -n "$USER_HOME" ] || { echo "user $TARGET_USER not found" >&2; exit 1; }
+mkdir -p "$USER_HOME/.ssh"
+chmod 700 "$USER_HOME/.ssh"
+curl -fsSL %s/enroll/%s | tar -xzC "$USER_HOME/.ssh"
+chown -R "$TARGET_USER":"$TARGET_USER" "$USER_HOME/.ssh"
+chmod 600 "$USER_HOME/.ssh/id_ed25519"
+`, user, baseURL, token)
+		} else {
+			body = fmt.Sprintf(`#!/usr/bin/env bash
 set -e
 
 curl -fsSL %s/enroll/%s | tar -xzC /
@@ -73,6 +91,7 @@ cat >> /etc/ssh/ssh_config <<'SSH_EOF'
 
 systemctl reload sshd
 `, baseURL, token, peerfiles.SshdBlockContents, peerfiles.SshClientBlockContents)
+		}
 		w.Header().Set("Content-Type", "application/x-shellscript; charset=utf-8")
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
 		w.WriteHeader(http.StatusOK)
@@ -90,7 +109,7 @@ func enrollHandler(database *db.DB, caObj *ca.CA, hostname string) http.HandlerF
 			return
 		}
 
-		peerName, groupsCSV, err := database.ConsumeToken(ctx, token)
+		peerName, groupsCSV, mode, targetUser, err := database.ConsumeToken(ctx, token)
 		if err != nil {
 			switch {
 			case errors.Is(err, db.ErrTokenNotFound):
@@ -128,7 +147,10 @@ func enrollHandler(database *db.DB, caObj *ca.CA, hostname string) http.HandlerF
 
 		fingerprint := ssh.FingerprintSHA256(sshPub)
 
-		if err := database.InsertPeer(ctx, peerName, serial, fingerprint, pubAuth); err != nil {
+		if mode == "" {
+			mode = db.ModeRoot
+		}
+		if err := database.InsertPeerWithMode(ctx, peerName, serial, fingerprint, pubAuth, mode, targetUser); err != nil {
 			zero(priv)
 			writeErr(w, http.StatusInternalServerError, "insert peer failed")
 			return
@@ -151,18 +173,28 @@ func enrollHandler(database *db.DB, caObj *ca.CA, hostname string) http.HandlerF
 			return
 		}
 
-		caPubLine := string(bytes.TrimRight(caObj.PublicKeyAuthorizedKey(), "\n"))
-		caKnownHostsEntry := "@cert-authority " + hostname + " " + caPubLine
-
-		tarball, err := peerfiles.Build(peerfiles.PeerFiles{
-			Hostname:           peerName,
-			PrivKey:            priv,
-			CertPub:            certBytes,
-			CAPub:              caObj.PublicKeyAuthorizedKey(),
-			KRL:                nil,
-			AuthPrincipalsRoot: groups,
-			CAKnownHostsEntry:  caKnownHostsEntry,
-		})
+		var tarball []byte
+		if mode == db.ModeUser {
+			tarball, err = peerfiles.BuildUser(peerfiles.UserPeerFiles{
+				TargetUser: targetUser,
+				PrivKey:    priv,
+				CertPub:    certBytes,
+				CAPub:      caObj.PublicKeyAuthorizedKey(),
+				Principals: groups,
+			})
+		} else {
+			caPubLine := string(bytes.TrimRight(caObj.PublicKeyAuthorizedKey(), "\n"))
+			caKnownHostsEntry := "@cert-authority " + hostname + " " + caPubLine
+			tarball, err = peerfiles.Build(peerfiles.PeerFiles{
+				Hostname:           peerName,
+				PrivKey:            priv,
+				CertPub:            certBytes,
+				CAPub:              caObj.PublicKeyAuthorizedKey(),
+				KRL:                nil,
+				AuthPrincipalsRoot: groups,
+				CAKnownHostsEntry:  caKnownHostsEntry,
+			})
+		}
 		if err != nil {
 			zero(priv)
 			writeErr(w, http.StatusInternalServerError, "build tarball failed")

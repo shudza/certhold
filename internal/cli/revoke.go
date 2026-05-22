@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
@@ -30,13 +31,14 @@ func defaultDial(ctx context.Context, host string, opts sshpush.Options) (sshpus
 func newRevokeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "revoke <name>",
-		Short: "Revoke a peer and push a new KRL to all remaining peers",
+		Short: "Revoke a peer (KRL push for root-mode; partial CA rekey for user-mode)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runRevoke(cmd, args[0])
 		},
 	}
 	cmd.Flags().String("host", "", "unused; revoked peer itself is not pushed to")
+	cmd.Flags().String("hostname", "", "certhold's own peer name for user-mode rekey-revoke (default: os.Hostname())")
 	return cmd
 }
 
@@ -57,20 +59,64 @@ func runRevoke(cmd *cobra.Command, name string) error {
 	dataDir = expandHome(dataDir)
 	dbPath = expandHome(dbPath)
 
-	caDir := filepath.Join(dataDir, "ca")
-	caPubPath := filepath.Join(caDir, "ca.pub")
-	if _, err := ca.Load(caDir); err != nil {
-		return fmt.Errorf("load ca: %w", err)
-	}
-
 	d, err := db.Open(dbPath)
 	if err != nil {
 		return fmt.Errorf("open db: %w", err)
 	}
 	defer d.Close()
 
+	peer, err := d.GetPeer(ctx, name)
+	if err != nil {
+		if errors.Is(err, db.ErrPeerNotFound) {
+			return fmt.Errorf("revoke peer %q: %w", name, err)
+		}
+		return fmt.Errorf("get peer %q: %w", name, err)
+	}
+
 	if err := d.SetPeerRevoked(ctx, name); err != nil {
 		return fmt.Errorf("revoke peer %q: %w", name, err)
+	}
+
+	if peer.Mode == db.ModeUser {
+		// User-mode peers have no KRL; rotate the CA, skipping the revoked
+		// peer, so its old (now CA-retired) cert stops being accepted.
+		// Known limitation in mixed fleets: a root-mode revoke does NOT
+		// reach user-mode peers, and a user-mode revoke triggers a full
+		// CA rotation that ALSO rolls root-mode peers (root-mode peers
+		// handle ca.pub rotation in their per-peer rekey branch).
+		hostname, err := cmd.Flags().GetString("hostname")
+		if err != nil {
+			return fmt.Errorf("get hostname: %w", err)
+		}
+		if hostname == "" {
+			h, herr := os.Hostname()
+			if herr != nil {
+				return fmt.Errorf("hostname: %w", herr)
+			}
+			hostname = h
+		}
+		deps := rekeyDeps{
+			DataDir:  dataDir,
+			Hostname: hostname,
+			DB:       d,
+			Out:      cmd.OutOrStdout(),
+			Err:      cmd.ErrOrStderr(),
+			Dial:     rekeyDial,
+		}
+		if deps.Dial == nil {
+			deps.Dial = defaultDial
+		}
+		if err := runRekeyCore(ctx, deps, map[string]bool{name: true}); err != nil {
+			return fmt.Errorf("rekey-revoke: %w", err)
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "Revoked %s via CA rekey.\n", name)
+		return nil
+	}
+
+	caDir := filepath.Join(dataDir, "ca")
+	caPubPath := filepath.Join(caDir, "ca.pub")
+	if _, err := ca.Load(caDir); err != nil {
+		return fmt.Errorf("load ca: %w", err)
 	}
 
 	peers, err := d.ListPeers(ctx)
@@ -95,13 +141,8 @@ func runRevoke(cmd *cobra.Command, name string) error {
 		return fmt.Errorf("next krl version: %w", err)
 	}
 
-	selfDir := filepath.Join(dataDir, "self", "etc", "ssh")
-	pushOpts := sshpush.Options{
-		CertPath:       filepath.Join(selfDir, "peer_ed25519-cert.pub"),
-		KeyPath:        filepath.Join(selfDir, "peer_ed25519"),
-		KnownHostsPath: filepath.Join(selfDir, "ca_known_hosts"),
-		User:           "root",
-	}
+	pushOpts := selfPushOptions(dataDir, db.ModeRoot)
+	pushOpts.User = "root"
 
 	dial := revokeDial
 	if dial == nil {
@@ -116,6 +157,11 @@ func runRevoke(cmd *cobra.Command, name string) error {
 			continue
 		}
 		if p.Name == name {
+			continue
+		}
+		if p.Mode == db.ModeUser {
+			// User-mode peers have RevokedKeys disabled. Skip; document the
+			// known limitation in the report and USAGE.md.
 			continue
 		}
 		targets++

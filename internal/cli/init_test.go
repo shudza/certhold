@@ -12,7 +12,7 @@ import (
 	"github.com/shudza/certhold/internal/db"
 )
 
-func TestInit_HappyPath(t *testing.T) {
+func TestInit_RootMode_HappyPath(t *testing.T) {
 	dataDir := t.TempDir()
 	dbPath := filepath.Join(dataDir, "state.db")
 
@@ -20,7 +20,7 @@ func TestInit_HappyPath(t *testing.T) {
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
-	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", "manager-test"})
+	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", "manager-test", "--mode", "root"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute: %v\nout:\n%s", err, out.String())
 	}
@@ -55,6 +55,9 @@ func TestInit_HappyPath(t *testing.T) {
 	}
 	if peers[0].Name != "manager-test" {
 		t.Errorf("peer name: got %q want %q", peers[0].Name, "manager-test")
+	}
+	if peers[0].Mode != db.ModeRoot {
+		t.Errorf("peer mode: got %q want %q", peers[0].Mode, db.ModeRoot)
 	}
 	if peers[0].Serial == 0 {
 		t.Errorf("peer serial is zero")
@@ -103,6 +106,57 @@ func TestInit_HappyPath(t *testing.T) {
 	}
 }
 
+func TestInit_UserMode_HappyPath(t *testing.T) {
+	dataDir := t.TempDir()
+	dbPath := filepath.Join(dataDir, "state.db")
+
+	cmd := cli.NewRootCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", "manager-test", "--user", "alice"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v\nout:\n%s", err, out.String())
+	}
+
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer database.Close()
+	p, err := database.GetPeer(context.Background(), "manager-test")
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if p.Mode != db.ModeUser || p.TargetUser != "alice" {
+		t.Errorf("got mode=%q tu=%q, want user/alice", p.Mode, p.TargetUser)
+	}
+	base := filepath.Join(dataDir, "self", "home", "alice", ".ssh")
+	for name, mode := range map[string]os.FileMode{
+		"id_ed25519":          0600,
+		"id_ed25519-cert.pub": 0644,
+		"authorized_keys":     0644,
+		"known_hosts":         0644,
+		"config":              0644,
+	} {
+		st, err := os.Stat(filepath.Join(base, name))
+		if err != nil {
+			t.Errorf("missing %s: %v", name, err)
+			continue
+		}
+		if st.Mode().Perm() != mode {
+			t.Errorf("%s mode: got %o want %o", name, st.Mode().Perm(), mode)
+		}
+	}
+	ak, err := os.ReadFile(filepath.Join(base, "authorized_keys"))
+	if err != nil {
+		t.Fatalf("read authorized_keys: %v", err)
+	}
+	if !strings.HasPrefix(string(ak), `cert-authority,principals="manager" `) {
+		t.Errorf("authorized_keys = %q, expected to start with principals=\"manager\"", ak)
+	}
+}
+
 func TestInit_Idempotency(t *testing.T) {
 	dataDir := t.TempDir()
 	dbPath := filepath.Join(dataDir, "state.db")
@@ -112,7 +166,7 @@ func TestInit_Idempotency(t *testing.T) {
 		var out bytes.Buffer
 		cmd.SetOut(&out)
 		cmd.SetErr(&out)
-		cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", "manager-test"})
+		cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", "manager-test", "--mode", "root"})
 		return cmd.Execute()
 	}
 

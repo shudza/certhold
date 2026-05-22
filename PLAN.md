@@ -23,7 +23,27 @@ Two components:
 
 **Peers** — any Linux device with OpenSSH. After onboarding, they have a fixed set of files in `/etc/ssh/` and need no further configuration unless their group membership changes.
 
-## Peer file layout (post-onboarding)
+## Modes
+
+**User-mode (default in T15+)** — peers install five files under `~<user>/.ssh/`. A single `cert-authority,principals="..."` line in `authorized_keys` handles inbound access. No sshd config changes; no reloads. No host certs; outbound uses TOFU via per-peer `known_hosts`. Revocation rotates the CA (skipping the revoked peer) since there is no native KRL. Opt out per peer with `--mode root` on `enroll` / `init`.
+
+**Root-mode (opt-in via `--mode root`)** — the "Peer file layout (root mode)" below applies. Sentinel-block edits to `/etc/ssh/sshd_config`. Native KRL for revocation. Sshd reload on every change.
+
+## Peer file layout (user mode)
+
+Files under `~<target_user>/.ssh/` (paths in the install tarball are relative; the install script untars into the resolved home):
+
+```
+id_ed25519                              # peer's outbound private key (0600)
+id_ed25519-cert.pub                     # CA-signed user cert (0644)
+authorized_keys                         # cert-authority,principals="manager,..." ssh-ed25519 ... (0644)
+known_hosts                             # TOFU bootstrap; empty by default (0644)
+config                                  # Host *: CertificateFile/IdentityFile/UserKnownHostsFile (0644)
+```
+
+Revoke in user-mode triggers a partial CA rekey — the revoked peer's old cert ends up signed by a retired CA after the rotation completes.
+
+## Peer file layout (root mode)
 
 ```
 /etc/ssh/peer_ed25519                    # peer's private key

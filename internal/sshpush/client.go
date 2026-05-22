@@ -135,6 +135,17 @@ func (c *Client) WriteFileAtomic(ctx context.Context, remotePath string, content
 	return nil
 }
 
+func (c *Client) ReadFile(ctx context.Context, remotePath string) ([]byte, error) {
+	c.mu.Lock()
+	cl := c.client
+	c.mu.Unlock()
+	if cl == nil {
+		return nil, errors.New("sshpush: client is closed")
+	}
+	cmd := fmt.Sprintf("cat %s", shellQuote(remotePath))
+	return runCapture(ctx, cl, cmd)
+}
+
 func (c *Client) ReloadSSHD(ctx context.Context) error {
 	c.mu.Lock()
 	cl := c.client
@@ -225,6 +236,29 @@ func runWithStdin(ctx context.Context, cl *ssh.Client, cmd string, stdin []byte)
 			return fmt.Errorf("run %q: %w", cmd, err)
 		}
 		return nil
+	}
+}
+
+func runCapture(ctx context.Context, cl *ssh.Client, cmd string) ([]byte, error) {
+	sess, err := cl.NewSession()
+	if err != nil {
+		return nil, fmt.Errorf("new session: %w", err)
+	}
+	defer sess.Close()
+	var stdout bytes.Buffer
+	sess.Stdout = &stdout
+	done := make(chan error, 1)
+	go func() { done <- sess.Run(cmd) }()
+	select {
+	case <-ctx.Done():
+		_ = sess.Signal(ssh.SIGKILL)
+		_ = sess.Close()
+		return nil, ctx.Err()
+	case err := <-done:
+		if err != nil {
+			return nil, fmt.Errorf("run %q: %w", cmd, err)
+		}
+		return stdout.Bytes(), nil
 	}
 }
 

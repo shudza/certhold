@@ -7,9 +7,11 @@ import (
 	"io/fs"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 
+	"github.com/shudza/certhold/internal/ca"
 	"github.com/shudza/certhold/internal/db"
 	"github.com/shudza/certhold/internal/sshpush"
 )
@@ -28,10 +30,11 @@ type fakePushCall struct {
 }
 
 type fakePusher struct {
-	mu     sync.Mutex
-	calls  []fakePushCall
-	closed bool
-	errOn  string
+	mu       sync.Mutex
+	calls    []fakePushCall
+	closed   bool
+	errOn    string
+	readData map[string][]byte
 }
 
 func (f *fakePusher) record(c fakePushCall) error {
@@ -46,6 +49,19 @@ func (f *fakePusher) record(c fakePushCall) error {
 
 func (f *fakePusher) WriteFileAtomic(ctx context.Context, path string, content []byte, mode fs.FileMode) error {
 	return f.record(fakePushCall{op: "write", path: path, content: content, mode: mode})
+}
+
+func (f *fakePusher) ReadFile(ctx context.Context, path string) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, fakePushCall{op: "read", path: path})
+	if f.errOn == "read" {
+		return nil, errors.New("fake error: read")
+	}
+	if data, ok := f.readData[path]; ok {
+		return append([]byte(nil), data...), nil
+	}
+	return nil, nil
 }
 
 func (f *fakePusher) ReloadSSHD(ctx context.Context) error {
@@ -298,6 +314,98 @@ func TestGroupSSHOptionsPathsMatchInitLayout(t *testing.T) {
 	}
 	if captured.KnownHostsPath != wantKH {
 		t.Errorf("KnownHostsPath = %q, want %q", captured.KnownHostsPath, wantKH)
+	}
+}
+
+func setupGroupUserModeDB(t *testing.T, peerName, targetUser string, allowed []string) (dataDir, dbPath string) {
+	t.Helper()
+	dataDir = t.TempDir()
+	if _, err := ca.Generate(filepath.Join(dataDir, "ca")); err != nil {
+		t.Fatalf("ca.Generate: %v", err)
+	}
+	dbPath = filepath.Join(dataDir, "state.db")
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer d.Close()
+	if err := d.InsertPeerWithMode(context.Background(), peerName, 1, "fp", []byte("k"), db.ModeUser, targetUser); err != nil {
+		t.Fatalf("InsertPeerWithMode: %v", err)
+	}
+	for _, g := range allowed {
+		if err := d.EnsureGroup(context.Background(), g); err != nil {
+			t.Fatalf("EnsureGroup: %v", err)
+		}
+	}
+	if err := d.SetPeerAllowedGroups(context.Background(), peerName, allowed); err != nil {
+		t.Fatalf("SetPeerAllowedGroups: %v", err)
+	}
+	return dataDir, dbPath
+}
+
+func runGroupUserModeCmd(t *testing.T, dataDir, dbPath string, args ...string) (string, error) {
+	t.Helper()
+	root := NewRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	full := append([]string{"--db", dbPath, "--data-dir", dataDir, "group"}, args...)
+	root.SetArgs(full)
+	err := root.ExecuteContext(context.Background())
+	return out.String(), err
+}
+
+func TestGroupAllow_UserMode_RewritesAuthorizedKeys_NoReload(t *testing.T) {
+	dataDir, dbPath := setupGroupUserModeDB(t, "vmU", "alice", []string{"infra"})
+
+	// Build the existing remote authorized_keys against the CA at dataDir/ca.
+	caObj, err := ca.Load(filepath.Join(dataDir, "ca"))
+	if err != nil {
+		t.Fatalf("ca.Load: %v", err)
+	}
+	caTrim := strings.TrimRight(string(caObj.PublicKeyAuthorizedKey()), "\n")
+	existing := []byte(`cert-authority,principals="manager,infra" ` + caTrim + "\n")
+
+	fp := &fakePusher{readData: map[string][]byte{
+		"/home/alice/.ssh/authorized_keys": existing,
+	}}
+	prev := groupDial
+	groupDial = func(ctx context.Context, host string, opts sshpush.Options) (sshpush.Pusher, error) {
+		return fp, nil
+	}
+	t.Cleanup(func() { groupDial = prev })
+
+	out, err := runGroupUserModeCmd(t, dataDir, dbPath, "allow", "db", "--on", "vmU")
+	if err != nil {
+		t.Fatalf("allow: err=%v out=%s", err, out)
+	}
+
+	calls := fp.Calls()
+	// Expect read, write, verify — NO reload.
+	var ops []string
+	for _, c := range calls {
+		ops = append(ops, c.op)
+	}
+	wantOps := []string{"read", "write", "verify"}
+	if !reflect.DeepEqual(ops, wantOps) {
+		t.Errorf("ops = %v, want %v (calls=%+v)", ops, wantOps, calls)
+	}
+	var writeCall *fakePushCall
+	for i := range calls {
+		if calls[i].op == "write" {
+			writeCall = &calls[i]
+			break
+		}
+	}
+	if writeCall == nil {
+		t.Fatal("no write call")
+	}
+	if writeCall.path != "/home/alice/.ssh/authorized_keys" {
+		t.Errorf("write path = %q, want /home/alice/.ssh/authorized_keys", writeCall.path)
+	}
+	wantLine := `cert-authority,principals="manager,infra,db" ` + caTrim
+	if !strings.Contains(string(writeCall.content), wantLine) {
+		t.Errorf("write content does not contain %q\ncontent:\n%s", wantLine, writeCall.content)
 	}
 }
 
