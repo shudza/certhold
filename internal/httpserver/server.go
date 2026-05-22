@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"golang.org/x/crypto/ssh"
@@ -15,6 +16,9 @@ import (
 	"github.com/shudza/certhold/internal/db"
 	"github.com/shudza/certhold/internal/peerfiles"
 )
+
+// POSIX-style usernames: lowercase letter or underscore, then [a-z0-9_-], optional trailing $.
+var validUsername = regexp.MustCompile(`^[a-z_][a-z0-9_-]*\$?$`)
 
 func New(database *db.DB, caObj *ca.CA, hostname string) http.Handler {
 	mux := http.NewServeMux()
@@ -37,7 +41,7 @@ func scriptHandler(database *db.DB) func(http.ResponseWriter, *http.Request, str
 			writeErr(w, http.StatusBadRequest, "missing token")
 			return
 		}
-		_, _, mode, targetUser, consumed, err := database.LookupToken(r.Context(), token)
+		_, _, mode, _, consumed, err := database.LookupToken(r.Context(), token)
 		if err != nil {
 			if errors.Is(err, db.ErrTokenNotFound) {
 				writeErr(w, http.StatusNotFound, "token not found")
@@ -60,21 +64,16 @@ func scriptHandler(database *db.DB) func(http.ResponseWriter, *http.Request, str
 		baseURL := fmt.Sprintf("%s://%s", scheme, r.Host)
 		var body string
 		if mode == db.ModeUser {
-			user := targetUser
-			if user == "" {
-				user = "root"
-			}
 			body = fmt.Sprintf(`#!/usr/bin/env bash
 set -e
-TARGET_USER=%q
-USER_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
-[ -n "$USER_HOME" ] || { echo "user $TARGET_USER not found" >&2; exit 1; }
+TARGET_USER="$(id -un)"
+USER_HOME="$HOME"
+[ -n "$USER_HOME" ] || { echo "no \$HOME" >&2; exit 1; }
 mkdir -p "$USER_HOME/.ssh"
 chmod 700 "$USER_HOME/.ssh"
-curl -fsSL %s/enroll/%s | tar -xzC "$USER_HOME/.ssh"
-chown -R "$TARGET_USER":"$TARGET_USER" "$USER_HOME/.ssh"
+curl -fsSL %s/enroll/%s?user=$TARGET_USER | tar -xzC "$USER_HOME/.ssh"
 chmod 600 "$USER_HOME/.ssh/id_ed25519"
-`, user, baseURL, token)
+`, baseURL, token)
 		} else {
 			body = fmt.Sprintf(`#!/usr/bin/env bash
 set -e
@@ -109,6 +108,35 @@ func enrollHandler(database *db.DB, caObj *ca.CA, hostname string) http.HandlerF
 			return
 		}
 
+		queryUser := r.URL.Query().Get("user")
+
+		// Pre-check the token row to enforce ?user= against any admin-preset
+		// target_user BEFORE ConsumeToken burns it. Small TOCTOU window vs
+		// concurrent consume is acceptable: token is the secret; admin can re-issue.
+		_, _, preMode, preTargetUser, preConsumed, err := database.LookupToken(ctx, token)
+		if err != nil {
+			if errors.Is(err, db.ErrTokenNotFound) {
+				writeErr(w, http.StatusNotFound, "token not found")
+				return
+			}
+			writeErr(w, http.StatusInternalServerError, "lookup token failed")
+			return
+		}
+		if !preConsumed && preMode == db.ModeUser {
+			if queryUser == "" {
+				writeErr(w, http.StatusBadRequest, "user required")
+				return
+			}
+			if len(queryUser) > 32 || !validUsername.MatchString(queryUser) {
+				writeErr(w, http.StatusBadRequest, "invalid user")
+				return
+			}
+			if preTargetUser != "" && preTargetUser != queryUser {
+				writeErr(w, http.StatusBadRequest, "user mismatch")
+				return
+			}
+		}
+
 		peerName, groupsCSV, mode, targetUser, err := database.ConsumeToken(ctx, token)
 		if err != nil {
 			switch {
@@ -120,6 +148,10 @@ func enrollHandler(database *db.DB, caObj *ca.CA, hostname string) http.HandlerF
 				writeErr(w, http.StatusInternalServerError, "consume token failed")
 			}
 			return
+		}
+
+		if mode == db.ModeUser {
+			targetUser = queryUser
 		}
 
 		groups := parseGroupsCSV(groupsCSV)

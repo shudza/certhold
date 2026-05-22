@@ -99,7 +99,7 @@ func newEnrollCmd() *cobra.Command {
 	cmd.Flags().String("groups", "", "comma-separated list of groups for the new peer (required)")
 	cmd.Flags().String("base-url", defaultBaseURL, "base URL of certhold's enroll endpoint")
 	cmd.Flags().String("mode", db.ModeUser, "install mode: 'user' (default, files under ~user/.ssh) or 'root' (files under /etc/ssh)")
-	cmd.Flags().String("user", "root", "Unix user owning the ~/.ssh files (only meaningful when --mode=user)")
+	cmd.Flags().String("user", "", "Unix user owning the ~/.ssh files; when set, acts as a hard constraint at install time (only meaningful with --mode=user)")
 	_ = cmd.MarkFlagRequired("groups")
 
 	return cmd

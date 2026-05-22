@@ -35,7 +35,7 @@ certhold enroll new-vm --groups infra,databases
 # prints: curl -fsSL https://certhold.home.lan/enroll/<token>.sh | bash
 ```
 
-Paste that one-liner on the new peer as root. The script untars five files into `~root/.ssh/`, chowns them, and exits. No sshd reload; the next inbound SSH connection from another peer matches the new `authorized_keys` line.
+Paste that one-liner on the new peer as the user that should own certhold's SSH files (often a regular user; use `sudo -i` first if you want it owned by root). The install script computes `id -un` at runtime and reports it to the manager, then untars five files into `$HOME/.ssh/`. No `chown`, no root required. No sshd reload; the next inbound SSH connection from another peer matches the new `authorized_keys` line.
 
 ## Data layout
 
@@ -113,7 +113,7 @@ certhold enroll <name> --groups a,b,c [--base-url URL] [--mode user|root] [--use
 ```
 
 - `--mode` defaults to `user`; pass `--mode root` for the v1 layout.
-- `--user` defaults to `root` (the Unix user that will own `~/.ssh/` on the peer); ignored when `--mode=root`.
+- `--user` is optional. Omit it and the peer reports its own user via `id -un` at install time. Pass `--user <name>` to pin a specific user — the install request must match or the server returns 400 (token preserved). Ignored when `--mode=root`.
 
 ### `certhold list`
 

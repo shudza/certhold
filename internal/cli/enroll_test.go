@@ -82,8 +82,53 @@ func TestEnrollSuccess(t *testing.T) {
 	if mode != db.ModeUser {
 		t.Errorf("default mode = %q, want %q", mode, db.ModeUser)
 	}
-	if tu != "root" {
-		t.Errorf("default target_user = %q, want root", tu)
+	if tu != "" {
+		t.Errorf("default target_user = %q, want empty", tu)
+	}
+}
+
+func TestEnrollDefaultUserEmpty(t *testing.T) {
+	dbPath := setupDB(t)
+	stdout, stderr, err := runEnroll(t, dbPath, "vm1", "--groups", "infra")
+	if err != nil {
+		t.Fatalf("enroll: err=%v stderr=%s", err, stderr)
+	}
+	tok := extractToken(t, stdout, "https://certhold.home.lan")
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer d.Close()
+	_, _, mode, tu, err := d.ConsumeToken(context.Background(), tok)
+	if err != nil {
+		t.Fatalf("ConsumeToken: %v", err)
+	}
+	if mode != db.ModeUser {
+		t.Errorf("mode = %q, want %q", mode, db.ModeUser)
+	}
+	if tu != "" {
+		t.Errorf("target_user = %q, want empty when --user is omitted", tu)
+	}
+}
+
+func TestEnrollExplicitUserAlice(t *testing.T) {
+	dbPath := setupDB(t)
+	stdout, stderr, err := runEnroll(t, dbPath, "vm1", "--groups", "infra", "--user", "alice")
+	if err != nil {
+		t.Fatalf("enroll: err=%v stderr=%s", err, stderr)
+	}
+	tok := extractToken(t, stdout, "https://certhold.home.lan")
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer d.Close()
+	_, _, _, tu, err := d.ConsumeToken(context.Background(), tok)
+	if err != nil {
+		t.Fatalf("ConsumeToken: %v", err)
+	}
+	if tu != "alice" {
+		t.Errorf("target_user = %q, want alice", tu)
 	}
 }
 
