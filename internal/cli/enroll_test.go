@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -12,11 +13,12 @@ import (
 
 func runEnroll(t *testing.T, dbPath string, args ...string) (string, string, error) {
 	t.Helper()
+	clearBaseURLEnv(t)
 	cmd := NewRootCmd()
 	var out, errBuf bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&errBuf)
-	full := append([]string{"--db", dbPath, "enroll"}, args...)
+	full := append([]string{"--db", dbPath, "--data-dir", filepath.Dir(dbPath), "enroll"}, args...)
 	cmd.SetArgs(full)
 	err := cmd.ExecuteContext(context.Background())
 	return out.String(), errBuf.String(), err
@@ -33,6 +35,19 @@ func setupDB(t *testing.T) string {
 		t.Fatalf("db.Close: %v", err)
 	}
 	return dbPath
+}
+
+func clearBaseURLEnv(t *testing.T) {
+	t.Helper()
+	prev, had := os.LookupEnv("CERTHOLD_BASE_URL")
+	_ = os.Unsetenv("CERTHOLD_BASE_URL")
+	t.Cleanup(func() {
+		if had {
+			_ = os.Setenv("CERTHOLD_BASE_URL", prev)
+		} else {
+			_ = os.Unsetenv("CERTHOLD_BASE_URL")
+		}
+	})
 }
 
 func extractToken(t *testing.T, stdout, baseURL string) string {
@@ -232,17 +247,90 @@ func TestEnrollEmptyGroups(t *testing.T) {
 }
 
 func TestEnrollBaseURLFlag(t *testing.T) {
+	clearBaseURLEnv(t)
 	dbPath := setupDB(t)
 	cmd := NewRootCmd()
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
-	cmd.SetArgs([]string{"--db", dbPath, "enroll", "vm-base", "--groups", "x", "--base-url", "https://example.test"})
+	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", filepath.Dir(dbPath), "enroll", "vm-base", "--groups", "x", "--base-url", "https://example.test"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("enroll: %v", err)
 	}
 	tok := extractToken(t, out.String(), "https://example.test")
 	if tok == "" {
+		t.Fatal("empty token")
+	}
+}
+
+func TestEnrollBaseURLFromPersistedFile(t *testing.T) {
+	clearBaseURLEnv(t)
+	dbPath := setupDB(t)
+	dataDir := filepath.Dir(dbPath)
+	if err := SaveBaseURL(dataDir, "https://192.168.1.205:8443"); err != nil {
+		t.Fatalf("SaveBaseURL: %v", err)
+	}
+	stdout, stderr, err := runEnroll(t, dbPath, "persisted-vm", "--groups", "infra")
+	if err != nil {
+		t.Fatalf("enroll: err=%v stderr=%s", err, stderr)
+	}
+	if tok := extractToken(t, stdout, "https://192.168.1.205:8443"); tok == "" {
+		t.Fatal("empty token")
+	}
+}
+
+func TestEnrollBaseURLFlagBeatsPersisted(t *testing.T) {
+	clearBaseURLEnv(t)
+	dbPath := setupDB(t)
+	dataDir := filepath.Dir(dbPath)
+	if err := SaveBaseURL(dataDir, "https://192.168.1.205:8443"); err != nil {
+		t.Fatalf("SaveBaseURL: %v", err)
+	}
+	cmd := NewRootCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "enroll", "vm-flag", "--groups", "x", "--base-url", "https://override.local"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	if tok := extractToken(t, out.String(), "https://override.local"); tok == "" {
+		t.Fatal("empty token")
+	}
+}
+
+func TestEnrollBaseURLEnvBeatsPersistedNotFlag(t *testing.T) {
+	clearBaseURLEnv(t)
+	dbPath := setupDB(t)
+	dataDir := filepath.Dir(dbPath)
+	if err := SaveBaseURL(dataDir, "https://192.168.1.205:8443"); err != nil {
+		t.Fatalf("SaveBaseURL: %v", err)
+	}
+	t.Setenv("CERTHOLD_BASE_URL", "http://env.example")
+
+	// env beats persisted
+	cmd := NewRootCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "enroll", "vm-env", "--groups", "x"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	if tok := extractToken(t, out.String(), "http://env.example"); tok == "" {
+		t.Fatal("empty token")
+	}
+
+	// flag beats env
+	cmd2 := NewRootCmd()
+	var out2 bytes.Buffer
+	cmd2.SetOut(&out2)
+	cmd2.SetErr(&out2)
+	cmd2.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "enroll", "vm-flagwins", "--groups", "x", "--base-url", "https://flag.wins"})
+	if err := cmd2.Execute(); err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	if tok := extractToken(t, out2.String(), "https://flag.wins"); tok == "" {
 		t.Fatal("empty token")
 	}
 }

@@ -21,7 +21,7 @@ func TestInit_RootMode_HappyPath(t *testing.T) {
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
-	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", "manager-test", "--mode", "root"})
+	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", "manager-test", "--mode", "root", "--listen-ip", "127.0.0.1", "--no-prompt"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute: %v\nout:\n%s", err, out.String())
 	}
@@ -115,7 +115,7 @@ func TestInit_UserMode_HappyPath(t *testing.T) {
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
-	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", "manager-test", "--user", "alice"})
+	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", "manager-test", "--user", "alice", "--listen-ip", "127.0.0.1", "--no-prompt"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute: %v\nout:\n%s", err, out.String())
 	}
@@ -166,7 +166,7 @@ func TestInit_UserMode_DefaultsToCurrentUser(t *testing.T) {
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
-	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", "manager-test"})
+	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", "manager-test", "--listen-ip", "127.0.0.1", "--no-prompt"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute: %v\nout:\n%s", err, out.String())
 	}
@@ -200,6 +200,48 @@ func TestInit_UserMode_DefaultsToCurrentUser(t *testing.T) {
 	}
 }
 
+func TestInit_PersistsBaseURL(t *testing.T) {
+	dataDir := t.TempDir()
+	dbPath := filepath.Join(dataDir, "state.db")
+
+	cmd := cli.NewRootCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--mode", "root", "--listen-ip", "10.0.0.5", "--port", "9000", "--no-prompt"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v\nout:\n%s", err, out.String())
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dataDir, "base_url"))
+	if err != nil {
+		t.Fatalf("read base_url: %v", err)
+	}
+	if string(raw) != "https://10.0.0.5:9000\n" {
+		t.Errorf("base_url = %q, want %q", raw, "https://10.0.0.5:9000\n")
+	}
+	if !strings.Contains(out.String(), "base url:       https://10.0.0.5:9000") {
+		t.Errorf("summary missing base url line:\n%s", out.String())
+	}
+}
+
+func TestInit_InvalidListenIP(t *testing.T) {
+	dataDir := t.TempDir()
+	dbPath := filepath.Join(dataDir, "state.db")
+
+	cmd := cli.NewRootCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--mode", "root", "--listen-ip", "not-an-ip", "--no-prompt"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected error")
+	}
+	if _, err := os.Stat(dbPath); err == nil {
+		t.Errorf("db should not be created on invalid listen-ip")
+	}
+}
+
 func TestInit_Idempotency(t *testing.T) {
 	dataDir := t.TempDir()
 	dbPath := filepath.Join(dataDir, "state.db")
@@ -209,7 +251,7 @@ func TestInit_Idempotency(t *testing.T) {
 		var out bytes.Buffer
 		cmd.SetOut(&out)
 		cmd.SetErr(&out)
-		cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", "manager-test", "--mode", "root"})
+		cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", "manager-test", "--mode", "root", "--listen-ip", "127.0.0.1", "--no-prompt"})
 		return cmd.Execute()
 	}
 
