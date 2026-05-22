@@ -91,6 +91,21 @@ func (db *DB) SetPeerRevoked(ctx context.Context, name string) error {
 	return nil
 }
 
+func (db *DB) UpdatePeerCertSerial(ctx context.Context, name string, serial uint64) error {
+	res, err := db.sql.ExecContext(ctx, `UPDATE peers SET cert_serial = ? WHERE name = ?`, int64(serial), name)
+	if err != nil {
+		return fmt.Errorf("update peer cert_serial: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update peer cert_serial rows: %w", err)
+	}
+	if n == 0 {
+		return ErrPeerNotFound
+	}
+	return nil
+}
+
 func (db *DB) UpdatePeerLastKRL(ctx context.Context, name string, version int) error {
 	res, err := db.sql.ExecContext(ctx, `UPDATE peers SET last_krl_version = ? WHERE name = ?`, version, name)
 	if err != nil {
