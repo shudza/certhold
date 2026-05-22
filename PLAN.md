@@ -25,7 +25,7 @@ Two components:
 
 ## Modes
 
-**User-mode (default in T15+)** — peers install five files under `~<user>/.ssh/`. A single `cert-authority,principals="..."` line in `authorized_keys` handles inbound access. No sshd config changes; no reloads. No host certs; outbound uses TOFU via per-peer `known_hosts`. Revocation rotates the CA (skipping the revoked peer) since there is no native KRL. Opt out per peer with `--mode root` on `enroll` / `init`.
+**User-mode (default in T15+)** — peers install five files under `~<user>/.ssh/`. A single `cert-authority,principals="..."` line in `authorized_keys` handles inbound access. No sshd config changes; no reloads. No host certs; outbound uses TOFU via per-peer `known_hosts`. Revocation rotates the CA (skipping the revoked peer) since there is no native KRL. The `target_user` is peer-reported at install time (`id -un`) by default; the admin may pin it with `enroll --user <u>`, in which case the install request must match. Opt out per peer with `--mode root` on `enroll` / `init`.
 
 **Root-mode (opt-in via `--mode root`)** — the "Peer file layout (root mode)" below applies. Sentinel-block edits to `/etc/ssh/sshd_config`. Native KRL for revocation. Sshd reload on every change.
 

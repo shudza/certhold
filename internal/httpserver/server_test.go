@@ -359,7 +359,7 @@ func TestEnrollUserMode_Tarball(t *testing.T) {
 	if err := env.db.InsertTokenWithMode(ctx, tok, "vmU", "infra,databases", db.ModeUser, "alice"); err != nil {
 		t.Fatalf("InsertTokenWithMode: %v", err)
 	}
-	resp, err := http.Get(env.srv.URL + "/enroll/" + tok)
+	resp, err := http.Get(env.srv.URL + "/enroll/" + tok + "?user=alice")
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
@@ -416,11 +416,11 @@ func TestEnrollUserMode_Script(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	s := string(body)
 	mustContain := []string{
-		"TARGET_USER=\"bob\"",
-		`getent passwd "$TARGET_USER"`,
+		`TARGET_USER="$(id -un)"`,
+		`USER_HOME="$HOME"`,
+		`mkdir -p "$USER_HOME/.ssh"`,
 		`chmod 700 "$USER_HOME/.ssh"`,
-		`tar -xzC "$USER_HOME/.ssh"`,
-		`chown -R "$TARGET_USER":"$TARGET_USER" "$USER_HOME/.ssh"`,
+		`curl -fsSL ` + env.srv.URL + `/enroll/` + tok + `?user=$TARGET_USER | tar -xzC "$USER_HOME/.ssh"`,
 		`chmod 600 "$USER_HOME/.ssh/id_ed25519"`,
 	}
 	for _, m := range mustContain {
@@ -428,10 +428,190 @@ func TestEnrollUserMode_Script(t *testing.T) {
 			t.Errorf("script missing %q\nfull:\n%s", m, s)
 		}
 	}
-	for _, forbidden := range []string{"systemctl reload sshd", "/etc/ssh/sshd_config", "BEGIN certhold"} {
+	for _, forbidden := range []string{"systemctl reload sshd", "/etc/ssh/sshd_config", "BEGIN certhold", "getent passwd", "chown"} {
 		if strings.Contains(s, forbidden) {
 			t.Errorf("user-mode script should not contain %q\nfull:\n%s", forbidden, s)
 		}
+	}
+}
+
+func TestEnrollUserMode_NoPresetValidQuery(t *testing.T) {
+	env := setupTestEnv(t)
+	ctx := context.Background()
+	const tok = "tok-up-noprese"
+	if err := env.db.InsertTokenWithMode(ctx, tok, "vmNP", "infra", db.ModeUser, ""); err != nil {
+		t.Fatalf("InsertTokenWithMode: %v", err)
+	}
+	resp, err := http.Get(env.srv.URL + "/enroll/" + tok + "?user=alice")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d; body=%s", resp.StatusCode, body)
+	}
+	peer, err := env.db.GetPeer(ctx, "vmNP")
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if peer.TargetUser != "alice" {
+		t.Errorf("peer.TargetUser = %q, want alice", peer.TargetUser)
+	}
+	resp2, err := http.Get(env.srv.URL + "/enroll/" + tok + "?user=alice")
+	if err != nil {
+		t.Fatalf("second GET: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusGone {
+		t.Errorf("second status = %d, want 410", resp2.StatusCode)
+	}
+}
+
+func TestEnrollUserMode_NoPresetMissingQuery(t *testing.T) {
+	env := setupTestEnv(t)
+	ctx := context.Background()
+	const tok = "tok-up-noquery"
+	if err := env.db.InsertTokenWithMode(ctx, tok, "vmNQ", "infra", db.ModeUser, ""); err != nil {
+		t.Fatalf("InsertTokenWithMode: %v", err)
+	}
+	resp, err := http.Get(env.srv.URL + "/enroll/" + tok)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", resp.StatusCode, body)
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if payload["error"] != "user required" {
+		t.Errorf("error = %q, want 'user required'", payload["error"])
+	}
+	resp2, err := http.Get(env.srv.URL + "/enroll/" + tok + "?user=bob")
+	if err != nil {
+		t.Fatalf("retry GET: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp2.Body)
+		t.Fatalf("retry status = %d, want 200; body=%s", resp2.StatusCode, b)
+	}
+}
+
+func TestEnrollUserMode_InvalidQuery(t *testing.T) {
+	env := setupTestEnv(t)
+	ctx := context.Background()
+	const tok = "tok-up-invalid"
+	if err := env.db.InsertTokenWithMode(ctx, tok, "vmIQ", "infra", db.ModeUser, ""); err != nil {
+		t.Fatalf("InsertTokenWithMode: %v", err)
+	}
+	resp, err := http.Get(env.srv.URL + "/enroll/" + tok + "?user=Has%20Space")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+	resp2, err := http.Get(env.srv.URL + "/enroll/" + tok + "?user=alice")
+	if err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp2.Body)
+		t.Fatalf("retry status = %d, want 200; body=%s", resp2.StatusCode, b)
+	}
+}
+
+func TestEnrollUserMode_PresetMatching(t *testing.T) {
+	env := setupTestEnv(t)
+	ctx := context.Background()
+	const tok = "tok-up-match"
+	if err := env.db.InsertTokenWithMode(ctx, tok, "vmM", "infra", db.ModeUser, "bob"); err != nil {
+		t.Fatalf("InsertTokenWithMode: %v", err)
+	}
+	resp, err := http.Get(env.srv.URL + "/enroll/" + tok + "?user=bob")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, b)
+	}
+	peer, err := env.db.GetPeer(ctx, "vmM")
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if peer.TargetUser != "bob" {
+		t.Errorf("peer.TargetUser = %q, want bob", peer.TargetUser)
+	}
+}
+
+func TestEnrollUserMode_PresetMismatch(t *testing.T) {
+	env := setupTestEnv(t)
+	ctx := context.Background()
+	const tok = "tok-up-mismatch"
+	if err := env.db.InsertTokenWithMode(ctx, tok, "vmX", "infra", db.ModeUser, "bob"); err != nil {
+		t.Fatalf("InsertTokenWithMode: %v", err)
+	}
+	resp, err := http.Get(env.srv.URL + "/enroll/" + tok + "?user=eve")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", resp.StatusCode, body)
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if payload["error"] != "user mismatch" {
+		t.Errorf("error = %q, want 'user mismatch'", payload["error"])
+	}
+	resp2, err := http.Get(env.srv.URL + "/enroll/" + tok + "?user=bob")
+	if err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp2.Body)
+		t.Fatalf("retry status = %d, want 200 (token must be preserved on mismatch); body=%s", resp2.StatusCode, b)
+	}
+}
+
+func TestEnrollRootMode_IgnoresUserQuery(t *testing.T) {
+	env := setupTestEnv(t)
+	ctx := context.Background()
+	const tok = "tok-root-userq"
+	if err := env.db.InsertTokenWithMode(ctx, tok, "vmR", "infra", db.ModeRoot, ""); err != nil {
+		t.Fatalf("InsertTokenWithMode: %v", err)
+	}
+	resp, err := http.Get(env.srv.URL + "/enroll/" + tok + "?user=anything")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, b)
+	}
+	peer, err := env.db.GetPeer(ctx, "vmR")
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if peer.Mode != db.ModeRoot {
+		t.Errorf("peer.Mode = %q, want root", peer.Mode)
+	}
+	if peer.TargetUser != "" {
+		t.Errorf("peer.TargetUser = %q, want empty for root mode", peer.TargetUser)
 	}
 }
 
