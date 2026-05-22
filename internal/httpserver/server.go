@@ -58,7 +58,21 @@ func scriptHandler(database *db.DB) func(http.ResponseWriter, *http.Request, str
 			scheme = p
 		}
 		baseURL := fmt.Sprintf("%s://%s", scheme, r.Host)
-		body := fmt.Sprintf("#!/usr/bin/env bash\nset -e\ncurl -fsSL %s/enroll/%s | tar -xzC /\nsystemctl reload sshd\n", baseURL, token)
+		body := fmt.Sprintf(`#!/usr/bin/env bash
+set -e
+
+curl -fsSL %s/enroll/%s | tar -xzC /
+
+sed -i '/^# BEGIN certhold$/,/^# END certhold$/d' /etc/ssh/sshd_config
+cat >> /etc/ssh/sshd_config <<'SSHD_EOF'
+%sSSHD_EOF
+
+sed -i '/^# BEGIN certhold$/,/^# END certhold$/d' /etc/ssh/ssh_config
+cat >> /etc/ssh/ssh_config <<'SSH_EOF'
+%sSSH_EOF
+
+systemctl reload sshd
+`, baseURL, token, peerfiles.SshdBlockContents, peerfiles.SshClientBlockContents)
 		w.Header().Set("Content-Type", "application/x-shellscript; charset=utf-8")
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
 		w.WriteHeader(http.StatusOK)

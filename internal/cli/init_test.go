@@ -77,10 +77,10 @@ func TestInit_HappyPath(t *testing.T) {
 		"etc/ssh/peer_ed25519-cert.pub",
 		"etc/ssh/ca.pub",
 		"etc/ssh/krl",
-		"etc/ssh/sshd_config.d/certhold.conf",
 		"etc/ssh/auth_principals/root",
 		"etc/ssh/ca_known_hosts",
-		"etc/ssh/ssh_config.d/certhold.conf",
+		"etc/ssh/sshd_config_block.conf",
+		"etc/ssh/ssh_config_block.conf",
 	} {
 		if _, err := os.Stat(filepath.Join(selfDir, rel)); err != nil {
 			t.Errorf("missing self file %s: %v", rel, err)

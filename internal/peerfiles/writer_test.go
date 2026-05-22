@@ -3,6 +3,7 @@ package peerfiles
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -14,14 +15,14 @@ func TestWriteSelfFiles_AllEntriesAndModes(t *testing.T) {
 	}
 
 	expected := map[string]os.FileMode{
-		"etc/ssh/peer_ed25519":                0600,
-		"etc/ssh/peer_ed25519-cert.pub":       0644,
-		"etc/ssh/ca.pub":                      0644,
-		"etc/ssh/krl":                         0644,
-		"etc/ssh/sshd_config.d/certhold.conf": 0644,
-		"etc/ssh/auth_principals/root":        0644,
-		"etc/ssh/ca_known_hosts":              0644,
-		"etc/ssh/ssh_config.d/certhold.conf":  0644,
+		"etc/ssh/peer_ed25519":           0600,
+		"etc/ssh/peer_ed25519-cert.pub":  0644,
+		"etc/ssh/ca.pub":                 0644,
+		"etc/ssh/krl":                    0644,
+		"etc/ssh/auth_principals/root":   0644,
+		"etc/ssh/ca_known_hosts":         0644,
+		"etc/ssh/sshd_config_block.conf": 0644,
+		"etc/ssh/ssh_config_block.conf":  0644,
 	}
 
 	for name, mode := range expected {
@@ -34,6 +35,37 @@ func TestWriteSelfFiles_AllEntriesAndModes(t *testing.T) {
 		if st.Mode().Perm() != mode {
 			t.Errorf("%s mode: got %o want %o", name, st.Mode().Perm(), mode)
 		}
+	}
+
+	for _, forbidden := range []string{
+		"etc/ssh/sshd_config.d/certhold.conf",
+		"etc/ssh/ssh_config.d/certhold.conf",
+	} {
+		if _, err := os.Stat(filepath.Join(root, forbidden)); !os.IsNotExist(err) {
+			t.Errorf("forbidden file present: %q (err=%v)", forbidden, err)
+		}
+	}
+
+	sshdBlock, err := os.ReadFile(filepath.Join(root, "etc/ssh/sshd_config_block.conf"))
+	if err != nil {
+		t.Fatalf("read sshd_config_block.conf: %v", err)
+	}
+	if string(sshdBlock) != SshdBlockContents {
+		t.Errorf("sshd_config_block.conf mismatch:\ngot:\n%s\nwant:\n%s", sshdBlock, SshdBlockContents)
+	}
+	if !strings.Contains(string(sshdBlock), "# BEGIN certhold\n") || !strings.Contains(string(sshdBlock), "\n# END certhold\n") {
+		t.Errorf("sshd_config_block.conf missing sentinels: %q", sshdBlock)
+	}
+
+	sshBlock, err := os.ReadFile(filepath.Join(root, "etc/ssh/ssh_config_block.conf"))
+	if err != nil {
+		t.Fatalf("read ssh_config_block.conf: %v", err)
+	}
+	if string(sshBlock) != SshClientBlockContents {
+		t.Errorf("ssh_config_block.conf mismatch:\ngot:\n%s\nwant:\n%s", sshBlock, SshClientBlockContents)
+	}
+	if !strings.Contains(string(sshBlock), "# BEGIN certhold\n") || !strings.Contains(string(sshBlock), "\n# END certhold\n") {
+		t.Errorf("ssh_config_block.conf missing sentinels: %q", sshBlock)
 	}
 
 	rootStat, err := os.Stat(root)
