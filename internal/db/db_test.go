@@ -278,6 +278,34 @@ func TestInsertConsumeToken(t *testing.T) {
 	}
 }
 
+func TestLookupToken(t *testing.T) {
+	ctx := t.Context()
+	d := newTestDB(t)
+	if _, _, _, err := d.LookupToken(ctx, "missing"); !errors.Is(err, ErrTokenNotFound) {
+		t.Errorf("missing: %v", err)
+	}
+	if err := d.InsertToken(ctx, "tokL", "peerL", "g1,g2"); err != nil {
+		t.Fatalf("InsertToken: %v", err)
+	}
+	peer, groups, consumed, err := d.LookupToken(ctx, "tokL")
+	if err != nil {
+		t.Fatalf("LookupToken unconsumed: %v", err)
+	}
+	if peer != "peerL" || groups != "g1,g2" || consumed {
+		t.Errorf("got peer=%q groups=%q consumed=%v", peer, groups, consumed)
+	}
+	if _, _, err := d.ConsumeToken(ctx, "tokL"); err != nil {
+		t.Fatalf("ConsumeToken: %v", err)
+	}
+	peer, groups, consumed, err = d.LookupToken(ctx, "tokL")
+	if err != nil {
+		t.Fatalf("LookupToken consumed: %v", err)
+	}
+	if peer != "peerL" || groups != "g1,g2" || !consumed {
+		t.Errorf("after consume got peer=%q groups=%q consumed=%v", peer, groups, consumed)
+	}
+}
+
 func TestConsumeTokenRace(t *testing.T) {
 	ctx := t.Context()
 	d := newTestDB(t)

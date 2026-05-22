@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -77,9 +76,7 @@ func newEnrollCmd() *cobra.Command {
 				return err
 			}
 
-			payload := fmt.Sprintf("#!/usr/bin/env bash\nset -e\ncurl -fsSL %s/enroll/%s | tar -xzC /\nsystemctl reload sshd\n", baseURL, tok)
-			encoded := base64.StdEncoding.EncodeToString([]byte(payload))
-			fmt.Fprintf(cmd.OutOrStdout(), "echo \"%s\" | base64 -d | bash\n", encoded)
+			fmt.Fprintf(cmd.OutOrStdout(), "curl -fsSL %s/enroll/%s.sh | bash\n", baseURL, tok)
 			return nil
 		},
 	}

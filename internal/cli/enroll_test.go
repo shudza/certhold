@@ -3,7 +3,6 @@ package cli
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -36,35 +35,32 @@ func setupDB(t *testing.T) string {
 	return dbPath
 }
 
+func extractToken(t *testing.T, stdout, baseURL string) string {
+	t.Helper()
+	line := strings.TrimRight(stdout, "\n")
+	prefix := "curl -fsSL " + baseURL + "/enroll/"
+	suffix := ".sh | bash"
+	if !strings.HasPrefix(line, prefix) {
+		t.Fatalf("output prefix mismatch: %q (want %q)", line, prefix)
+	}
+	if !strings.HasSuffix(line, suffix) {
+		t.Fatalf("output suffix mismatch: %q (want %q)", line, suffix)
+	}
+	if strings.Count(stdout, "\n") != 1 {
+		t.Fatalf("expected exactly one trailing newline, got %d", strings.Count(stdout, "\n"))
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(line, prefix), suffix)
+}
+
 func TestEnrollSuccess(t *testing.T) {
 	dbPath := setupDB(t)
 	stdout, stderr, err := runEnroll(t, dbPath, "new-vm", "--groups", "a,b")
 	if err != nil {
 		t.Fatalf("enroll: err=%v stderr=%s", err, stderr)
 	}
-
-	line := strings.TrimRight(stdout, "\n")
-	if !strings.HasPrefix(line, `echo "`) {
-		t.Fatalf("output should start with echo \": %q", line)
-	}
-	if !strings.HasSuffix(line, `" | base64 -d | bash`) {
-		t.Fatalf(`output should end with " | base64 -d | bash: %q`, line)
-	}
-	if strings.Count(stdout, "\n") != 1 {
-		t.Fatalf("expected exactly one trailing newline, got %d", strings.Count(stdout, "\n"))
-	}
-
-	encoded := strings.TrimSuffix(strings.TrimPrefix(line, `echo "`), `" | base64 -d | bash`)
-	decoded, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil {
-		t.Fatalf("decode base64: %v", err)
-	}
-	script := string(decoded)
-	if !strings.Contains(script, "tar -xzC /") {
-		t.Errorf("script missing tar -xzC /: %q", script)
-	}
-	if !strings.Contains(script, "/enroll/") {
-		t.Errorf("script missing /enroll/<token>: %q", script)
+	tok := extractToken(t, stdout, "https://certhold.home.lan")
+	if tok == "" {
+		t.Fatal("empty token")
 	}
 
 	d, err := db.Open(dbPath)
@@ -72,17 +68,6 @@ func TestEnrollSuccess(t *testing.T) {
 		t.Fatalf("reopen db: %v", err)
 	}
 	defer d.Close()
-
-	startIdx := strings.Index(script, "/enroll/")
-	rest := script[startIdx+len("/enroll/"):]
-	endIdx := strings.IndexAny(rest, " \t\n|")
-	if endIdx < 0 {
-		t.Fatalf("could not isolate token in script: %q", script)
-	}
-	tok := rest[:endIdx]
-	if tok == "" {
-		t.Fatalf("empty token in script")
-	}
 
 	peer, groups, err := d.ConsumeToken(context.Background(), tok)
 	if err != nil {
@@ -120,17 +105,7 @@ func TestEnrollGroupsDedupeAndTrim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enroll: err=%v stderr=%s", err, stderr)
 	}
-	line := strings.TrimRight(stdout, "\n")
-	encoded := strings.TrimSuffix(strings.TrimPrefix(line, `echo "`), `" | base64 -d | bash`)
-	decoded, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil {
-		t.Fatalf("decode base64: %v", err)
-	}
-	script := string(decoded)
-	startIdx := strings.Index(script, "/enroll/")
-	rest := script[startIdx+len("/enroll/"):]
-	endIdx := strings.IndexAny(rest, " \t\n|")
-	tok := rest[:endIdx]
+	tok := extractToken(t, stdout, "https://certhold.home.lan")
 
 	d, err := db.Open(dbPath)
 	if err != nil {
@@ -163,13 +138,8 @@ func TestEnrollBaseURLFlag(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("enroll: %v", err)
 	}
-	line := strings.TrimRight(out.String(), "\n")
-	encoded := strings.TrimSuffix(strings.TrimPrefix(line, `echo "`), `" | base64 -d | bash`)
-	decoded, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if !strings.Contains(string(decoded), "https://example.test/enroll/") {
-		t.Errorf("script does not use base-url: %q", string(decoded))
+	tok := extractToken(t, out.String(), "https://example.test")
+	if tok == "" {
+		t.Fatal("empty token")
 	}
 }

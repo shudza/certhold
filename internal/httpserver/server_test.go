@@ -239,6 +239,88 @@ func TestEnrollUnknownToken(t *testing.T) {
 	}
 }
 
+func TestEnrollScriptSuccess(t *testing.T) {
+	env := setupTestEnv(t)
+	ctx := context.Background()
+
+	const tok = "tok-script-ok"
+	if err := env.db.InsertToken(ctx, tok, "vmS", "infra"); err != nil {
+		t.Fatalf("InsertToken: %v", err)
+	}
+
+	resp, err := http.Get(env.srv.URL + "/enroll/" + tok + ".sh")
+	if err != nil {
+		t.Fatalf("GET .sh: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/x-shellscript; charset=utf-8" {
+		t.Errorf("Content-Type = %q", ct)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	want := "#!/usr/bin/env bash\nset -e\ncurl -fsSL " + env.srv.URL + "/enroll/" + tok + " | tar -xzC /\nsystemctl reload sshd\n"
+	if string(body) != want {
+		t.Errorf("body mismatch:\n got: %q\nwant: %q", body, want)
+	}
+
+	resp2, err := http.Get(env.srv.URL + "/enroll/" + tok)
+	if err != nil {
+		t.Fatalf("GET tarball: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp2.Body)
+		t.Fatalf("tarball status = %d after .sh fetch, want 200; body=%s", resp2.StatusCode, b)
+	}
+}
+
+func TestEnrollScriptUnknownToken(t *testing.T) {
+	env := setupTestEnv(t)
+	resp, err := http.Get(env.srv.URL + "/enroll/nope.sh")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		body, _ := io.ReadAll(resp.Body)
+		t.Errorf("status = %d, want 404; body=%s", resp.StatusCode, body)
+	}
+}
+
+func TestEnrollScriptConsumedToken(t *testing.T) {
+	env := setupTestEnv(t)
+	ctx := context.Background()
+	const tok = "tok-script-consumed"
+	if err := env.db.InsertToken(ctx, tok, "vmSC", "infra"); err != nil {
+		t.Fatalf("InsertToken: %v", err)
+	}
+	resp1, err := http.Get(env.srv.URL + "/enroll/" + tok)
+	if err != nil {
+		t.Fatalf("GET tarball: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp1.Body)
+	resp1.Body.Close()
+	if resp1.StatusCode != http.StatusOK {
+		t.Fatalf("tarball status = %d, want 200", resp1.StatusCode)
+	}
+
+	resp2, err := http.Get(env.srv.URL + "/enroll/" + tok + ".sh")
+	if err != nil {
+		t.Fatalf("GET .sh: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusGone {
+		body, _ := io.ReadAll(resp2.Body)
+		t.Errorf("status = %d, want 410; body=%s", resp2.StatusCode, body)
+	}
+}
+
 func TestEnrollMethodNotAllowed(t *testing.T) {
 	env := setupTestEnv(t)
 	req, err := http.NewRequest(http.MethodPost, env.srv.URL+"/enroll/whatever", nil)
