@@ -14,6 +14,12 @@ import (
 	"github.com/shudza/certhold/internal/sshpush"
 )
 
+const (
+	expectedSelfCertRel       = "self/etc/ssh/peer_ed25519-cert.pub"
+	expectedSelfKeyRel        = "self/etc/ssh/peer_ed25519"
+	expectedSelfKnownHostsRel = "self/etc/ssh/ca_known_hosts"
+)
+
 type fakePushCall struct {
 	op      string
 	path    string
@@ -70,6 +76,18 @@ func installFakePusher(t *testing.T) *fakePusher {
 	fp := &fakePusher{}
 	prev := groupDial
 	groupDial = func(ctx context.Context, host string, opts sshpush.Options) (sshpush.Pusher, error) {
+		return fp, nil
+	}
+	t.Cleanup(func() { groupDial = prev })
+	return fp
+}
+
+func installFakePusherCapturingOpts(t *testing.T, capturedOpts *sshpush.Options) *fakePusher {
+	t.Helper()
+	fp := &fakePusher{}
+	prev := groupDial
+	groupDial = func(ctx context.Context, host string, opts sshpush.Options) (sshpush.Pusher, error) {
+		*capturedOpts = opts
 		return fp, nil
 	}
 	t.Cleanup(func() { groupDial = prev })
@@ -250,6 +268,36 @@ func TestGroupAllowMissingPeer(t *testing.T) {
 
 	if _, err := runGroupCmd(t, dbPath, "allow", "g", "--on", "missing"); err == nil {
 		t.Fatal("expected error for missing peer")
+	}
+}
+
+func TestGroupSSHOptionsPathsMatchInitLayout(t *testing.T) {
+	dbPath := seedGroupDB(t, nil)
+	var captured sshpush.Options
+	installFakePusherCapturingOpts(t, &captured)
+
+	dataDir := t.TempDir()
+	root := NewRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "group", "allow", "g", "--on", "peer1"})
+	if err := root.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("allow: err=%v out=%s", err, out.String())
+	}
+
+	wantCert := filepath.Join(dataDir, expectedSelfCertRel)
+	wantKey := filepath.Join(dataDir, expectedSelfKeyRel)
+	wantKH := filepath.Join(dataDir, expectedSelfKnownHostsRel)
+
+	if captured.CertPath != wantCert {
+		t.Errorf("CertPath = %q, want %q", captured.CertPath, wantCert)
+	}
+	if captured.KeyPath != wantKey {
+		t.Errorf("KeyPath = %q, want %q", captured.KeyPath, wantKey)
+	}
+	if captured.KnownHostsPath != wantKH {
+		t.Errorf("KnownHostsPath = %q, want %q", captured.KnownHostsPath, wantKH)
 	}
 }
 

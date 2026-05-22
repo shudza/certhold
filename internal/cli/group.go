@@ -132,11 +132,11 @@ func runGroupAction(cmd *cobra.Command, group string, allow bool) error {
 
 	content := renderAuthPrincipalsRoot(current)
 
-	selfDir := filepath.Join(dataDir, "self")
+	selfSSHDir := filepath.Join(dataDir, "self", "etc", "ssh")
 	opts := sshpush.Options{
-		CertPath:       filepath.Join(selfDir, "id_ed25519-cert.pub"),
-		KeyPath:        filepath.Join(selfDir, "id_ed25519"),
-		KnownHostsPath: filepath.Join(selfDir, "known_hosts"),
+		CertPath:       filepath.Join(selfSSHDir, "peer_ed25519-cert.pub"),
+		KeyPath:        filepath.Join(selfSSHDir, "peer_ed25519"),
+		KnownHostsPath: filepath.Join(selfSSHDir, "ca_known_hosts"),
 		User:           "root",
 	}
 	pusher, err := groupDial(ctx, host, opts)
