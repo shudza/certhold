@@ -1,0 +1,242 @@
+// Package sshpush pushes peer config changes over SSH using certhold's own peer cert.
+//
+// Certhold has no bespoke transport: every state change is delivered by
+// SSHing into the target peer with certhold's CA-signed cert, writing files
+// to a staging path, atomically renaming them into place, then reloading
+// sshd. Client wraps a single live ssh.Client and exposes the operations
+// needed by higher-level orchestration (T10–T13).
+package sshpush
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"strings"
+	"sync"
+
+	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
+)
+
+type Options struct {
+	CertPath       string
+	KeyPath        string
+	KnownHostsPath string
+	User           string
+}
+
+type Client struct {
+	mu     sync.Mutex
+	client *ssh.Client
+	closed bool
+}
+
+func Dial(ctx context.Context, host string, opts Options) (*Client, error) {
+	keyBytes, err := os.ReadFile(opts.KeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("read key %s: %w", opts.KeyPath, err)
+	}
+	rawKey, err := ssh.ParseRawPrivateKey(keyBytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse private key %s: %w", opts.KeyPath, err)
+	}
+	signer, err := ssh.NewSignerFromKey(rawKey)
+	if err != nil {
+		return nil, fmt.Errorf("new signer: %w", err)
+	}
+	certBytes, err := os.ReadFile(opts.CertPath)
+	if err != nil {
+		return nil, fmt.Errorf("read cert %s: %w", opts.CertPath, err)
+	}
+	pk, _, _, _, err := ssh.ParseAuthorizedKey(certBytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse cert %s: %w", opts.CertPath, err)
+	}
+	cert, ok := pk.(*ssh.Certificate)
+	if !ok {
+		return nil, fmt.Errorf("file %s does not contain an ssh certificate (got %T)", opts.CertPath, pk)
+	}
+	certSigner, err := ssh.NewCertSigner(cert, signer)
+	if err != nil {
+		return nil, fmt.Errorf("new cert signer: %w", err)
+	}
+	hkCallback, err := knownhosts.New(opts.KnownHostsPath)
+	if err != nil {
+		return nil, fmt.Errorf("load known_hosts %s: %w", opts.KnownHostsPath, err)
+	}
+	user := opts.User
+	if user == "" {
+		user = "root"
+	}
+	addr := host
+	if !strings.Contains(addr, ":") {
+		addr += ":22"
+	}
+	cfg := &ssh.ClientConfig{
+		User:            user,
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(certSigner)},
+		HostKeyCallback: hkCallback,
+	}
+	dialer := &dialFn{ctx: ctx, addr: addr, cfg: cfg}
+	sshClient, err := dialer.dial()
+	if err != nil {
+		return nil, fmt.Errorf("ssh dial %s: %w", addr, err)
+	}
+	return &Client{client: sshClient}, nil
+}
+
+type dialFn struct {
+	ctx  context.Context
+	addr string
+	cfg  *ssh.ClientConfig
+}
+
+func (d *dialFn) dial() (*ssh.Client, error) {
+	type result struct {
+		c   *ssh.Client
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		c, err := ssh.Dial("tcp", d.addr, d.cfg)
+		ch <- result{c, err}
+	}()
+	select {
+	case <-d.ctx.Done():
+		return nil, d.ctx.Err()
+	case r := <-ch:
+		return r.c, r.err
+	}
+}
+
+func (c *Client) WriteFileAtomic(ctx context.Context, remotePath string, content []byte, mode fs.FileMode) error {
+	c.mu.Lock()
+	cl := c.client
+	c.mu.Unlock()
+	if cl == nil {
+		return errors.New("sshpush: client is closed")
+	}
+	staging := remotePath + ".staging"
+	octMode := fmt.Sprintf("%o", mode.Perm())
+	writeCmd := fmt.Sprintf("cat > %s && chmod %s %s", shellQuote(staging), octMode, shellQuote(staging))
+	if err := runWithStdin(ctx, cl, writeCmd, content); err != nil {
+		_ = bestEffortRemove(cl, staging)
+		return fmt.Errorf("write staging %s: %w", staging, err)
+	}
+	moveCmd := fmt.Sprintf("mv -f %s %s", shellQuote(staging), shellQuote(remotePath))
+	if err := runSimple(ctx, cl, moveCmd); err != nil {
+		_ = bestEffortRemove(cl, staging)
+		return fmt.Errorf("rename staging %s -> %s: %w", staging, remotePath, err)
+	}
+	return nil
+}
+
+func (c *Client) ReloadSSHD(ctx context.Context) error {
+	c.mu.Lock()
+	cl := c.client
+	c.mu.Unlock()
+	if cl == nil {
+		return errors.New("sshpush: client is closed")
+	}
+	return runSimple(ctx, cl, "systemctl reload sshd")
+}
+
+func (c *Client) VerifyHealth(ctx context.Context) error {
+	c.mu.Lock()
+	cl := c.client
+	c.mu.Unlock()
+	if cl == nil {
+		return errors.New("sshpush: client is closed")
+	}
+	return runSimple(ctx, cl, "true")
+}
+
+func (c *Client) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed || c.client == nil {
+		c.closed = true
+		return nil
+	}
+	c.closed = true
+	cl := c.client
+	c.client = nil
+	return cl.Close()
+}
+
+func runSimple(ctx context.Context, cl *ssh.Client, cmd string) error {
+	sess, err := cl.NewSession()
+	if err != nil {
+		return fmt.Errorf("new session: %w", err)
+	}
+	defer sess.Close()
+	done := make(chan error, 1)
+	go func() { done <- sess.Run(cmd) }()
+	select {
+	case <-ctx.Done():
+		_ = sess.Signal(ssh.SIGKILL)
+		_ = sess.Close()
+		return ctx.Err()
+	case err := <-done:
+		if err != nil {
+			return fmt.Errorf("run %q: %w", cmd, err)
+		}
+		return nil
+	}
+}
+
+func runWithStdin(ctx context.Context, cl *ssh.Client, cmd string, stdin []byte) error {
+	sess, err := cl.NewSession()
+	if err != nil {
+		return fmt.Errorf("new session: %w", err)
+	}
+	defer sess.Close()
+	stdinPipe, err := sess.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("stdin pipe: %w", err)
+	}
+	if err := sess.Start(cmd); err != nil {
+		return fmt.Errorf("start %q: %w", cmd, err)
+	}
+	writeErr := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(stdinPipe, bytes.NewReader(stdin))
+		closeErr := stdinPipe.Close()
+		if err != nil {
+			writeErr <- err
+			return
+		}
+		writeErr <- closeErr
+	}()
+	done := make(chan error, 1)
+	go func() { done <- sess.Wait() }()
+	select {
+	case <-ctx.Done():
+		_ = sess.Signal(ssh.SIGKILL)
+		_ = sess.Close()
+		return ctx.Err()
+	case err := <-done:
+		<-writeErr
+		if err != nil {
+			return fmt.Errorf("run %q: %w", cmd, err)
+		}
+		return nil
+	}
+}
+
+func bestEffortRemove(cl *ssh.Client, path string) error {
+	sess, err := cl.NewSession()
+	if err != nil {
+		return err
+	}
+	defer sess.Close()
+	return sess.Run(fmt.Sprintf("rm -f %s", shellQuote(path)))
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
