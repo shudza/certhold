@@ -278,7 +278,7 @@ func TestEnrollScriptSuccess(t *testing.T) {
 	mustContain := []string{
 		"#!/usr/bin/env bash",
 		"set -e",
-		"curl -fsSL " + env.srv.URL + "/enroll/" + tok + " | tar -xzC /",
+		"curl -kfsSL " + env.srv.URL + "/enroll/" + tok + " | tar -xzC /",
 		"sed -i '/^# BEGIN certhold$/,/^# END certhold$/d' /etc/ssh/sshd_config",
 		"cat >> /etc/ssh/sshd_config <<'SSHD_EOF'",
 		"# BEGIN certhold",
@@ -420,7 +420,7 @@ func TestEnrollUserMode_Script(t *testing.T) {
 		`USER_HOME="$HOME"`,
 		`mkdir -p "$USER_HOME/.ssh"`,
 		`chmod 700 "$USER_HOME/.ssh"`,
-		`curl -fsSL ` + env.srv.URL + `/enroll/` + tok + `?user=$TARGET_USER | tar -xzC "$USER_HOME/.ssh"`,
+		`curl -kfsSL ` + env.srv.URL + `/enroll/` + tok + `?user=$TARGET_USER | tar -xzC "$USER_HOME/.ssh"`,
 		`chmod 600 "$USER_HOME/.ssh/id_ed25519"`,
 	}
 	for _, m := range mustContain {

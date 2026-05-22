@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -22,12 +23,12 @@ import (
 func newServeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "serve",
-		Short: "Run the HTTP enroll endpoint",
+		Short: "Run the HTTPS enroll endpoint",
 		RunE:  runServe,
 	}
 	cmd.Flags().String("addr", ":8443", "address to listen on")
-	cmd.Flags().String("tls-cert", "", "path to TLS certificate (optional)")
-	cmd.Flags().String("tls-key", "", "path to TLS key (optional)")
+	cmd.Flags().String("tls-cert", "", "path to TLS certificate (optional; if unset, a self-signed cert is generated)")
+	cmd.Flags().String("tls-key", "", "path to TLS key (optional; if unset, a self-signed cert is generated)")
 	cmd.Flags().String("hostname", "", "hostname for the ca_known_hosts entry (default: os.Hostname())")
 	return cmd
 }
@@ -44,6 +45,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 	tlsKey, err := cmd.Flags().GetString("tls-key")
 	if err != nil {
 		return err
+	}
+	if (tlsCert == "") != (tlsKey == "") {
+		return errors.New("--tls-cert and --tls-key must be provided together")
 	}
 	hostname, err := cmd.Flags().GetString("hostname")
 	if err != nil {
@@ -91,11 +95,28 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 
 	out := cmd.OutOrStdout()
-	scheme := "http"
+
+	var (
+		useExplicit  bool
+		selfSignedFP string
+	)
 	if tlsCert != "" && tlsKey != "" {
-		scheme = "https"
+		useExplicit = true
+		fmt.Fprintf(out, "certhold serve listening (TLS) on https://%s\n", listener.Addr().String())
+	} else {
+		cert, der, err := generateSelfSigned(addr)
+		if err != nil {
+			_ = listener.Close()
+			return fmt.Errorf("generate self-signed cert: %w", err)
+		}
+		srv.TLSConfig = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   defaultTLSMinVersion,
+		}
+		selfSignedFP = certFingerprint(der)
+		fmt.Fprintf(out, "certhold serve listening (TLS, self-signed) on https://%s\n", listener.Addr().String())
+		fmt.Fprintf(out, "cert SHA256: %s\n", selfSignedFP)
 	}
-	fmt.Fprintf(out, "certhold serve listening on %s://%s\n", scheme, listener.Addr().String())
 
 	ctx := cmd.Context()
 	if ctx == nil {
@@ -107,10 +128,10 @@ func runServe(cmd *cobra.Command, args []string) error {
 	errCh := make(chan error, 1)
 	go func() {
 		var serveErr error
-		if tlsCert != "" && tlsKey != "" {
+		if useExplicit {
 			serveErr = srv.ServeTLS(listener, tlsCert, tlsKey)
 		} else {
-			serveErr = srv.Serve(listener)
+			serveErr = srv.ServeTLS(listener, "", "")
 		}
 		errCh <- serveErr
 	}()

@@ -26,13 +26,15 @@ On the manager box (one-time setup):
 ```bash
 certhold init                                    # default: user-mode, --user root
 certhold serve --addr :8443                      # leave running (systemd unit recommended)
+# certhold serve listening (TLS, self-signed) on https://[::]:8443
+# cert SHA256: SHA256:abc...
 ```
 
 Onboard a peer (run on the manager):
 
 ```bash
 certhold enroll new-vm --groups infra,databases
-# prints: curl -fsSL https://certhold.home.lan/enroll/<token>.sh | bash
+# prints: curl -kfsSL https://certhold.home.lan/enroll/<token>.sh | bash
 ```
 
 Paste that one-liner on the new peer as the user that should own certhold's SSH files (often a regular user; use `sudo -i` first if you want it owned by root). The install script computes `id -un` at runtime and reports it to the manager, then untars five files into `$HOME/.ssh/`. No `chown`, no root required. No sshd reload; the next inbound SSH connection from another peer matches the new `authorized_keys` line.
@@ -93,7 +95,7 @@ certhold init [--hostname <name>] [--mode user|root] [--user <name>]
 
 ### `certhold serve`
 
-Run the HTTP enrollment endpoint.
+Run the HTTPS enrollment endpoint.
 
 ```
 certhold serve [--addr :8443] [--tls-cert FILE --tls-key FILE] [--hostname <name>]
@@ -103,6 +105,7 @@ certhold serve [--addr :8443] [--tls-cert FILE --tls-key FILE] [--hostname <name
   - `GET /enroll/<token>.sh` — returns the install bash script (does **not** consume the token).
   - `GET /enroll/<token>` — returns a gzipped tarball with all peer files; consumes the token.
 - Mode-aware: user-mode tokens return a 5-file tarball + `getent`/`chown` script; root-mode tokens return the 6-file tarball + sentinel-block edit script.
+- By default, serves over HTTPS with a freshly-generated in-memory self-signed cert. The certificate's SHA-256 fingerprint is printed at startup so you can pin it out-of-band. Pass `--tls-cert`/`--tls-key` together to use your own cert (e.g. from Let's Encrypt or a private CA); passing only one errors out. Plain HTTP is not supported — the install script trusts the cert via `curl -k` because the enrollment token is the real auth.
 
 ### `certhold enroll`
 

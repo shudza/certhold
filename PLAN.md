@@ -286,4 +286,4 @@ After step 1 you have a usable demo. After step 4 it's usable for daily homelab 
 - **CA operations**: shell out to `ssh-keygen` for cert signing. It's the reference implementation, well-tested, and avoids reimplementing OpenSSH's cert format in Go.
 - **Database**: sqlite via `mattn/go-sqlite3` or `modernc.org/sqlite` (pure Go, no cgo).
 - **HTTP**: stdlib `net/http`. One endpoint, no framework needed.
-- **TLS for the enroll endpoint**: self-signed cert is fine for v1 since the onboarding command can pin the fingerprint. Or skip TLS entirely and rely on the home network being trusted — the enroll token is the actual auth.
+- **TLS for the enroll endpoint**: self-signed cert is fine for v1 since the onboarding command can pin the fingerprint. Or skip TLS entirely and rely on the home network being trusted — the enroll token is the actual auth. **Implemented (T17)**: `serve` defaults to HTTPS with an auto-generated in-memory ed25519 self-signed cert; the SHA-256 fingerprint is printed at startup and the install one-liner uses `curl -k` to accept it.

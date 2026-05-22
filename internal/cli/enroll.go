@@ -91,7 +91,7 @@ func newEnrollCmd() *cobra.Command {
 				return err
 			}
 
-			fmt.Fprintf(cmd.OutOrStdout(), "curl -fsSL %s/enroll/%s.sh | bash\n", baseURL, tok)
+			fmt.Fprintf(cmd.OutOrStdout(), "curl -kfsSL %s/enroll/%s.sh | bash\n", baseURL, tok)
 			return nil
 		},
 	}
