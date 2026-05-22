@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -154,6 +155,48 @@ func TestInit_UserMode_HappyPath(t *testing.T) {
 	}
 	if !strings.HasPrefix(string(ak), `cert-authority,principals="manager" `) {
 		t.Errorf("authorized_keys = %q, expected to start with principals=\"manager\"", ak)
+	}
+}
+
+func TestInit_UserMode_DefaultsToCurrentUser(t *testing.T) {
+	dataDir := t.TempDir()
+	dbPath := filepath.Join(dataDir, "state.db")
+
+	cmd := cli.NewRootCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", "manager-test"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v\nout:\n%s", err, out.String())
+	}
+
+	cur, err := user.Current()
+	if err != nil {
+		t.Fatalf("user.Current: %v", err)
+	}
+	want := cur.Username
+
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer database.Close()
+	p, err := database.GetPeer(context.Background(), "manager-test")
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if p.Mode != db.ModeUser || p.TargetUser != want {
+		t.Errorf("got mode=%q tu=%q, want user/%s", p.Mode, p.TargetUser, want)
+	}
+
+	homeRel := "home/" + want
+	if want == "root" {
+		homeRel = "root"
+	}
+	wantSSH := filepath.Join(dataDir, "self", homeRel, ".ssh", "id_ed25519")
+	if _, err := os.Stat(wantSSH); err != nil {
+		t.Errorf("expected self file at %s: %v", wantSSH, err)
 	}
 }
 

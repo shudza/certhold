@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 
@@ -52,6 +53,8 @@ func newInitCmd() *cobra.Command {
 			}
 			if mode == db.ModeRoot {
 				targetUser = ""
+			} else if !cmd.Flags().Changed("user") {
+				targetUser = currentUsername()
 			}
 
 			dataDir = expandHome(dataDir)
@@ -153,8 +156,20 @@ func newInitCmd() *cobra.Command {
 	}
 	cmd.Flags().String("hostname", "", "hostname to use as the certhold peer name (default: os.Hostname())")
 	cmd.Flags().String("mode", db.ModeUser, "install mode for the manager's own self files: 'user' (default) or 'root'")
-	cmd.Flags().String("user", "root", "Unix user that owns the manager's ~/.ssh files (only meaningful when --mode=user)")
+	cmd.Flags().String("user", "root", "Unix user that owns the manager's ~/.ssh files (defaults to the OS user running certhold when --mode=user; only meaningful in user mode)")
 	return cmd
+}
+
+func currentUsername() string {
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		return u.Username
+	}
+	for _, env := range []string{"USER", "LOGNAME"} {
+		if v := os.Getenv(env); v != "" {
+			return v
+		}
+	}
+	return "root"
 }
 
 func expandHome(p string) string {

@@ -176,3 +176,18 @@ func TestWriteUserSelfFiles(t *testing.T) {
 		t.Errorf("authorized_keys prefix wrong: %q", ak)
 	}
 }
+
+func TestWriteUserSelfFilesRootGoesUnderRoot(t *testing.T) {
+	dir := t.TempDir()
+	in := sampleUserInputs()
+	in.TargetUser = "root"
+	if err := WriteUserSelfFiles(dir, in); err != nil {
+		t.Fatalf("WriteUserSelfFiles: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "root", ".ssh", "id_ed25519")); err != nil {
+		t.Errorf("expected files under <dir>/root/.ssh/ for target_user=root: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "home", "root", ".ssh", "id_ed25519")); err == nil {
+		t.Errorf("must not write under <dir>/home/root/.ssh/ for target_user=root")
+	}
+}

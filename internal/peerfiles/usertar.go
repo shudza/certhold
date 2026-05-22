@@ -77,8 +77,10 @@ func BuildUser(p UserPeerFiles) ([]byte, error) {
 }
 
 // WriteUserSelfFiles writes the same five files as BuildUser into
-// <dir>/home/<target_user>/.ssh/, mirroring the on-disk layout the admin would
-// see after running the user-mode install script.
+// <dir>/<HomeOf(target_user)>/.ssh/ (e.g. <dir>/root/.ssh/ for root,
+// <dir>/home/alice/.ssh/ for alice). The leading slash from HomeOf is stripped
+// so the result mirrors the on-disk layout the admin would see after running
+// the user-mode install script: `cp -r <dir>/. /` copies straight into place.
 func WriteUserSelfFiles(dir string, p UserPeerFiles) error {
 	if p.TargetUser == "" {
 		return fmt.Errorf("target user is empty")
@@ -86,7 +88,8 @@ func WriteUserSelfFiles(dir string, p UserPeerFiles) error {
 	authKeys := buildAuthorizedKeysLine(p.CAPub, p.Principals)
 	knownHosts := buildKnownHosts(p.KnownHostsLines)
 
-	base := filepath.Join(dir, "home", p.TargetUser, ".ssh")
+	homeRel := strings.TrimPrefix(HomeOf(p.TargetUser), "/")
+	base := filepath.Join(dir, homeRel, ".ssh")
 	if err := os.MkdirAll(base, 0700); err != nil {
 		return fmt.Errorf("mkdir %s: %w", base, err)
 	}

@@ -38,51 +38,6 @@ Two things exist in the system: **certhold** (a Go binary on one machine) and **
 
 Trust flows one way: every peer trusts certs signed by the CA. Certhold itself is a peer (it self-enrols at `init`) holding a cert with a privileged `manager` principal that every peer accepts as root. All push operations use this cert.
 
-### Onboarding
-
-Two commands, one paste:
-
-```
-┌──────────────┐     1. enroll vm1 --groups infra            ┌──────────────┐
-│              │ ─────────────────────────────────────────►  │              │
-│    admin     │                                             │  certhold    │
-│              │ ◄─────────────────────────────────────────  │              │
-└──────┬───────┘     2. prints: curl …/<token>.sh | bash     └──────────────┘
-       │                                                            ▲
-       │  3. paste                                                  │
-       ▼                                                            │
-┌──────────────┐                                                    │
-│              │  4. GET /enroll/<token>.sh   ─────────────►        │
-│   new peer   │  5. GET /enroll/<token>      ─────────────►        │
-│              │  6. ◄── gzipped tarball of peer files ─────────────┘
-└──────────────┘
-       │
-       └── tar -xzC /  +  systemctl reload sshd   →  peer is online
-```
-
-Token is single-use. The tarball contains a fresh CA-signed cert, the CA pubkey, an empty KRL, and `sshd_config.d/certhold.conf` wiring everything together. Certhold never touches the peer again unless its membership or access changes.
-
-### State changes — push, never poll
-
-```
-        certhold (manager principal)
-              │
-              │ ssh root@peer  (auth via CA-signed cert)
-              ▼
-        write to /etc/ssh/foo.staging
-              │
-              ▼
-        mv -f foo.staging foo
-              │
-              ▼
-        systemctl reload sshd
-              │
-              ▼
-        verify by reopening session   ──► success/fail logged per peer
-```
-
-This is how `update`, `group allow/disallow`, `revoke`, and `rekey` work. Failures are per-peer and don't abort multi-peer operations (except `rekey`, which is all-or-nothing).
-
 ### Data model
 
 ```
