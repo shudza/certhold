@@ -35,6 +35,21 @@ func newEnrollCmd() *cobra.Command {
 			}
 			baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "\n/")
 
+			mode, err := cmd.Flags().GetString("mode")
+			if err != nil {
+				return err
+			}
+			if mode != db.ModeUser && mode != db.ModeRoot {
+				return fmt.Errorf("--mode must be 'user' or 'root', got %q", mode)
+			}
+			targetUser, err := cmd.Flags().GetString("user")
+			if err != nil {
+				return err
+			}
+			if mode == db.ModeRoot {
+				targetUser = ""
+			}
+
 			groups, err := parseGroups(groupsCSV)
 			if err != nil {
 				return err
@@ -72,7 +87,7 @@ func newEnrollCmd() *cobra.Command {
 				return fmt.Errorf("generate token: %w", err)
 			}
 
-			if err := d.InsertToken(ctx, tok, name, strings.Join(groups, ",")); err != nil {
+			if err := d.InsertTokenWithMode(ctx, tok, name, strings.Join(groups, ","), mode, targetUser); err != nil {
 				return err
 			}
 
@@ -83,6 +98,8 @@ func newEnrollCmd() *cobra.Command {
 
 	cmd.Flags().String("groups", "", "comma-separated list of groups for the new peer (required)")
 	cmd.Flags().String("base-url", defaultBaseURL, "base URL of certhold's enroll endpoint")
+	cmd.Flags().String("mode", db.ModeUser, "install mode: 'user' (default, files under ~user/.ssh) or 'root' (files under /etc/ssh)")
+	cmd.Flags().String("user", "root", "Unix user owning the ~/.ssh files (only meaningful when --mode=user)")
 	_ = cmd.MarkFlagRequired("groups")
 
 	return cmd

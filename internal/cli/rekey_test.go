@@ -27,9 +27,10 @@ type rekeyMockCall struct {
 }
 
 type rekeyRecorder struct {
-	mu     sync.Mutex
-	calls  []rekeyMockCall
-	failOn map[string]error
+	mu       sync.Mutex
+	calls    []rekeyMockCall
+	failOn   map[string]error
+	readData map[string][]byte
 }
 
 func (r *rekeyRecorder) snapshot() []rekeyMockCall {
@@ -54,6 +55,18 @@ func (m *rekeyMockPusher) WriteFileAtomic(ctx context.Context, p string, content
 	m.rec.calls = append(m.rec.calls, rekeyMockCall{host: m.host, op: "write", path: p, content: append([]byte(nil), content...)})
 	m.rec.mu.Unlock()
 	return nil
+}
+
+func (m *rekeyMockPusher) ReadFile(ctx context.Context, p string) ([]byte, error) {
+	m.rec.mu.Lock()
+	defer m.rec.mu.Unlock()
+	m.rec.calls = append(m.rec.calls, rekeyMockCall{host: m.host, op: "read", path: p})
+	if m.rec.readData != nil {
+		if data, ok := m.rec.readData[m.host+":"+p]; ok {
+			return append([]byte(nil), data...), nil
+		}
+	}
+	return nil, nil
 }
 
 func (m *rekeyMockPusher) ReloadSSHD(ctx context.Context) error {
@@ -87,7 +100,7 @@ func setupRekeyEnv(t *testing.T, failOn map[string]error) (dataDir, dbPath, host
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 	cmd.SetErr(&buf)
-	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", hostname})
+	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", hostname, "--mode", "root"})
 	if err := cmd.ExecuteContext(context.Background()); err != nil {
 		t.Fatalf("init: %v\n%s", err, buf.String())
 	}
@@ -397,6 +410,87 @@ func TestRekeyFailureAborts(t *testing.T) {
 		if c.host == hostname {
 			t.Errorf("certhold's own peer should never receive remote pushes: %+v", c)
 		}
+	}
+}
+
+func TestRekeyUserModePeer_RewritesAuthorizedKeys_NoReload(t *testing.T) {
+	dir := t.TempDir()
+	dataDir := filepath.Join(dir, "data")
+	dbPath := filepath.Join(dir, "state.db")
+	hostname := "mgr"
+	if err := os.MkdirAll(dataDir, 0700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	cmd := NewRootCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", hostname, "--mode", "root"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("init: %v\n%s", err, buf.String())
+	}
+
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	ctx := context.Background()
+	_, pubAuth, _, _ := ca.GeneratePeerKey()
+	if err := d.InsertPeerWithMode(ctx, "vmU", 100, "fp-u", pubAuth, db.ModeUser, "alice"); err != nil {
+		t.Fatalf("InsertPeerWithMode: %v", err)
+	}
+	_ = d.EnsureGroup(ctx, "infra")
+	_ = d.SetPeerGroups(ctx, "vmU", []string{"infra"})
+	_ = d.SetPeerAllowedGroups(ctx, "vmU", []string{"infra"})
+	d.Close()
+
+	rec := &rekeyRecorder{}
+	origDial := rekeyDial
+	rekeyDial = func(ctx context.Context, host string, opts sshpush.Options) (sshpush.Pusher, error) {
+		return &rekeyMockPusher{host: host, rec: rec}, nil
+	}
+	defer func() { rekeyDial = origDial }()
+
+	cmd2 := NewRootCmd()
+	var out, errBuf bytes.Buffer
+	cmd2.SetOut(&out)
+	cmd2.SetErr(&errBuf)
+	cmd2.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "rekey", "--hostname", hostname})
+	if err := cmd2.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("rekey: err=%v stderr=%s stdout=%s", err, errBuf.String(), out.String())
+	}
+
+	calls := rec.snapshot()
+	gotAK := false
+	gotCert := false
+	gotReload := false
+	wantAKPath := "/home/alice/.ssh/authorized_keys"
+	wantCertPath := "/home/alice/.ssh/id_ed25519-cert.pub"
+	for _, c := range calls {
+		if c.host != "vmU" {
+			continue
+		}
+		if c.op == "write" && c.path == wantAKPath {
+			gotAK = true
+			if !strings.Contains(string(c.content), `cert-authority,principals="manager,infra"`) {
+				t.Errorf("authorized_keys content wrong: %q", c.content)
+			}
+		}
+		if c.op == "write" && c.path == wantCertPath {
+			gotCert = true
+		}
+		if c.op == "reload" {
+			gotReload = true
+		}
+	}
+	if !gotAK {
+		t.Errorf("missing user-mode AK write to %s; calls=%+v", wantAKPath, calls)
+	}
+	if !gotCert {
+		t.Errorf("missing user-mode cert write to %s; calls=%+v", wantCertPath, calls)
+	}
+	if gotReload {
+		t.Errorf("user-mode rekey must not call ReloadSSHD; calls=%+v", calls)
 	}
 }
 

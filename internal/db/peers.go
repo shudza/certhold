@@ -10,6 +10,11 @@ import (
 
 var ErrPeerNotFound = errors.New("peer not found")
 
+const (
+	ModeRoot = "root"
+	ModeUser = "user"
+)
+
 type Peer struct {
 	Name           string
 	Serial         uint64
@@ -18,8 +23,13 @@ type Peer struct {
 	Revoked        bool
 	CreatedAt      time.Time
 	LastKRLVersion int
+	Mode           string
+	TargetUser     string
 }
 
+// InsertPeer keeps the original v1 signature for backward compatibility. The
+// row's mode column receives its DEFAULT ('root'), matching the on-disk layout
+// installed by pre-T15 code paths.
 func (db *DB) InsertPeer(ctx context.Context, name string, serial uint64, fingerprint string, authorizedKey []byte) error {
 	_, err := db.sql.ExecContext(ctx,
 		`INSERT INTO peers(name, cert_serial, pubkey_fingerprint, authorized_key, revoked, created_at, last_krl_version)
@@ -32,14 +42,28 @@ func (db *DB) InsertPeer(ctx context.Context, name string, serial uint64, finger
 	return nil
 }
 
+// InsertPeerWithMode is the T15+ entry point. mode must be one of ModeRoot or ModeUser.
+// targetUser is informational; empty when mode == ModeRoot.
+func (db *DB) InsertPeerWithMode(ctx context.Context, name string, serial uint64, fingerprint string, authorizedKey []byte, mode, targetUser string) error {
+	_, err := db.sql.ExecContext(ctx,
+		`INSERT INTO peers(name, cert_serial, pubkey_fingerprint, authorized_key, revoked, created_at, last_krl_version, mode, target_user)
+		 VALUES (?, ?, ?, ?, 0, ?, 0, ?, ?)`,
+		name, int64(serial), fingerprint, authorizedKey, time.Now().UTC(), mode, targetUser,
+	)
+	if err != nil {
+		return fmt.Errorf("insert peer: %w", err)
+	}
+	return nil
+}
+
 func (db *DB) GetPeer(ctx context.Context, name string) (*Peer, error) {
 	row := db.sql.QueryRowContext(ctx,
-		`SELECT name, cert_serial, pubkey_fingerprint, authorized_key, revoked, created_at, last_krl_version
+		`SELECT name, cert_serial, pubkey_fingerprint, authorized_key, revoked, created_at, last_krl_version, mode, target_user
 		 FROM peers WHERE name = ?`, name)
 	p := &Peer{}
 	var serial int64
 	var revoked int
-	if err := row.Scan(&p.Name, &serial, &p.Fingerprint, &p.AuthorizedKey, &revoked, &p.CreatedAt, &p.LastKRLVersion); err != nil {
+	if err := row.Scan(&p.Name, &serial, &p.Fingerprint, &p.AuthorizedKey, &revoked, &p.CreatedAt, &p.LastKRLVersion, &p.Mode, &p.TargetUser); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrPeerNotFound
 		}
@@ -52,7 +76,7 @@ func (db *DB) GetPeer(ctx context.Context, name string) (*Peer, error) {
 
 func (db *DB) ListPeers(ctx context.Context) ([]Peer, error) {
 	rows, err := db.sql.QueryContext(ctx,
-		`SELECT name, cert_serial, pubkey_fingerprint, authorized_key, revoked, created_at, last_krl_version
+		`SELECT name, cert_serial, pubkey_fingerprint, authorized_key, revoked, created_at, last_krl_version, mode, target_user
 		 FROM peers ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("list peers: %w", err)
@@ -63,7 +87,7 @@ func (db *DB) ListPeers(ctx context.Context) ([]Peer, error) {
 		var p Peer
 		var serial int64
 		var revoked int
-		if err := rows.Scan(&p.Name, &serial, &p.Fingerprint, &p.AuthorizedKey, &revoked, &p.CreatedAt, &p.LastKRLVersion); err != nil {
+		if err := rows.Scan(&p.Name, &serial, &p.Fingerprint, &p.AuthorizedKey, &revoked, &p.CreatedAt, &p.LastKRLVersion, &p.Mode, &p.TargetUser); err != nil {
 			return nil, fmt.Errorf("scan peer: %w", err)
 		}
 		p.Serial = uint64(serial)

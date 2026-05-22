@@ -39,6 +39,20 @@ func newInitCmd() *cobra.Command {
 				}
 				hostname = h
 			}
+			mode, err := cmd.Flags().GetString("mode")
+			if err != nil {
+				return fmt.Errorf("get mode: %w", err)
+			}
+			if mode != db.ModeUser && mode != db.ModeRoot {
+				return fmt.Errorf("--mode must be 'user' or 'root', got %q", mode)
+			}
+			targetUser, err := cmd.Flags().GetString("user")
+			if err != nil {
+				return fmt.Errorf("get user: %w", err)
+			}
+			if mode == db.ModeRoot {
+				targetUser = ""
+			}
 
 			dataDir = expandHome(dataDir)
 			dbPath = expandHome(dbPath)
@@ -81,7 +95,7 @@ func newInitCmd() *cobra.Command {
 
 			fingerprint := ssh.FingerprintSHA256(sshPub)
 
-			if err := database.InsertPeer(ctx, hostname, serial, fingerprint, pubAuth); err != nil {
+			if err := database.InsertPeerWithMode(ctx, hostname, serial, fingerprint, pubAuth, mode, targetUser); err != nil {
 				return fmt.Errorf("insert peer: %w", err)
 			}
 			if err := database.EnsureGroup(ctx, "manager"); err != nil {
@@ -91,20 +105,31 @@ func newInitCmd() *cobra.Command {
 				return fmt.Errorf("set allowed groups: %w", err)
 			}
 
-			caPubLine := strings.TrimRight(string(caObj.PublicKeyAuthorizedKey()), "\n")
-			caKnownHostsEntry := "@cert-authority * " + caPubLine
-
 			selfDir := filepath.Join(dataDir, "self")
-			if err := peerfiles.WriteSelfFiles(selfDir, peerfiles.PeerFiles{
-				Hostname:           hostname,
-				PrivKey:            priv,
-				CertPub:            certBytes,
-				CAPub:              caObj.PublicKeyAuthorizedKey(),
-				KRL:                nil,
-				AuthPrincipalsRoot: nil,
-				CAKnownHostsEntry:  caKnownHostsEntry,
-			}); err != nil {
-				return fmt.Errorf("write self files: %w", err)
+			if mode == db.ModeUser {
+				if err := peerfiles.WriteUserSelfFiles(selfDir, peerfiles.UserPeerFiles{
+					TargetUser: targetUser,
+					PrivKey:    priv,
+					CertPub:    certBytes,
+					CAPub:      caObj.PublicKeyAuthorizedKey(),
+					Principals: nil,
+				}); err != nil {
+					return fmt.Errorf("write self files: %w", err)
+				}
+			} else {
+				caPubLine := strings.TrimRight(string(caObj.PublicKeyAuthorizedKey()), "\n")
+				caKnownHostsEntry := "@cert-authority * " + caPubLine
+				if err := peerfiles.WriteSelfFiles(selfDir, peerfiles.PeerFiles{
+					Hostname:           hostname,
+					PrivKey:            priv,
+					CertPub:            certBytes,
+					CAPub:              caObj.PublicKeyAuthorizedKey(),
+					KRL:                nil,
+					AuthPrincipalsRoot: nil,
+					CAKnownHostsEntry:  caKnownHostsEntry,
+				}); err != nil {
+					return fmt.Errorf("write self files: %w", err)
+				}
 			}
 
 			caPubParsed, _, _, _, err := ssh.ParseAuthorizedKey(caObj.PublicKeyAuthorizedKey())
@@ -117,12 +142,18 @@ func newInitCmd() *cobra.Command {
 			fmt.Fprintf(out, "certhold initialized\n")
 			fmt.Fprintf(out, "  data-dir:       %s\n", dataDir)
 			fmt.Fprintf(out, "  db:             %s\n", dbPath)
+			fmt.Fprintf(out, "  mode:           %s\n", mode)
+			if mode == db.ModeUser {
+				fmt.Fprintf(out, "  target user:    %s\n", targetUser)
+			}
 			fmt.Fprintf(out, "  ca fingerprint: %s\n", caFingerprint)
 			fmt.Fprintf(out, "  self files:     %s\n", selfDir)
 			return nil
 		},
 	}
 	cmd.Flags().String("hostname", "", "hostname to use as the certhold peer name (default: os.Hostname())")
+	cmd.Flags().String("mode", db.ModeUser, "install mode for the manager's own self files: 'user' (default) or 'root'")
+	cmd.Flags().String("user", "root", "Unix user that owns the manager's ~/.ssh files (only meaningful when --mode=user)")
 	return cmd
 }
 

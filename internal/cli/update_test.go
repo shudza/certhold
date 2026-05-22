@@ -16,16 +16,17 @@ import (
 )
 
 type mockCall struct {
-	op       string
-	path     string
-	content  []byte
-	mode     fs.FileMode
+	op      string
+	path    string
+	content []byte
+	mode    fs.FileMode
 }
 
 type mockPusher struct {
-	mu     sync.Mutex
-	calls  []mockCall
-	closed bool
+	mu       sync.Mutex
+	calls    []mockCall
+	closed   bool
+	readData map[string][]byte
 }
 
 func (m *mockPusher) WriteFileAtomic(ctx context.Context, remotePath string, content []byte, mode fs.FileMode) error {
@@ -33,6 +34,16 @@ func (m *mockPusher) WriteFileAtomic(ctx context.Context, remotePath string, con
 	defer m.mu.Unlock()
 	m.calls = append(m.calls, mockCall{op: "write", path: remotePath, content: append([]byte(nil), content...), mode: mode})
 	return nil
+}
+
+func (m *mockPusher) ReadFile(ctx context.Context, remotePath string) ([]byte, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls = append(m.calls, mockCall{op: "read", path: remotePath})
+	if data, ok := m.readData[remotePath]; ok {
+		return append([]byte(nil), data...), nil
+	}
+	return nil, nil
 }
 
 func (m *mockPusher) ReloadSSHD(ctx context.Context) error {
@@ -203,6 +214,73 @@ func TestUpdateRevokedPeer(t *testing.T) {
 	withMockPusher(t)
 	if _, _, err := runUpdate(t, dataDir, dbPath, "peer1", "--groups", "x"); err == nil {
 		t.Fatal("expected error for revoked peer")
+	}
+}
+
+func setupUpdateUserPeer(t *testing.T, peerName, targetUser string) (dataDir, dbPath string) {
+	t.Helper()
+	dataDir = t.TempDir()
+	caObj, err := ca.Generate(filepath.Join(dataDir, "ca"))
+	if err != nil {
+		t.Fatalf("ca.Generate: %v", err)
+	}
+	_ = caObj
+	_, pubAuth, sshPub, err := ca.GeneratePeerKey()
+	if err != nil {
+		t.Fatalf("GeneratePeerKey: %v", err)
+	}
+	dbPath = filepath.Join(dataDir, "state.db")
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer d.Close()
+	if err := d.InsertPeerWithMode(context.Background(), peerName, 1, ssh.FingerprintSHA256(sshPub), pubAuth, db.ModeUser, targetUser); err != nil {
+		t.Fatalf("InsertPeerWithMode: %v", err)
+	}
+	return dataDir, dbPath
+}
+
+func TestUpdateUserMode_NoReload(t *testing.T) {
+	dataDir, dbPath := setupUpdateUserPeer(t, "vmU", "alice")
+	mp := withMockPusher(t)
+	stdout, stderr, err := runUpdate(t, dataDir, dbPath, "vmU", "--groups", "infra")
+	if err != nil {
+		t.Fatalf("update user-mode: err=%v stderr=%s stdout=%s", err, stderr, stdout)
+	}
+	mp.mu.Lock()
+	defer mp.mu.Unlock()
+	wantPath := "/home/alice/.ssh/id_ed25519-cert.pub"
+	gotPath := ""
+	reloaded := false
+	for _, c := range mp.calls {
+		if c.op == "write" {
+			gotPath = c.path
+		}
+		if c.op == "reload" {
+			reloaded = true
+		}
+	}
+	if gotPath != wantPath {
+		t.Errorf("write path = %q, want %q", gotPath, wantPath)
+	}
+	if reloaded {
+		t.Errorf("user-mode update should NOT call ReloadSSHD; calls=%+v", mp.calls)
+	}
+}
+
+func TestUpdateUserMode_RootUserHomeIsSlashRoot(t *testing.T) {
+	dataDir, dbPath := setupUpdateUserPeer(t, "vmR", "root")
+	mp := withMockPusher(t)
+	if _, _, err := runUpdate(t, dataDir, dbPath, "vmR", "--groups", "infra"); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	mp.mu.Lock()
+	defer mp.mu.Unlock()
+	for _, c := range mp.calls {
+		if c.op == "write" && c.path != "/root/.ssh/id_ed25519-cert.pub" {
+			t.Errorf("root user-mode write path = %q, want /root/.ssh/id_ed25519-cert.pub", c.path)
+		}
 	}
 }
 

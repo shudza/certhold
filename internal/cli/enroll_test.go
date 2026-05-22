@@ -69,7 +69,7 @@ func TestEnrollSuccess(t *testing.T) {
 	}
 	defer d.Close()
 
-	peer, groups, err := d.ConsumeToken(context.Background(), tok)
+	peer, groups, mode, tu, err := d.ConsumeToken(context.Background(), tok)
 	if err != nil {
 		t.Fatalf("ConsumeToken: %v", err)
 	}
@@ -78,6 +78,64 @@ func TestEnrollSuccess(t *testing.T) {
 	}
 	if groups != "a,b" {
 		t.Errorf("groups = %q, want a,b", groups)
+	}
+	if mode != db.ModeUser {
+		t.Errorf("default mode = %q, want %q", mode, db.ModeUser)
+	}
+	if tu != "root" {
+		t.Errorf("default target_user = %q, want root", tu)
+	}
+}
+
+func TestEnrollModeRoot(t *testing.T) {
+	dbPath := setupDB(t)
+	stdout, stderr, err := runEnroll(t, dbPath, "rootvm", "--groups", "infra", "--mode", "root")
+	if err != nil {
+		t.Fatalf("enroll: err=%v stderr=%s", err, stderr)
+	}
+	tok := extractToken(t, stdout, "https://certhold.home.lan")
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer d.Close()
+	_, _, mode, tu, err := d.ConsumeToken(context.Background(), tok)
+	if err != nil {
+		t.Fatalf("ConsumeToken: %v", err)
+	}
+	if mode != db.ModeRoot {
+		t.Errorf("mode = %q, want %q", mode, db.ModeRoot)
+	}
+	if tu != "" {
+		t.Errorf("target_user = %q, want empty for root mode", tu)
+	}
+}
+
+func TestEnrollModeUserExplicitUser(t *testing.T) {
+	dbPath := setupDB(t)
+	stdout, stderr, err := runEnroll(t, dbPath, "uvm", "--groups", "infra", "--mode", "user", "--user", "alice")
+	if err != nil {
+		t.Fatalf("enroll: err=%v stderr=%s", err, stderr)
+	}
+	tok := extractToken(t, stdout, "https://certhold.home.lan")
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer d.Close()
+	_, _, mode, tu, err := d.ConsumeToken(context.Background(), tok)
+	if err != nil {
+		t.Fatalf("ConsumeToken: %v", err)
+	}
+	if mode != db.ModeUser || tu != "alice" {
+		t.Errorf("mode=%q user=%q", mode, tu)
+	}
+}
+
+func TestEnrollInvalidMode(t *testing.T) {
+	dbPath := setupDB(t)
+	if _, _, err := runEnroll(t, dbPath, "vmx", "--groups", "a", "--mode", "weird"); err == nil {
+		t.Fatal("expected error for invalid --mode")
 	}
 }
 
@@ -112,7 +170,7 @@ func TestEnrollGroupsDedupeAndTrim(t *testing.T) {
 		t.Fatalf("reopen db: %v", err)
 	}
 	defer d.Close()
-	_, groups, err := d.ConsumeToken(context.Background(), tok)
+	_, groups, _, _, err := d.ConsumeToken(context.Background(), tok)
 	if err != nil {
 		t.Fatalf("ConsumeToken: %v", err)
 	}

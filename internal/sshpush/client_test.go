@@ -37,10 +37,26 @@ type fakeServer struct {
 	hostKey  ssh.Signer
 	caPubKey ssh.PublicKey
 
-	mu       sync.Mutex
-	sessions []fakeSession
-	stopErr  error
-	wg       sync.WaitGroup
+	mu          sync.Mutex
+	sessions    []fakeSession
+	stdoutByCmd map[string][]byte
+	stopErr     error
+	wg          sync.WaitGroup
+}
+
+func (s *fakeServer) setStdout(cmd string, out []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stdoutByCmd == nil {
+		s.stdoutByCmd = map[string][]byte{}
+	}
+	s.stdoutByCmd[cmd] = out
+}
+
+func (s *fakeServer) stdoutFor(cmd string) []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stdoutByCmd[cmd]
 }
 
 func (s *fakeServer) Sessions() []fakeSession {
@@ -152,6 +168,9 @@ func (s *fakeServer) handleSession(ch ssh.Channel, requests <-chan *ssh.Request)
 			}
 			cmd = payload.Command
 			_ = req.Reply(true, nil)
+			if out := s.stdoutFor(cmd); len(out) > 0 {
+				_, _ = ch.Write(out)
+			}
 			<-stdinDone
 			s.record(fakeSession{command: cmd, stdin: stdin.Bytes()})
 			exitMsg := struct{ Status uint32 }{Status: 0}
@@ -351,6 +370,27 @@ func TestVerifyHealth(t *testing.T) {
 	}
 	if sessions[0].command != "true" {
 		t.Errorf("command = %q, want %q", sessions[0].command, "true")
+	}
+}
+
+func TestReadFile(t *testing.T) {
+	env := setupTestEnv(t)
+	srv := newFakeServer(t, env.caPubKey)
+	defer srv.Close()
+	cl := dialClient(t, env, srv)
+	defer cl.Close()
+
+	const want = "hello from cat\n"
+	srv.setStdout("cat '/etc/foo'", []byte(want))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	got, err := cl.ReadFile(ctx, "/etc/foo")
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(got) != want {
+		t.Errorf("got %q want %q", got, want)
 	}
 }
 
