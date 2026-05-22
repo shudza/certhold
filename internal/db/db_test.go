@@ -216,6 +216,45 @@ func TestSetGetPeerAllowedGroups(t *testing.T) {
 	}
 }
 
+func TestListGroupsWithPeerCount(t *testing.T) {
+	ctx := t.Context()
+	d := newTestDB(t)
+	if gs, err := d.ListGroupsWithPeerCount(ctx); err != nil || len(gs) != 0 {
+		t.Fatalf("empty: err=%v len=%d", err, len(gs))
+	}
+	if err := d.InsertPeer(ctx, "alpha", 1, "fp", []byte("k")); err != nil {
+		t.Fatalf("InsertPeer alpha: %v", err)
+	}
+	if err := d.InsertPeer(ctx, "beta", 2, "fp", []byte("k")); err != nil {
+		t.Fatalf("InsertPeer beta: %v", err)
+	}
+	if err := d.SetPeerGroups(ctx, "alpha", []string{"infra", "db"}); err != nil {
+		t.Fatalf("SetPeerGroups alpha: %v", err)
+	}
+	if err := d.SetPeerGroups(ctx, "beta", []string{"infra"}); err != nil {
+		t.Fatalf("SetPeerGroups beta: %v", err)
+	}
+	if err := d.EnsureGroup(ctx, "empty"); err != nil {
+		t.Fatalf("EnsureGroup empty: %v", err)
+	}
+	gs, err := d.ListGroupsWithPeerCount(ctx)
+	if err != nil {
+		t.Fatalf("ListGroupsWithPeerCount: %v", err)
+	}
+	want := map[string]int{"db": 1, "infra": 2, "empty": 0}
+	if len(gs) != len(want) {
+		t.Fatalf("got %d groups, want %d: %+v", len(gs), len(want), gs)
+	}
+	for i, g := range gs {
+		if i > 0 && gs[i-1].Name >= g.Name {
+			t.Errorf("groups not sorted: %+v", gs)
+		}
+		if got, ok := want[g.Name]; !ok || got != g.PeerCount {
+			t.Errorf("group %q: count=%d want=%d", g.Name, g.PeerCount, got)
+		}
+	}
+}
+
 func TestInsertConsumeToken(t *testing.T) {
 	ctx := t.Context()
 	d := newTestDB(t)
