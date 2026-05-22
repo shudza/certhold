@@ -19,8 +19,7 @@ func NewRootCmd() *cobra.Command {
 		Use:           "certhold",
 		Short:         "Certhold — homelab SSH access manager",
 		Long:          "Certhold is a homelab SSH access manager. It runs an SSH certificate authority, signs peer certs, and pushes config to peers over SSH.",
-		SilenceUsage:  true,
-		SilenceErrors: true,
+		SilenceUsage: true,
 	}
 
 	cmd.PersistentFlags().String("db", defaultDB, "path to state database")
