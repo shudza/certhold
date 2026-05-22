@@ -60,18 +60,16 @@ func TestBuild_AllEntriesAndModes(t *testing.T) {
 	got := extract(t, data)
 
 	expected := map[string]int64{
-		"etc/ssh/peer_ed25519":                0600,
-		"etc/ssh/peer_ed25519-cert.pub":       0644,
-		"etc/ssh/ca.pub":                      0644,
-		"etc/ssh/krl":                         0644,
-		"etc/ssh/sshd_config.d/certhold.conf": 0644,
-		"etc/ssh/auth_principals/root":        0644,
-		"etc/ssh/ca_known_hosts":              0644,
-		"etc/ssh/ssh_config.d/certhold.conf":  0644,
+		"etc/ssh/peer_ed25519":          0600,
+		"etc/ssh/peer_ed25519-cert.pub": 0644,
+		"etc/ssh/ca.pub":                0644,
+		"etc/ssh/krl":                   0644,
+		"etc/ssh/auth_principals/root":  0644,
+		"etc/ssh/ca_known_hosts":        0644,
 	}
 
-	if len(got) != len(expected) {
-		t.Fatalf("entry count: got %d want %d (entries=%v)", len(got), len(expected), keys(got))
+	if len(got) != 6 {
+		t.Fatalf("entry count: got %d want 6 (entries=%v)", len(got), keys(got))
 	}
 	for name, mode := range expected {
 		e, ok := got[name]
@@ -84,18 +82,20 @@ func TestBuild_AllEntriesAndModes(t *testing.T) {
 		}
 	}
 
+	for _, forbidden := range []string{
+		"etc/ssh/sshd_config.d/certhold.conf",
+		"etc/ssh/ssh_config.d/certhold.conf",
+	} {
+		if _, ok := got[forbidden]; ok {
+			t.Errorf("forbidden entry present: %q", forbidden)
+		}
+	}
+
 	if !bytes.HasPrefix(got["etc/ssh/auth_principals/root"].data, []byte("manager\n")) {
 		t.Errorf("auth_principals/root does not start with manager: %q", got["etc/ssh/auth_principals/root"].data)
 	}
 	if want := "manager\ninfra\ndatabases\n"; string(got["etc/ssh/auth_principals/root"].data) != want {
 		t.Errorf("auth_principals/root contents: got %q want %q", got["etc/ssh/auth_principals/root"].data, want)
-	}
-
-	if string(got["etc/ssh/sshd_config.d/certhold.conf"].data) != sshdConfigContents {
-		t.Errorf("sshd_config.d/certhold.conf mismatch:\ngot:\n%s\nwant:\n%s", got["etc/ssh/sshd_config.d/certhold.conf"].data, sshdConfigContents)
-	}
-	if string(got["etc/ssh/ssh_config.d/certhold.conf"].data) != sshConfigContents {
-		t.Errorf("ssh_config.d/certhold.conf mismatch:\ngot:\n%s\nwant:\n%s", got["etc/ssh/ssh_config.d/certhold.conf"].data, sshConfigContents)
 	}
 
 	if got["etc/ssh/ca_known_hosts"].data[len(got["etc/ssh/ca_known_hosts"].data)-1] != '\n' {

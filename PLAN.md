@@ -30,20 +30,24 @@ Two components:
 /etc/ssh/peer_ed25519-cert.pub           # CA-signed cert, no expiry
 /etc/ssh/ca.pub                          # CA's signing pubkey (trusted root)
 /etc/ssh/krl                             # Key Revocation List, initially empty
-/etc/ssh/sshd_config.d/certhold.conf      # sshd directives
+/etc/ssh/sshd_config                     # sshd directives spliced in between
+                                         #   "# BEGIN certhold" / "# END certhold"
 /etc/ssh/auth_principals/root            # one group name per line
 /etc/ssh/ca_known_hosts                  # @cert-authority entry for outbound SSH
-/etc/ssh/ssh_config.d/certhold.conf       # client-side cert config
+/etc/ssh/ssh_config                      # client-side cert config spliced in between
+                                         #   "# BEGIN certhold" / "# END certhold"
 /root/.ssh/authorized_keys               # contains certhold principal indirectly via auth_principals
 ```
 
-`sshd_config.d/certhold.conf`:
+The sentinel-bracketed block appended to `/etc/ssh/sshd_config`:
 ```
+# BEGIN certhold
 HostKey /etc/ssh/peer_ed25519
 HostCertificate /etc/ssh/peer_ed25519-cert.pub
 TrustedUserCAKeys /etc/ssh/ca.pub
 RevokedKeys /etc/ssh/krl
 AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u
+# END certhold
 ```
 
 Every peer's `auth_principals/root` implicitly includes `manager` (added at onboarding, before the user-specified groups). This is what gives certhold standing access.
@@ -222,17 +226,17 @@ Native KRL revocation is gone. RevokedKeys is an sshd_config directive only. Tre
 
 ## Minimum openssh version
 
-The features your design uses and when each landed:
+The features the design uses and when each landed:
 
 Certificate authorities, TrustedUserCAKeys, HostCertificate, AuthorizedPrincipalsFile, @cert-authority, AuthorizedPrincipalsFile %u token — OpenSSH 5.4 (2010)
 Binary KRLs, RevokedKeys pointing at a KRL file, ssh-keygen -k — OpenSSH 6.0 (2012)
 ed25519 keys and certificates — OpenSSH 6.5 (2014)
-Include in ssh_config (for ssh_config.d/) — OpenSSH 7.3 (2016)
-Include in sshd_config (for sshd_config.d/) — OpenSSH 8.2 (Feb 2020) GitHub
 
-That last one is the binding constraint. Your sshd_config.d/certhold.conf only gets read if the main sshd_config has Include /etc/ssh/sshd_config.d/*.conf — and that directive doesn't parse on anything older than 8.2.
-Distro coverage at 8.2+: Ubuntu 20.04 LTS and newer, Debian 11+, RHEL/Rocky/Alma 9+ (RHEL 8 ships 8.0 — close but no), Fedora 32+, recent Arch/openSUSE. Anything you'd realistically homelab on today is fine.
-If you ever want to support older peers (e.g. RHEL 8 with 8.0, or some embedded box), the only change needed is to append your directives directly to /etc/ssh/sshd_config instead of dropping a file in sshd_config.d/. That pushes the floor back to 6.5 (for ed25519).
+**Effective floor: OpenSSH 6.5 (2014).** The install script appends certhold's directives directly to `/etc/ssh/sshd_config` and `/etc/ssh/ssh_config` between `# BEGIN certhold` / `# END certhold` sentinel markers, so neither `Include` (sshd 8.2 / ssh 7.3) nor `sshd_config.d/` are required.
+
+Trade-off: every cert reissue, group edit, KRL push, and CA rekey still uses atomic file writes into `/etc/ssh/` over SSH (those touch their own files, not the main configs). Only the *initial install* mutates `/etc/ssh/sshd_config` and `/etc/ssh/ssh_config` in place via the sentinel-bracketed block; re-running the install script is idempotent because `sed` deletes any prior block before the new one is appended.
+
+Distro coverage at 6.5+: RHEL/CentOS/Rocky/Alma 7+ (7.0 ships OpenSSH 6.6.1), Debian 8+ (Jessie ships 6.7), Ubuntu 14.04+ (ships 6.6), Fedora 21+, recent Arch/openSUSE — essentially anything still booting today.
 
 ## Out of scope for v1
 

@@ -18,17 +18,21 @@ type PeerFiles struct {
 	CAKnownHostsEntry  string
 }
 
-const sshdConfigContents = `HostKey /etc/ssh/peer_ed25519
+const SshdBlockContents = `# BEGIN certhold
+HostKey /etc/ssh/peer_ed25519
 HostCertificate /etc/ssh/peer_ed25519-cert.pub
 TrustedUserCAKeys /etc/ssh/ca.pub
 RevokedKeys /etc/ssh/krl
 AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u
+# END certhold
 `
 
-const sshConfigContents = `Host *
+const SshClientBlockContents = `# BEGIN certhold
+Host *
     CertificateFile /etc/ssh/peer_ed25519-cert.pub
     IdentityFile /etc/ssh/peer_ed25519
     UserKnownHostsFile /etc/ssh/ca_known_hosts
+# END certhold
 `
 
 func Build(p PeerFiles) ([]byte, error) {
@@ -55,10 +59,8 @@ func Build(p PeerFiles) ([]byte, error) {
 		{"etc/ssh/peer_ed25519-cert.pub", 0644, p.CertPub},
 		{"etc/ssh/ca.pub", 0644, p.CAPub},
 		{"etc/ssh/krl", 0644, krl},
-		{"etc/ssh/sshd_config.d/certhold.conf", 0644, []byte(sshdConfigContents)},
 		{"etc/ssh/auth_principals/root", 0644, authPrincipals},
 		{"etc/ssh/ca_known_hosts", 0644, []byte(p.CAKnownHostsEntry + "\n")},
-		{"etc/ssh/ssh_config.d/certhold.conf", 0644, []byte(sshConfigContents)},
 	}
 
 	modTime := time.Unix(0, 0).UTC()

@@ -30,10 +30,10 @@ func WriteSelfFiles(dir string, p PeerFiles) error {
 		{"etc/ssh/peer_ed25519-cert.pub", 0644, p.CertPub},
 		{"etc/ssh/ca.pub", 0644, p.CAPub},
 		{"etc/ssh/krl", 0644, krl},
-		{"etc/ssh/sshd_config.d/certhold.conf", 0644, []byte(sshdConfigContents)},
 		{"etc/ssh/auth_principals/root", 0644, authPrincipals},
 		{"etc/ssh/ca_known_hosts", 0644, []byte(p.CAKnownHostsEntry + "\n")},
-		{"etc/ssh/ssh_config.d/certhold.conf", 0644, []byte(sshConfigContents)},
+		{"etc/ssh/sshd_config_block.conf", 0644, []byte(SshdBlockContents)},
+		{"etc/ssh/ssh_config_block.conf", 0644, []byte(SshClientBlockContents)},
 	}
 
 	for _, e := range entries {

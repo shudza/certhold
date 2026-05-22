@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"golang.org/x/crypto/ssh"
@@ -104,15 +105,24 @@ func TestEnrollSuccess(t *testing.T) {
 		"etc/ssh/peer_ed25519-cert.pub",
 		"etc/ssh/ca.pub",
 		"etc/ssh/krl",
-		"etc/ssh/sshd_config.d/certhold.conf",
 		"etc/ssh/auth_principals/root",
 		"etc/ssh/ca_known_hosts",
-		"etc/ssh/ssh_config.d/certhold.conf",
 	}
 	for _, name := range expectedNames {
 		if _, ok := entries[name]; !ok {
 			t.Errorf("missing entry %q", name)
 		}
+	}
+	for _, forbidden := range []string{
+		"etc/ssh/sshd_config.d/certhold.conf",
+		"etc/ssh/ssh_config.d/certhold.conf",
+	} {
+		if _, ok := entries[forbidden]; ok {
+			t.Errorf("forbidden entry present: %q", forbidden)
+		}
+	}
+	if len(entries) != 6 {
+		t.Errorf("entry count: got %d want 6", len(entries))
 	}
 
 	certBytes := entries["etc/ssh/peer_ed25519-cert.pub"]
@@ -264,9 +274,30 @@ func TestEnrollScriptSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	want := "#!/usr/bin/env bash\nset -e\ncurl -fsSL " + env.srv.URL + "/enroll/" + tok + " | tar -xzC /\nsystemctl reload sshd\n"
-	if string(body) != want {
-		t.Errorf("body mismatch:\n got: %q\nwant: %q", body, want)
+	bodyStr := string(body)
+	mustContain := []string{
+		"#!/usr/bin/env bash",
+		"set -e",
+		"curl -fsSL " + env.srv.URL + "/enroll/" + tok + " | tar -xzC /",
+		"sed -i '/^# BEGIN certhold$/,/^# END certhold$/d' /etc/ssh/sshd_config",
+		"cat >> /etc/ssh/sshd_config <<'SSHD_EOF'",
+		"# BEGIN certhold",
+		"# END certhold",
+		"SSHD_EOF",
+		"sed -i '/^# BEGIN certhold$/,/^# END certhold$/d' /etc/ssh/ssh_config",
+		"cat >> /etc/ssh/ssh_config <<'SSH_EOF'",
+		"SSH_EOF",
+		"systemctl reload sshd",
+		"HostKey /etc/ssh/peer_ed25519",
+		"TrustedUserCAKeys /etc/ssh/ca.pub",
+		"AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u",
+		"CertificateFile /etc/ssh/peer_ed25519-cert.pub",
+		"UserKnownHostsFile /etc/ssh/ca_known_hosts",
+	}
+	for _, s := range mustContain {
+		if !strings.Contains(bodyStr, s) {
+			t.Errorf("script body missing %q\nbody:\n%s", s, bodyStr)
+		}
 	}
 
 	resp2, err := http.Get(env.srv.URL + "/enroll/" + tok)

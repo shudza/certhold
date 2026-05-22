@@ -44,12 +44,12 @@ After `init`, the manager's state lives under `--data-dir` (default `~/.certhold
 │   ├── ca_known_hosts
 │   ├── krl
 │   ├── auth_principals/root
-│   ├── sshd_config.d/certhold.conf
-│   └── ssh_config.d/certhold.conf
+│   ├── sshd_config_block.conf
+│   └── ssh_config_block.conf
 └── state.db                       # SQLite — peers, groups, tokens, KRL version
 ```
 
-Copy/symlink the contents of `self/etc/ssh/` to the manager's actual `/etc/ssh/` to make it a real SSH peer, and reload sshd.
+On the manager, copy the contents of `<data-dir>/self/etc/ssh/sshd_config_block.conf` and `ssh_config_block.conf` into your `/etc/ssh/sshd_config` and `/etc/ssh/ssh_config` (the files already contain the `# BEGIN certhold` / `# END certhold` sentinel lines — paste verbatim), and copy the remaining files in `self/etc/ssh/` to `/etc/ssh/`. Reload sshd.
 
 ## Commands
 
