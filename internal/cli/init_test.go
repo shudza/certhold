@@ -1,0 +1,125 @@
+package cli_test
+
+import (
+	"bytes"
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/shudza/certhold/internal/cli"
+	"github.com/shudza/certhold/internal/db"
+)
+
+func TestInit_HappyPath(t *testing.T) {
+	dataDir := t.TempDir()
+	dbPath := filepath.Join(dataDir, "state.db")
+
+	cmd := cli.NewRootCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", "manager-test"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v\nout:\n%s", err, out.String())
+	}
+
+	caPriv := filepath.Join(dataDir, "ca", "ca")
+	caPub := filepath.Join(dataDir, "ca", "ca.pub")
+	for path, mode := range map[string]os.FileMode{caPriv: 0600, caPub: 0644} {
+		st, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat %s: %v", path, err)
+		}
+		if st.Mode().Perm() != mode {
+			t.Errorf("%s mode: got %o want %o", path, st.Mode().Perm(), mode)
+		}
+	}
+
+	if _, err := os.Stat(dbPath); err != nil {
+		t.Fatalf("state.db: %v", err)
+	}
+
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer database.Close()
+	peers, err := database.ListPeers(context.Background())
+	if err != nil {
+		t.Fatalf("ListPeers: %v", err)
+	}
+	if len(peers) != 1 {
+		t.Fatalf("peers count: got %d want 1", len(peers))
+	}
+	if peers[0].Name != "manager-test" {
+		t.Errorf("peer name: got %q want %q", peers[0].Name, "manager-test")
+	}
+	if peers[0].Serial == 0 {
+		t.Errorf("peer serial is zero")
+	}
+	if !strings.HasPrefix(peers[0].Fingerprint, "SHA256:") {
+		t.Errorf("peer fingerprint format: %q", peers[0].Fingerprint)
+	}
+
+	allowed, err := database.GetPeerAllowedGroups(context.Background(), "manager-test")
+	if err != nil {
+		t.Fatalf("GetPeerAllowedGroups: %v", err)
+	}
+	if len(allowed) != 1 || allowed[0] != "manager" {
+		t.Errorf("allowed groups: got %v want [manager]", allowed)
+	}
+
+	selfDir := filepath.Join(dataDir, "self")
+	for _, rel := range []string{
+		"etc/ssh/peer_ed25519",
+		"etc/ssh/peer_ed25519-cert.pub",
+		"etc/ssh/ca.pub",
+		"etc/ssh/krl",
+		"etc/ssh/sshd_config.d/certhold.conf",
+		"etc/ssh/auth_principals/root",
+		"etc/ssh/ca_known_hosts",
+		"etc/ssh/ssh_config.d/certhold.conf",
+	} {
+		if _, err := os.Stat(filepath.Join(selfDir, rel)); err != nil {
+			t.Errorf("missing self file %s: %v", rel, err)
+		}
+	}
+
+	caKH, err := os.ReadFile(filepath.Join(selfDir, "etc/ssh/ca_known_hosts"))
+	if err != nil {
+		t.Fatalf("read ca_known_hosts: %v", err)
+	}
+	if !strings.HasPrefix(string(caKH), "@cert-authority * ssh-ed25519 ") {
+		t.Errorf("ca_known_hosts: %q", caKH)
+	}
+
+	got := out.String()
+	for _, want := range []string{"data-dir", "db", "ca fingerprint", "self files", "SHA256:"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("summary missing %q\nfull:\n%s", want, got)
+		}
+	}
+}
+
+func TestInit_Idempotency(t *testing.T) {
+	dataDir := t.TempDir()
+	dbPath := filepath.Join(dataDir, "state.db")
+
+	run := func() error {
+		cmd := cli.NewRootCmd()
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&out)
+		cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", "manager-test"})
+		return cmd.Execute()
+	}
+
+	if err := run(); err != nil {
+		t.Fatalf("first init: %v", err)
+	}
+	if err := run(); err == nil {
+		t.Fatalf("second init should fail")
+	}
+}
