@@ -25,6 +25,14 @@ On the manager box (one-time setup):
 
 ```bash
 certhold init                                    # default: user-mode, --user root
+# Detected network interfaces:
+#   [1] eth0     192.168.1.205
+#   [2] wlan0    10.0.0.7
+#
+# Which interface should peers reach certhold on? [1-2]: 1
+# certhold initialized
+#   ...
+#   base url:       https://192.168.1.205:8443
 certhold serve --addr :8443                      # leave running (systemd unit recommended)
 # certhold serve listening (TLS, self-signed) on https://[::]:8443
 # cert SHA256: SHA256:abc...
@@ -34,7 +42,7 @@ Onboard a peer (run on the manager):
 
 ```bash
 certhold enroll new-vm --groups infra,databases
-# prints: curl -kfsSL https://certhold.home.lan/enroll/<token>.sh | bash
+# prints: curl -kfsSL https://192.168.1.205:8443/enroll/<token>.sh | bash
 ```
 
 Paste that one-liner on the new peer as the user that should own certhold's SSH files (often a regular user; use `sudo -i` first if you want it owned by root). The install script computes `id -un` at runtime and reports it to the manager, then untars five files into `$HOME/.ssh/`. No `chown`, no root required. No sshd reload; the next inbound SSH connection from another peer matches the new `authorized_keys` line.
@@ -86,12 +94,28 @@ Bootstrap the manager.
 
 ```
 certhold init [--hostname <name>] [--mode user|root] [--user <name>]
+              [--listen-ip <ip>] [--port <port>] [--no-prompt]
 ```
 
 - Refuses to overwrite an existing `state.db`.
 - `--hostname` overrides `os.Hostname()` for the manager peer's name.
 - `--mode` defaults to `user`; pass `--mode root` for the v1 layout.
 - `--user` defaults to `root`; ignored when `--mode=root`.
+- During init, certhold enumerates local IPv4 interfaces (skipping loopback / `docker*` / `br-*` / `veth*` / `virbr*` / `tun*` / `tap*` / `cni*`) and prompts you to pick the one peers will reach the manager on. Use `--listen-ip <ip>` to skip the prompt (CI / scripted setup). `--port` (default `8443`) is the port baked into the persisted base-url. `--no-prompt` fails fast on ambiguity (multiple candidates, no `--listen-ip`) and auto-selects when there's a single candidate.
+- The chosen `https://<ip>:<port>` is written to `<data-dir>/base_url` and echoed in the summary as `base url: …`. `enroll` uses this as its default. Re-init or edit the file by hand to change it.
+
+Example:
+
+```
+$ certhold init --listen-ip 192.168.1.205 --no-prompt --mode root
+certhold initialized
+  data-dir:       /home/admin/.certhold
+  db:             /home/admin/.certhold/state.db
+  mode:           root
+  ca fingerprint: SHA256:...
+  self files:     /home/admin/.certhold/self
+  base url:       https://192.168.1.205:8443
+```
 
 ### `certhold serve`
 
@@ -117,6 +141,7 @@ certhold enroll <name> --groups a,b,c [--base-url URL] [--mode user|root] [--use
 
 - `--mode` defaults to `user`; pass `--mode root` for the v1 layout.
 - `--user` is optional. Omit it and the peer reports its own user via `id -un` at install time. Pass `--user <name>` to pin a specific user — the install request must match or the server returns 400 (token preserved). Ignored when `--mode=root`.
+- `--base-url` resolution order: explicit `--base-url` flag > `$CERTHOLD_BASE_URL` env var > `<data-dir>/base_url` (written by `init`) > `https://certhold.home.lan` (legacy fallback).
 
 ### `certhold list`
 

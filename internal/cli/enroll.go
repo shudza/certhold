@@ -14,10 +14,7 @@ import (
 )
 
 func newEnrollCmd() *cobra.Command {
-	defaultBaseURL := os.Getenv("CERTHOLD_BASE_URL")
-	if defaultBaseURL == "" {
-		defaultBaseURL = "https://certhold.home.lan"
-	}
+	const legacyBaseURL = "https://certhold.home.lan"
 
 	cmd := &cobra.Command{
 		Use:   "enroll <name>",
@@ -29,7 +26,7 @@ func newEnrollCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			baseURL, err := cmd.Flags().GetString("base-url")
+			baseURL, err := resolveBaseURL(cmd)
 			if err != nil {
 				return err
 			}
@@ -97,12 +94,30 @@ func newEnrollCmd() *cobra.Command {
 	}
 
 	cmd.Flags().String("groups", "", "comma-separated list of groups for the new peer (required)")
-	cmd.Flags().String("base-url", defaultBaseURL, "base URL of certhold's enroll endpoint")
+	cmd.Flags().String("base-url", legacyBaseURL, "base URL of certhold's enroll endpoint (defaults to value persisted by `init`, then $CERTHOLD_BASE_URL, then https://certhold.home.lan)")
 	cmd.Flags().String("mode", db.ModeUser, "install mode: 'user' (default, files under ~user/.ssh) or 'root' (files under /etc/ssh)")
 	cmd.Flags().String("user", "", "Unix user owning the ~/.ssh files; when set, acts as a hard constraint at install time (only meaningful with --mode=user)")
 	_ = cmd.MarkFlagRequired("groups")
 
 	return cmd
+}
+
+func resolveBaseURL(cmd *cobra.Command) (string, error) {
+	if cmd.Flags().Changed("base-url") {
+		return cmd.Flags().GetString("base-url")
+	}
+	if env := os.Getenv("CERTHOLD_BASE_URL"); env != "" {
+		return env, nil
+	}
+	dataDir, err := cmd.Root().PersistentFlags().GetString("data-dir")
+	if err == nil && dataDir != "" {
+		if v, err := LoadBaseURL(expandHome(dataDir)); err == nil {
+			return v, nil
+		} else if !errors.Is(err, ErrNoBaseURL) {
+			return "", err
+		}
+	}
+	return cmd.Flags().GetString("base-url")
 }
 
 func parseGroups(csv string) ([]string, error) {

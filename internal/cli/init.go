@@ -57,6 +57,24 @@ func newInitCmd() *cobra.Command {
 				targetUser = currentUsername()
 			}
 
+			listenIP, err := cmd.Flags().GetString("listen-ip")
+			if err != nil {
+				return fmt.Errorf("get listen-ip: %w", err)
+			}
+			port, err := cmd.Flags().GetInt("port")
+			if err != nil {
+				return fmt.Errorf("get port: %w", err)
+			}
+			noPrompt, err := cmd.Flags().GetBool("no-prompt")
+			if err != nil {
+				return fmt.Errorf("get no-prompt: %w", err)
+			}
+			chosen, err := selectInterface(listenIP, noPrompt, cmd.InOrStdin(), cmd.ErrOrStderr())
+			if err != nil {
+				return err
+			}
+			baseURL := fmt.Sprintf("https://%s:%d", chosen.IP.String(), port)
+
 			dataDir = expandHome(dataDir)
 			dbPath = expandHome(dbPath)
 
@@ -141,6 +159,10 @@ func newInitCmd() *cobra.Command {
 			}
 			caFingerprint := ssh.FingerprintSHA256(caPubParsed)
 
+			if err := SaveBaseURL(dataDir, baseURL); err != nil {
+				return fmt.Errorf("save base_url: %w", err)
+			}
+
 			out := cmd.OutOrStdout()
 			fmt.Fprintf(out, "certhold initialized\n")
 			fmt.Fprintf(out, "  data-dir:       %s\n", dataDir)
@@ -151,12 +173,16 @@ func newInitCmd() *cobra.Command {
 			}
 			fmt.Fprintf(out, "  ca fingerprint: %s\n", caFingerprint)
 			fmt.Fprintf(out, "  self files:     %s\n", selfDir)
+			fmt.Fprintf(out, "  base url:       %s\n", baseURL)
 			return nil
 		},
 	}
 	cmd.Flags().String("hostname", "", "hostname to use as the certhold peer name (default: os.Hostname())")
 	cmd.Flags().String("mode", db.ModeUser, "install mode for the manager's own self files: 'user' (default) or 'root'")
 	cmd.Flags().String("user", "root", "Unix user that owns the manager's ~/.ssh files (defaults to the OS user running certhold when --mode=user; only meaningful in user mode)")
+	cmd.Flags().String("listen-ip", "", "IPv4 of the interface peers will reach certhold on (skip prompt)")
+	cmd.Flags().Int("port", 8443, "port the enroll endpoint listens on (used in the persisted base-url)")
+	cmd.Flags().Bool("no-prompt", false, "fail instead of prompting; pass --listen-ip to choose explicitly")
 	return cmd
 }
 
