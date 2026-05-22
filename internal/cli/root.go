@@ -34,6 +34,7 @@ func NewRootCmd() *cobra.Command {
 		newGroupCmd(),
 		newRevokeCmd(),
 		newRekeyCmd(),
+		newServeCmd(),
 	)
 
 	return cmd

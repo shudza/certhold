@@ -1,0 +1,133 @@
+package cli
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
+	"time"
+
+	"github.com/spf13/cobra"
+
+	"github.com/shudza/certhold/internal/ca"
+	"github.com/shudza/certhold/internal/db"
+	"github.com/shudza/certhold/internal/httpserver"
+)
+
+func newServeCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "serve",
+		Short: "Run the HTTP enroll endpoint",
+		RunE:  runServe,
+	}
+	cmd.Flags().String("addr", ":8443", "address to listen on")
+	cmd.Flags().String("tls-cert", "", "path to TLS certificate (optional)")
+	cmd.Flags().String("tls-key", "", "path to TLS key (optional)")
+	cmd.Flags().String("hostname", "", "hostname for the ca_known_hosts entry (default: os.Hostname())")
+	return cmd
+}
+
+func runServe(cmd *cobra.Command, args []string) error {
+	addr, err := cmd.Flags().GetString("addr")
+	if err != nil {
+		return err
+	}
+	tlsCert, err := cmd.Flags().GetString("tls-cert")
+	if err != nil {
+		return err
+	}
+	tlsKey, err := cmd.Flags().GetString("tls-key")
+	if err != nil {
+		return err
+	}
+	hostname, err := cmd.Flags().GetString("hostname")
+	if err != nil {
+		return err
+	}
+	if hostname == "" {
+		h, err := os.Hostname()
+		if err != nil {
+			return fmt.Errorf("hostname: %w", err)
+		}
+		hostname = h
+	}
+
+	dataDir, err := cmd.Root().PersistentFlags().GetString("data-dir")
+	if err != nil {
+		return fmt.Errorf("get data-dir: %w", err)
+	}
+	dbPath, err := cmd.Root().PersistentFlags().GetString("db")
+	if err != nil {
+		return fmt.Errorf("get db: %w", err)
+	}
+	dataDir = expandHome(dataDir)
+	dbPath = expandHome(dbPath)
+
+	caObj, err := ca.Load(filepath.Join(dataDir, "ca"))
+	if err != nil {
+		return fmt.Errorf("load ca: %w", err)
+	}
+	database, err := db.Open(dbPath)
+	if err != nil {
+		return fmt.Errorf("open db: %w", err)
+	}
+	defer database.Close()
+
+	mux := httpserver.New(database, caObj, hostname)
+
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", addr, err)
+	}
+
+	srv := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	out := cmd.OutOrStdout()
+	scheme := "http"
+	if tlsCert != "" && tlsKey != "" {
+		scheme = "https"
+	}
+	fmt.Fprintf(out, "certhold serve listening on %s://%s\n", scheme, listener.Addr().String())
+
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	errCh := make(chan error, 1)
+	go func() {
+		var serveErr error
+		if tlsCert != "" && tlsKey != "" {
+			serveErr = srv.ServeTLS(listener, tlsCert, tlsKey)
+		} else {
+			serveErr = srv.Serve(listener)
+		}
+		errCh <- serveErr
+	}()
+
+	select {
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			return fmt.Errorf("shutdown: %w", err)
+		}
+		<-errCh
+		return nil
+	case err := <-errCh:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return fmt.Errorf("serve: %w", err)
+	}
+}
