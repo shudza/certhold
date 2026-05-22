@@ -1,0 +1,359 @@
+package db
+
+import (
+	"errors"
+	"path/filepath"
+	"sort"
+	"sync"
+	"sync/atomic"
+	"testing"
+)
+
+func newTestDB(t *testing.T) *DB {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "test.sqlite")
+	d, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	return d
+}
+
+func TestOpenIdempotent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "idem.sqlite")
+	d1, err := Open(path)
+	if err != nil {
+		t.Fatalf("first Open: %v", err)
+	}
+	if err := d1.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	d2, err := Open(path)
+	if err != nil {
+		t.Fatalf("second Open: %v", err)
+	}
+	if err := d2.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+func TestOpenCreatesParentDir(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sub", "nested", "ch.sqlite")
+	d, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer d.Close()
+}
+
+func TestInsertAndGetPeer(t *testing.T) {
+	ctx := t.Context()
+	d := newTestDB(t)
+	key := []byte("ssh-ed25519 AAAA...")
+	if err := d.InsertPeer(ctx, "alpha", 42, "SHA256:abc", key); err != nil {
+		t.Fatalf("InsertPeer: %v", err)
+	}
+	p, err := d.GetPeer(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if p.Name != "alpha" || p.Serial != 42 || p.Fingerprint != "SHA256:abc" {
+		t.Errorf("peer fields wrong: %+v", p)
+	}
+	if string(p.AuthorizedKey) != string(key) {
+		t.Errorf("authorized key roundtrip mismatch")
+	}
+	if p.Revoked {
+		t.Error("expected not revoked")
+	}
+	if p.LastKRLVersion != 0 {
+		t.Errorf("LastKRLVersion = %d, want 0", p.LastKRLVersion)
+	}
+	if p.CreatedAt.IsZero() {
+		t.Error("CreatedAt should be set")
+	}
+}
+
+func TestGetPeerNotFound(t *testing.T) {
+	ctx := t.Context()
+	d := newTestDB(t)
+	_, err := d.GetPeer(ctx, "nope")
+	if !errors.Is(err, ErrPeerNotFound) {
+		t.Errorf("expected ErrPeerNotFound, got %v", err)
+	}
+}
+
+func TestListPeers(t *testing.T) {
+	ctx := t.Context()
+	d := newTestDB(t)
+	if peers, err := d.ListPeers(ctx); err != nil || len(peers) != 0 {
+		t.Fatalf("empty list peers: err=%v len=%d", err, len(peers))
+	}
+	for _, n := range []string{"b", "a", "c"} {
+		if err := d.InsertPeer(ctx, n, 1, "fp", []byte("k")); err != nil {
+			t.Fatalf("InsertPeer %s: %v", n, err)
+		}
+	}
+	peers, err := d.ListPeers(ctx)
+	if err != nil {
+		t.Fatalf("ListPeers: %v", err)
+	}
+	if len(peers) != 3 {
+		t.Fatalf("want 3 peers, got %d", len(peers))
+	}
+	if peers[0].Name != "a" || peers[1].Name != "b" || peers[2].Name != "c" {
+		t.Errorf("peers not sorted: %v %v %v", peers[0].Name, peers[1].Name, peers[2].Name)
+	}
+}
+
+func TestSetPeerRevoked(t *testing.T) {
+	ctx := t.Context()
+	d := newTestDB(t)
+	if err := d.InsertPeer(ctx, "peer1", 1, "fp", []byte("k")); err != nil {
+		t.Fatalf("InsertPeer: %v", err)
+	}
+	if err := d.SetPeerRevoked(ctx, "peer1"); err != nil {
+		t.Fatalf("SetPeerRevoked: %v", err)
+	}
+	p, err := d.GetPeer(ctx, "peer1")
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if !p.Revoked {
+		t.Error("expected revoked")
+	}
+	if err := d.SetPeerRevoked(ctx, "missing"); !errors.Is(err, ErrPeerNotFound) {
+		t.Errorf("revoke missing: %v", err)
+	}
+}
+
+func TestUpdatePeerLastKRL(t *testing.T) {
+	ctx := t.Context()
+	d := newTestDB(t)
+	if err := d.InsertPeer(ctx, "p", 1, "fp", []byte("k")); err != nil {
+		t.Fatalf("InsertPeer: %v", err)
+	}
+	if err := d.UpdatePeerLastKRL(ctx, "p", 7); err != nil {
+		t.Fatalf("UpdatePeerLastKRL: %v", err)
+	}
+	p, _ := d.GetPeer(ctx, "p")
+	if p.LastKRLVersion != 7 {
+		t.Errorf("LastKRLVersion = %d, want 7", p.LastKRLVersion)
+	}
+	if err := d.UpdatePeerLastKRL(ctx, "nope", 1); !errors.Is(err, ErrPeerNotFound) {
+		t.Errorf("update missing: %v", err)
+	}
+}
+
+func TestEnsureGroup(t *testing.T) {
+	ctx := t.Context()
+	d := newTestDB(t)
+	if err := d.EnsureGroup(ctx, "infra"); err != nil {
+		t.Fatalf("EnsureGroup: %v", err)
+	}
+	if err := d.EnsureGroup(ctx, "infra"); err != nil {
+		t.Fatalf("EnsureGroup repeat: %v", err)
+	}
+}
+
+func TestSetGetPeerGroups(t *testing.T) {
+	ctx := t.Context()
+	d := newTestDB(t)
+	if err := d.InsertPeer(ctx, "p", 1, "fp", []byte("k")); err != nil {
+		t.Fatalf("InsertPeer: %v", err)
+	}
+	if err := d.SetPeerGroups(ctx, "p", []string{"infra", "db"}); err != nil {
+		t.Fatalf("SetPeerGroups: %v", err)
+	}
+	gs, err := d.GetPeerGroups(ctx, "p")
+	if err != nil {
+		t.Fatalf("GetPeerGroups: %v", err)
+	}
+	sort.Strings(gs)
+	if len(gs) != 2 || gs[0] != "db" || gs[1] != "infra" {
+		t.Errorf("groups = %v", gs)
+	}
+	if err := d.SetPeerGroups(ctx, "p", []string{"web"}); err != nil {
+		t.Fatalf("SetPeerGroups replace: %v", err)
+	}
+	gs, _ = d.GetPeerGroups(ctx, "p")
+	if len(gs) != 1 || gs[0] != "web" {
+		t.Errorf("after replace: %v", gs)
+	}
+	if err := d.SetPeerGroups(ctx, "p", nil); err != nil {
+		t.Fatalf("clear groups: %v", err)
+	}
+	gs, _ = d.GetPeerGroups(ctx, "p")
+	if len(gs) != 0 {
+		t.Errorf("after clear: %v", gs)
+	}
+}
+
+func TestSetGetPeerAllowedGroups(t *testing.T) {
+	ctx := t.Context()
+	d := newTestDB(t)
+	if err := d.InsertPeer(ctx, "p", 1, "fp", []byte("k")); err != nil {
+		t.Fatalf("InsertPeer: %v", err)
+	}
+	if err := d.SetPeerAllowedGroups(ctx, "p", []string{"ops", "infra"}); err != nil {
+		t.Fatalf("SetPeerAllowedGroups: %v", err)
+	}
+	gs, err := d.GetPeerAllowedGroups(ctx, "p")
+	if err != nil {
+		t.Fatalf("GetPeerAllowedGroups: %v", err)
+	}
+	sort.Strings(gs)
+	if len(gs) != 2 || gs[0] != "infra" || gs[1] != "ops" {
+		t.Errorf("allowed groups = %v", gs)
+	}
+	if err := d.SetPeerAllowedGroups(ctx, "p", []string{"web"}); err != nil {
+		t.Fatalf("replace: %v", err)
+	}
+	gs, _ = d.GetPeerAllowedGroups(ctx, "p")
+	if len(gs) != 1 || gs[0] != "web" {
+		t.Errorf("after replace: %v", gs)
+	}
+}
+
+func TestInsertConsumeToken(t *testing.T) {
+	ctx := t.Context()
+	d := newTestDB(t)
+	if err := d.InsertToken(ctx, "tok1", "alpha", "infra,db"); err != nil {
+		t.Fatalf("InsertToken: %v", err)
+	}
+	peer, groups, err := d.ConsumeToken(ctx, "tok1")
+	if err != nil {
+		t.Fatalf("ConsumeToken: %v", err)
+	}
+	if peer != "alpha" || groups != "infra,db" {
+		t.Errorf("got peer=%q groups=%q", peer, groups)
+	}
+	_, _, err = d.ConsumeToken(ctx, "tok1")
+	if !errors.Is(err, ErrTokenAlreadyConsumed) {
+		t.Errorf("second consume: %v", err)
+	}
+	_, _, err = d.ConsumeToken(ctx, "missing")
+	if !errors.Is(err, ErrTokenNotFound) {
+		t.Errorf("missing token: %v", err)
+	}
+}
+
+func TestConsumeTokenRace(t *testing.T) {
+	ctx := t.Context()
+	d := newTestDB(t)
+	if err := d.InsertToken(ctx, "race", "p", "g"); err != nil {
+		t.Fatalf("InsertToken: %v", err)
+	}
+	const n = 10
+	var wg sync.WaitGroup
+	var success int64
+	var already int64
+	var other int64
+	wg.Add(n)
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			<-start
+			_, _, err := d.ConsumeToken(ctx, "race")
+			switch {
+			case err == nil:
+				atomic.AddInt64(&success, 1)
+			case errors.Is(err, ErrTokenAlreadyConsumed):
+				atomic.AddInt64(&already, 1)
+			default:
+				atomic.AddInt64(&other, 1)
+				t.Errorf("unexpected error: %v", err)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	if success != 1 {
+		t.Errorf("expected exactly 1 success, got %d", success)
+	}
+	if already != n-1 {
+		t.Errorf("expected %d ErrTokenAlreadyConsumed, got %d", n-1, already)
+	}
+	if other != 0 {
+		t.Errorf("unexpected errors: %d", other)
+	}
+}
+
+func TestCAVersions(t *testing.T) {
+	ctx := t.Context()
+	d := newTestDB(t)
+	if _, err := d.ActiveCAVersion(ctx); !errors.Is(err, ErrNoActiveCA) {
+		t.Errorf("expected ErrNoActiveCA, got %v", err)
+	}
+	if err := d.InsertCAVersion(ctx, 1); err != nil {
+		t.Fatalf("InsertCAVersion 1: %v", err)
+	}
+	if err := d.InsertCAVersion(ctx, 2); err != nil {
+		t.Fatalf("InsertCAVersion 2: %v", err)
+	}
+	if err := d.SetActiveCAVersion(ctx, 1); err != nil {
+		t.Fatalf("SetActiveCAVersion 1: %v", err)
+	}
+	v, err := d.ActiveCAVersion(ctx)
+	if err != nil || v != 1 {
+		t.Fatalf("ActiveCAVersion: v=%d err=%v", v, err)
+	}
+	if err := d.SetActiveCAVersion(ctx, 2); err != nil {
+		t.Fatalf("SetActiveCAVersion 2: %v", err)
+	}
+	v, err = d.ActiveCAVersion(ctx)
+	if err != nil || v != 2 {
+		t.Fatalf("ActiveCAVersion after switch: v=%d err=%v", v, err)
+	}
+	if err := d.SetActiveCAVersion(ctx, 99); err == nil {
+		t.Error("expected error setting active to non-existent version")
+	}
+}
+
+func TestNextKRLVersion(t *testing.T) {
+	ctx := t.Context()
+	d := newTestDB(t)
+	for want := 1; want <= 3; want++ {
+		v, err := d.NextKRLVersion(ctx)
+		if err != nil {
+			t.Fatalf("NextKRLVersion: %v", err)
+		}
+		if v != want {
+			t.Errorf("NextKRLVersion = %d, want %d", v, want)
+		}
+	}
+}
+
+func TestNextKRLVersionConcurrent(t *testing.T) {
+	ctx := t.Context()
+	d := newTestDB(t)
+	const n = 8
+	var wg sync.WaitGroup
+	versions := make([]int, n)
+	errs := make([]error, n)
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			versions[i], errs[i] = d.NextKRLVersion(ctx)
+		}()
+	}
+	wg.Wait()
+	seen := make(map[int]bool)
+	for i, v := range versions {
+		if errs[i] != nil {
+			t.Errorf("NextKRLVersion[%d]: %v", i, errs[i])
+			continue
+		}
+		if seen[v] {
+			t.Errorf("duplicate version %d", v)
+		}
+		seen[v] = true
+	}
+	if len(seen) != n {
+		t.Errorf("expected %d unique versions, got %d", n, len(seen))
+	}
+}
