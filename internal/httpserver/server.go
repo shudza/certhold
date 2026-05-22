@@ -18,8 +18,52 @@ import (
 
 func New(database *db.DB, caObj *ca.CA, hostname string) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /enroll/{token}", enrollHandler(database, caObj, hostname))
+	tarball := enrollHandler(database, caObj, hostname)
+	script := scriptHandler(database)
+	mux.HandleFunc("GET /enroll/{token}", func(w http.ResponseWriter, r *http.Request) {
+		tok := r.PathValue("token")
+		if strings.HasSuffix(tok, ".sh") {
+			script(w, r, strings.TrimSuffix(tok, ".sh"))
+			return
+		}
+		tarball(w, r)
+	})
 	return mux
+}
+
+func scriptHandler(database *db.DB) func(http.ResponseWriter, *http.Request, string) {
+	return func(w http.ResponseWriter, r *http.Request, token string) {
+		if token == "" {
+			writeErr(w, http.StatusBadRequest, "missing token")
+			return
+		}
+		_, _, consumed, err := database.LookupToken(r.Context(), token)
+		if err != nil {
+			if errors.Is(err, db.ErrTokenNotFound) {
+				writeErr(w, http.StatusNotFound, "token not found")
+				return
+			}
+			writeErr(w, http.StatusInternalServerError, "lookup token failed")
+			return
+		}
+		if consumed {
+			writeErr(w, http.StatusGone, "token already consumed")
+			return
+		}
+		scheme := "http"
+		if r.TLS != nil {
+			scheme = "https"
+		}
+		if p := r.Header.Get("X-Forwarded-Proto"); p != "" {
+			scheme = p
+		}
+		baseURL := fmt.Sprintf("%s://%s", scheme, r.Host)
+		body := fmt.Sprintf("#!/usr/bin/env bash\nset -e\ncurl -fsSL %s/enroll/%s | tar -xzC /\nsystemctl reload sshd\n", baseURL, token)
+		w.Header().Set("Content-Type", "application/x-shellscript; charset=utf-8")
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(body))
+	}
 }
 
 func enrollHandler(database *db.DB, caObj *ca.CA, hostname string) http.HandlerFunc {

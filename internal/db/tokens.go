@@ -24,6 +24,21 @@ func (db *DB) InsertToken(ctx context.Context, token, peerName, groupsCSV string
 	return nil
 }
 
+func (db *DB) LookupToken(ctx context.Context, token string) (string, string, bool, error) {
+	var peerName, groupsCSV string
+	var consumed int
+	err := db.sql.QueryRowContext(ctx,
+		`SELECT peer_name, groups, consumed FROM tokens WHERE token = ?`, token,
+	).Scan(&peerName, &groupsCSV, &consumed)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", "", false, ErrTokenNotFound
+		}
+		return "", "", false, fmt.Errorf("lookup token: %w", err)
+	}
+	return peerName, groupsCSV, consumed != 0, nil
+}
+
 func (db *DB) ConsumeToken(ctx context.Context, token string) (string, string, error) {
 	tx, err := db.sql.BeginTx(ctx, nil)
 	if err != nil {

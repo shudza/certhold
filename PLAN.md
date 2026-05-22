@@ -53,17 +53,19 @@ Every peer's `auth_principals/root` implicitly includes `manager` (added at onbo
 **Admin runs on manager:**
 ```
 $ certhold enroll new-vm --groups infra,databases
-echo "BASE64..." | bash
+curl -fsSL https://certhold.home.lan/enroll/<token>.sh | bash
 ```
 
 **Admin pastes on new peer:**
 ```
-$ echo "BASE64..." | bash
+$ curl -fsSL https://certhold.home.lan/enroll/<token>.sh | bash
 ```
 
-The decoded payload is a short bash script:
-1. Curls `https://certhold.home.lan/enroll/<token>` and pipes the response (a base64-encoded tarball) into `tar -xzC /`
+The script fetched from `/enroll/<token>.sh` is a short bash payload:
+1. Curls `https://certhold.home.lan/enroll/<token>` and pipes the response (a gzipped tarball) into `tar -xzC /`
 2. Reloads sshd
+
+**Manager handles `/enroll/<token>.sh`:** returns the install bash script that curls the tarball endpoint. Token is NOT consumed here; only inspected non-destructively (404 if missing, 410 if already consumed).
 
 **Manager handles `/enroll/<token>`:**
 1. Validates token, marks consumed
