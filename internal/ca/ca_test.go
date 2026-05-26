@@ -63,6 +63,41 @@ func TestRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSignCertGrantsStandardExtensions(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := Generate(dir); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	ca, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	_, _, peerPub, err := GeneratePeerKey()
+	if err != nil {
+		t.Fatalf("GeneratePeerKey: %v", err)
+	}
+	certBytes, _, err := ca.SignCert(SignOptions{Pubkey: peerPub, KeyID: "ext-peer", Principals: []string{"manager"}})
+	if err != nil {
+		t.Fatalf("SignCert: %v", err)
+	}
+	pk, _, _, _, err := ssh.ParseAuthorizedKey(certBytes)
+	if err != nil {
+		t.Fatalf("ParseAuthorizedKey: %v", err)
+	}
+	cert := pk.(*ssh.Certificate)
+	for _, ext := range []string{
+		"permit-X11-forwarding",
+		"permit-agent-forwarding",
+		"permit-port-forwarding",
+		"permit-pty",
+		"permit-user-rc",
+	} {
+		if _, ok := cert.Permissions.Extensions[ext]; !ok {
+			t.Errorf("cert missing extension %q (sshd would deny it)", ext)
+		}
+	}
+}
+
 func TestValidBeforeZeroIsInfinity(t *testing.T) {
 	dir := t.TempDir()
 	ca, err := Generate(dir)

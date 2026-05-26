@@ -112,6 +112,15 @@ func (c *CA) SignCert(opts SignOptions) ([]byte, uint64, error) {
 		ValidPrincipals: opts.Principals,
 		ValidAfter:      0,
 		ValidBefore:     validBefore,
+		Permissions: ssh.Permissions{
+			Extensions: map[string]string{
+				"permit-X11-forwarding":   "",
+				"permit-agent-forwarding": "",
+				"permit-port-forwarding":  "",
+				"permit-pty":              "",
+				"permit-user-rc":          "",
+			},
+		},
 	}
 	if err := cert.SignCert(rand.Reader, c.signer); err != nil {
 		return nil, 0, fmt.Errorf("sign cert: %w", err)
