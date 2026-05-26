@@ -18,17 +18,22 @@ type memoUnlocker struct {
 	got    bool
 }
 
+// get resolves the passphrase (prompting at most once) and returns a fresh copy
+// of the cached bytes each call. Consumers may zero the returned slice without
+// destroying the master cache, so a multi-peer command still succeeds for every
+// peer. The master copy is wiped at command exit via Zero.
 func (m *memoUnlocker) get() ([]byte, error) {
-	if m.got {
-		return m.cached, nil
+	if !m.got {
+		pass, err := m.fn()
+		if err != nil {
+			return nil, err
+		}
+		m.cached = pass
+		m.got = true
 	}
-	pass, err := m.fn()
-	if err != nil {
-		return nil, err
-	}
-	m.cached = pass
-	m.got = true
-	return pass, nil
+	out := make([]byte, len(m.cached))
+	copy(out, m.cached)
+	return out, nil
 }
 
 // Zero wipes the cached passphrase. Safe to call when nothing was cached.

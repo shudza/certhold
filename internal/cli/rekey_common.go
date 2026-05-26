@@ -209,9 +209,7 @@ func newCAPassphrase(caDir string, deps rekeyDeps) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("obtain ca passphrase: %w", err)
 	}
-	dup := make([]byte, len(pass))
-	copy(dup, pass)
-	return dup, nil
+	return pass, nil
 }
 
 // caKeyEncrypted reports whether the CA private key at caDir/ca is passphrase
