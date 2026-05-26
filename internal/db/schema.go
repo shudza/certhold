@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 2
+const schemaVersion = 3
 
 // The peers table extends PLAN.md with authorized_key BLOB and created_at TIMESTAMP.
 // We persist the peer's pubkey so certhold can re-sign certs on update/rekey without
@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS tokens (
   token TEXT PRIMARY KEY,
   peer_name TEXT NOT NULL,
   groups TEXT NOT NULL,
+  tarball BLOB,
   consumed INTEGER NOT NULL DEFAULT 0,
   created_at TIMESTAMP NOT NULL
 );
@@ -72,6 +73,9 @@ func (db *DB) migrate(ctx context.Context) error {
 		return fmt.Errorf("apply schema: %w", err)
 	}
 	if err := db.addModeColumns(ctx); err != nil {
+		return err
+	}
+	if err := db.addTarballColumn(ctx); err != nil {
 		return err
 	}
 	if _, err := db.sql.ExecContext(ctx,
@@ -100,6 +104,20 @@ func (db *DB) addModeColumns(ctx context.Context) error {
 				fmt.Sprintf(`ALTER TABLE %s ADD COLUMN target_user TEXT NOT NULL DEFAULT ''`, t)); err != nil {
 				return fmt.Errorf("alter %s add target_user: %w", t, err)
 			}
+		}
+	}
+	return nil
+}
+
+func (db *DB) addTarballColumn(ctx context.Context) error {
+	has, err := db.tableHasColumns(ctx, "tokens")
+	if err != nil {
+		return err
+	}
+	if !has["tarball"] {
+		if _, err := db.sql.ExecContext(ctx,
+			`ALTER TABLE tokens ADD COLUMN tarball BLOB`); err != nil {
+			return fmt.Errorf("alter tokens add tarball: %w", err)
 		}
 	}
 	return nil

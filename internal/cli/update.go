@@ -58,7 +58,12 @@ func newUpdateCmd() *cobra.Command {
 				ctx = context.Background()
 			}
 
-			caObj, err := ca.Load(filepath.Join(dataDir, "ca"))
+			caUnlock := newCAUnlocker()
+			defer caUnlock.Zero()
+			peerUnlock := newPeerUnlocker()
+			defer peerUnlock.Zero()
+
+			caObj, err := ca.LoadWithPassphrase(filepath.Join(dataDir, "ca"), caUnlock.get)
 			if err != nil {
 				return fmt.Errorf("load ca: %w", err)
 			}
@@ -107,7 +112,7 @@ func newUpdateCmd() *cobra.Command {
 				return fmt.Errorf("update peer cert serial: %w", err)
 			}
 
-			pusher, err := dialFn(ctx, host, selfPushOptions(dataDir, peer.Mode))
+			pusher, err := dialFn(ctx, host, selfPushOptions(dataDir, peer.Mode, peerUnlock.get))
 			if err != nil {
 				return fmt.Errorf("ssh dial %s: %w", host, err)
 			}
@@ -145,7 +150,7 @@ func newUpdateCmd() *cobra.Command {
 // one exists; prefer root layout (the historical default) when neither (yet)
 // exists so legacy tests that never wrote self files still get a deterministic
 // answer.
-func selfPushOptions(dataDir, _ string) sshpush.Options {
+func selfPushOptions(dataDir, _ string, peerPassFn func() ([]byte, error)) sshpush.Options {
 	rootSSH := filepath.Join(dataDir, "self", "etc", "ssh")
 	userBase := filepath.Join(dataDir, "self", "home")
 	rootPresent := existsFile(filepath.Join(rootSSH, "peer_ed25519"))
@@ -156,6 +161,7 @@ func selfPushOptions(dataDir, _ string) sshpush.Options {
 				CertPath:       filepath.Join(userSSH, "id_ed25519-cert.pub"),
 				KeyPath:        filepath.Join(userSSH, "id_ed25519"),
 				KnownHostsPath: filepath.Join(userSSH, "known_hosts"),
+				PassphraseFn:   peerPassFn,
 			}
 		}
 	}
@@ -163,6 +169,7 @@ func selfPushOptions(dataDir, _ string) sshpush.Options {
 		CertPath:       filepath.Join(rootSSH, "peer_ed25519-cert.pub"),
 		KeyPath:        filepath.Join(rootSSH, "peer_ed25519"),
 		KnownHostsPath: filepath.Join(rootSSH, "ca_known_hosts"),
+		PassphraseFn:   peerPassFn,
 	}
 }
 

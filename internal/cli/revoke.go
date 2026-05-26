@@ -77,6 +77,11 @@ func runRevoke(cmd *cobra.Command, name string) error {
 		return fmt.Errorf("revoke peer %q: %w", name, err)
 	}
 
+	caUnlock := newCAUnlocker()
+	defer caUnlock.Zero()
+	peerUnlock := newPeerUnlocker()
+	defer peerUnlock.Zero()
+
 	if peer.Mode == db.ModeUser {
 		// User-mode peers have no KRL; rotate the CA, skipping the revoked
 		// peer, so its old (now CA-retired) cert stops being accepted.
@@ -96,12 +101,14 @@ func runRevoke(cmd *cobra.Command, name string) error {
 			hostname = h
 		}
 		deps := rekeyDeps{
-			DataDir:  dataDir,
-			Hostname: hostname,
-			DB:       d,
-			Out:      cmd.OutOrStdout(),
-			Err:      cmd.ErrOrStderr(),
-			Dial:     rekeyDial,
+			DataDir:    dataDir,
+			Hostname:   hostname,
+			DB:         d,
+			Out:        cmd.OutOrStdout(),
+			Err:        cmd.ErrOrStderr(),
+			Dial:       rekeyDial,
+			CAUnlock:   caUnlock.get,
+			PeerPassFn: peerUnlock.get,
 		}
 		if deps.Dial == nil {
 			deps.Dial = defaultDial
@@ -115,7 +122,7 @@ func runRevoke(cmd *cobra.Command, name string) error {
 
 	caDir := filepath.Join(dataDir, "ca")
 	caPubPath := filepath.Join(caDir, "ca.pub")
-	if _, err := ca.Load(caDir); err != nil {
+	if _, err := ca.LoadWithPassphrase(caDir, caUnlock.get); err != nil {
 		return fmt.Errorf("load ca: %w", err)
 	}
 
@@ -141,7 +148,7 @@ func runRevoke(cmd *cobra.Command, name string) error {
 		return fmt.Errorf("next krl version: %w", err)
 	}
 
-	pushOpts := selfPushOptions(dataDir, db.ModeRoot)
+	pushOpts := selfPushOptions(dataDir, db.ModeRoot, peerUnlock.get)
 	pushOpts.User = "root"
 
 	dial := revokeDial

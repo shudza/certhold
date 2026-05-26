@@ -47,6 +47,8 @@ certhold enroll new-vm --groups infra,databases
 
 Paste that one-liner on the new peer as the user that should own certhold's SSH files (often a regular user; use `sudo -i` first if you want it owned by root). The install script computes `id -un` at runtime and reports it to the manager, then untars five files into `$HOME/.ssh/`. No `chown`, no root required. No sshd reload; the next inbound SSH connection from another peer matches the new `authorized_keys` line.
 
+**Optional per-peer key passphrase.** During install the script offers to encrypt *that peer's own* outbound key (`~/.ssh/id_ed25519` user-mode, `/etc/ssh/peer_ed25519` root-mode) via `ssh-keygen -p`. It reads the passphrase from `/dev/tty` (empty = leave unencrypted). For non-interactive installs set `CERTHOLD_KEY_PASSPHRASE=…` before invoking the one-liner, or `CERTHOLD_NO_PASSPHRASE=1` to skip the prompt entirely. The manager never sees this passphrase, and it does not affect the manager's inbound access (that uses the trusted CA, not this key).
+
 ## Data layout
 
 After `init`, the manager's state lives under `--data-dir` (default `~/.certhold`):
@@ -95,9 +97,11 @@ Bootstrap the manager.
 ```
 certhold init [--hostname <name>] [--mode user|root] [--user <name>]
               [--listen-ip <ip>] [--port <port>] [--no-prompt]
+              [--no-passphrase] [--separate-passphrases]
 ```
 
 - Refuses to overwrite an existing `state.db`.
+- **At-rest passphrase protection (default).** `init` prompts once for a passphrase used to encrypt both the CA key and the manager's own peer key (`CERTHOLD_CA_PASSPHRASE` / `CERTHOLD_PEER_PASSPHRASE` skip the prompt for automation). `--separate-passphrases` prompts for two distinct passphrases. `--no-passphrase` writes both keys UNENCRYPTED after printing a warning banner and requiring you to type `yes`; subsequent commands detect the plaintext keys and skip prompting.
 - `--hostname` overrides `os.Hostname()` for the manager peer's name.
 - `--mode` defaults to `user`; pass `--mode root` for the v1 layout.
 - `--user` defaults to `root`; ignored when `--mode=root`.
@@ -122,13 +126,14 @@ certhold initialized
 Run the HTTPS enrollment endpoint.
 
 ```
-certhold serve [--addr :8443] [--tls-cert FILE --tls-key FILE] [--hostname <name>]
+certhold serve [--addr :8443] [--tls-cert FILE --tls-key FILE]
 ```
 
+- **The `serve` process never touches the CA key.** Tarballs are signed and built at mint time by `certhold enroll` and stored against the token row, so `serve` is a CA-less byte-server. It never prompts for a passphrase.
 - Two routes:
   - `GET /enroll/<token>.sh` — returns the install bash script (does **not** consume the token).
-  - `GET /enroll/<token>` — returns a gzipped tarball with all peer files; consumes the token.
-- Mode-aware: user-mode tokens return a 5-file tarball + `getent`/`chown` script; root-mode tokens return the 6-file tarball + sentinel-block edit script.
+  - `GET /enroll/<token>` — streams the pre-built gzipped tarball stored on the token row; consumes the token (and clears the blob atomically). For user-mode tokens it records the redeem-time `?user=` into the peer row first.
+- A token minted before this version (or by a legacy path) has no stored tarball and returns 500 (`tarball not available`); re-issue it with `certhold enroll`.
 - By default, serves over HTTPS with a freshly-generated in-memory self-signed cert. The certificate's SHA-256 fingerprint is printed at startup so you can pin it out-of-band. Pass `--tls-cert`/`--tls-key` together to use your own cert (e.g. from Let's Encrypt or a private CA); passing only one errors out. Plain HTTP is not supported — the install script trusts the cert via `curl -k` because the enrollment token is the real auth.
 
 ### `certhold enroll`
@@ -136,11 +141,14 @@ certhold serve [--addr :8443] [--tls-cert FILE --tls-key FILE] [--hostname <name
 Mint an enrollment token and print the onboarding one-liner.
 
 ```
-certhold enroll <name> --groups a,b,c [--base-url URL] [--mode user|root] [--user <name>]
+certhold enroll <name> --groups a,b,c [--base-url URL] [--mode user|root] [--user <name>] [--hostname <name>]
 ```
 
+- **Signs at mint.** `enroll` loads the CA (prompting for the CA passphrase, or reading `CERTHOLD_CA_PASSPHRASE`), generates the peer keypair, signs the cert, builds the full install tarball, stores it against the token row, and records the peer in the DB — all before printing the one-liner. The peer key inside the tarball is plaintext; the install script offers to encrypt it on the peer.
+- For non-interactive / bulk enrollment, set `CERTHOLD_CA_PASSPHRASE` so the CA unlocks without a tty prompt.
 - `--mode` defaults to `user`; pass `--mode root` for the v1 layout.
 - `--user` is optional. Omit it and the peer reports its own user via `id -un` at install time. Pass `--user <name>` to pin a specific user — the install request must match or the server returns 400 (token preserved). Ignored when `--mode=root`.
+- `--hostname` sets the `@cert-authority` host in the root-mode `ca_known_hosts` entry (default: `os.Hostname()`).
 - `--base-url` resolution order: explicit `--base-url` flag > `$CERTHOLD_BASE_URL` env var > `<data-dir>/base_url` (written by `init`) > `https://certhold.home.lan` (legacy fallback).
 
 ### `certhold list`
@@ -188,13 +196,14 @@ certhold revoke <name> [--hostname <manager-name>]
 ### `certhold rekey`
 
 ```
-certhold rekey [--hostname <name>]
+certhold rekey [--hostname <name>] [--rotate-passphrase]
 ```
 
 - Generates a new CA, reissues every peer's cert against it, then per-peer:
   - **User-mode**: pushes a new `authorized_keys` (with the new CA on the cert-authority line) and a new `id_ed25519-cert.pub`. No sshd reload.
   - **Root-mode**: pushes `ca.pub` + the new cert, reloads sshd.
 - Certhold's own peer is rekeyed **last** under both modes.
+- Unlocks the old CA + manager peer key (prompt, or `CERTHOLD_CA_PASSPHRASE` / `CERTHOLD_PEER_PASSPHRASE`). The new CA key reuses the old CA passphrase unless `--rotate-passphrase` is given, which prompts for a fresh one. **`--rotate-passphrase` rotates the CA passphrase only** — the manager peer key (set at `init`) is not rewritten, so its passphrase is unchanged.
 
 ## Concepts
 

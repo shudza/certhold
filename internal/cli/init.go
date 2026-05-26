@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -11,10 +12,35 @@ import (
 
 	"github.com/shudza/certhold/internal/ca"
 	"github.com/shudza/certhold/internal/db"
+	"github.com/shudza/certhold/internal/passphrase"
 	"github.com/shudza/certhold/internal/peerfiles"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
 )
+
+const noPassphraseBanner = `================================================================
+  WARNING: --no-passphrase
+================================================================
+  The CA private key and certhold's own peer key will be written
+  to disk UNENCRYPTED in <data-dir>. Anyone with read access to
+  these files obtains, immediately:
+
+    1. The CA key — can mint a manager-principal cert for any
+       attacker-chosen pubkey, giving root on every enrolled
+       peer.
+    2. The manager peer key and its cert — gives root on every
+       enrolled peer directly, no signing required.
+
+  These two keys are the entire trust root of certhold. Theft of
+  either is unrecoverable except by a full CA rekey AND re-enrolling
+  every peer from scratch.
+
+  The default (passphrase-protected) is strongly recommended.
+  Only proceed if <data-dir> is on storage you already protect
+  by other means (e.g. LUKS with a passphrase you trust, ephemeral
+  CI/test environment, etc.).
+================================================================
+Type 'yes' to confirm --no-passphrase: `
 
 func newInitCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -88,6 +114,44 @@ func newInitCmd() *cobra.Command {
 				return fmt.Errorf("mkdir %s: %w", dataDir, err)
 			}
 
+			noPassphrase, err := cmd.Flags().GetBool("no-passphrase")
+			if err != nil {
+				return fmt.Errorf("get no-passphrase: %w", err)
+			}
+			separate, err := cmd.Flags().GetBool("separate-passphrases")
+			if err != nil {
+				return fmt.Errorf("get separate-passphrases: %w", err)
+			}
+
+			var caPass, peerPass []byte
+			defer func() {
+				passphrase.Zero(caPass)
+				passphrase.Zero(peerPass)
+			}()
+			if noPassphrase {
+				fmt.Fprint(cmd.ErrOrStderr(), noPassphraseBanner)
+				reader := bufio.NewReader(cmd.InOrStdin())
+				line, _ := reader.ReadString('\n')
+				if strings.TrimSpace(line) != "yes" {
+					return errors.New("--no-passphrase not confirmed")
+				}
+			} else if separate {
+				caPass, err = passphrase.PromptConfirm("CA passphrase: ", envCAPassphrase)
+				if err != nil {
+					return fmt.Errorf("read ca passphrase: %w", err)
+				}
+				peerPass, err = passphrase.PromptConfirm("Manager peer passphrase: ", envPeerPassphrase)
+				if err != nil {
+					return fmt.Errorf("read manager peer passphrase: %w", err)
+				}
+			} else {
+				caPass, err = passphrase.PromptConfirm("Passphrase for CA and manager key: ", envCAPassphrase)
+				if err != nil {
+					return fmt.Errorf("read passphrase: %w", err)
+				}
+				peerPass = caPass
+			}
+
 			ctx := context.Background()
 			database, err := db.Open(dbPath)
 			if err != nil {
@@ -95,15 +159,16 @@ func newInitCmd() *cobra.Command {
 			}
 			defer database.Close()
 
-			caObj, err := ca.Generate(filepath.Join(dataDir, "ca"))
+			caObj, err := ca.GenerateWithPassphrase(filepath.Join(dataDir, "ca"), caPass)
 			if err != nil {
 				return fmt.Errorf("generate ca: %w", err)
 			}
 
-			priv, pubAuth, sshPub, err := ca.GeneratePeerKey()
+			priv, pubAuth, sshPub, err := ca.GeneratePeerKeyWithPassphrase(peerPass)
 			if err != nil {
 				return fmt.Errorf("generate peer key: %w", err)
 			}
+			defer zeroBytes(priv)
 
 			certBytes, serial, err := caObj.SignCert(ca.SignOptions{
 				Pubkey:     sshPub,
@@ -183,6 +248,8 @@ func newInitCmd() *cobra.Command {
 	cmd.Flags().String("listen-ip", "", "IPv4 of the interface peers will reach certhold on (skip prompt)")
 	cmd.Flags().Int("port", 8443, "port the enroll endpoint listens on (used in the persisted base-url)")
 	cmd.Flags().Bool("no-prompt", false, "fail instead of prompting; pass --listen-ip to choose explicitly")
+	cmd.Flags().Bool("no-passphrase", false, "write the CA and manager keys UNENCRYPTED (requires typing 'yes'); not recommended")
+	cmd.Flags().Bool("separate-passphrases", false, "prompt for distinct CA and manager-key passphrases instead of sharing one")
 	return cmd
 }
 

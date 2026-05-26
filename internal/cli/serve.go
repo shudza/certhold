@@ -9,13 +9,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 
-	"github.com/shudza/certhold/internal/ca"
 	"github.com/shudza/certhold/internal/db"
 	"github.com/shudza/certhold/internal/httpserver"
 )
@@ -29,7 +27,6 @@ func newServeCmd() *cobra.Command {
 	cmd.Flags().String("addr", ":8443", "address to listen on")
 	cmd.Flags().String("tls-cert", "", "path to TLS certificate (optional; if unset, a self-signed cert is generated)")
 	cmd.Flags().String("tls-key", "", "path to TLS key (optional; if unset, a self-signed cert is generated)")
-	cmd.Flags().String("hostname", "", "hostname for the ca_known_hosts entry (default: os.Hostname())")
 	return cmd
 }
 
@@ -49,40 +46,20 @@ func runServe(cmd *cobra.Command, args []string) error {
 	if (tlsCert == "") != (tlsKey == "") {
 		return errors.New("--tls-cert and --tls-key must be provided together")
 	}
-	hostname, err := cmd.Flags().GetString("hostname")
-	if err != nil {
-		return err
-	}
-	if hostname == "" {
-		h, err := os.Hostname()
-		if err != nil {
-			return fmt.Errorf("hostname: %w", err)
-		}
-		hostname = h
-	}
 
-	dataDir, err := cmd.Root().PersistentFlags().GetString("data-dir")
-	if err != nil {
-		return fmt.Errorf("get data-dir: %w", err)
-	}
 	dbPath, err := cmd.Root().PersistentFlags().GetString("db")
 	if err != nil {
 		return fmt.Errorf("get db: %w", err)
 	}
-	dataDir = expandHome(dataDir)
 	dbPath = expandHome(dbPath)
 
-	caObj, err := ca.Load(filepath.Join(dataDir, "ca"))
-	if err != nil {
-		return fmt.Errorf("load ca: %w", err)
-	}
 	database, err := db.Open(dbPath)
 	if err != nil {
 		return fmt.Errorf("open db: %w", err)
 	}
 	defer database.Close()
 
-	mux := httpserver.New(database, caObj, hostname)
+	mux := httpserver.New(database)
 
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {

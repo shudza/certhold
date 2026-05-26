@@ -1,13 +1,19 @@
 package cli
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"golang.org/x/crypto/ssh"
+
+	"github.com/shudza/certhold/internal/ca"
 	"github.com/shudza/certhold/internal/db"
 )
 
@@ -26,7 +32,8 @@ func runEnroll(t *testing.T, dbPath string, args ...string) (string, string, err
 
 func setupDB(t *testing.T) string {
 	t.Helper()
-	dbPath := filepath.Join(t.TempDir(), "state.db")
+	dataDir := t.TempDir()
+	dbPath := filepath.Join(dataDir, "state.db")
 	d, err := db.Open(dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
@@ -34,7 +41,54 @@ func setupDB(t *testing.T) string {
 	if err := d.Close(); err != nil {
 		t.Fatalf("db.Close: %v", err)
 	}
+	// enroll signs at mint, so it needs a CA in <data-dir>/ca. Generate a
+	// plaintext one so LoadWithPassphrase loads it with no prompt.
+	if _, err := ca.Generate(filepath.Join(dataDir, "ca")); err != nil {
+		t.Fatalf("ca.Generate: %v", err)
+	}
 	return dbPath
+}
+
+// extractTokenTarball pulls the stored tarball blob for a token row directly via
+// a fresh consume (the cli enroll path stores it; the byte-server would clear it).
+func consumeTokenTarball(t *testing.T, dbPath, tok string) []byte {
+	t.Helper()
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer d.Close()
+	_, _, _, _, tb, err := d.ConsumeToken(context.Background(), tok)
+	if err != nil {
+		t.Fatalf("ConsumeToken: %v", err)
+	}
+	return tb
+}
+
+func extractTarEntries(t *testing.T, body []byte) map[string][]byte {
+	t.Helper()
+	gz, err := gzip.NewReader(bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("gzip.NewReader: %v", err)
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	out := map[string][]byte{}
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("tar.Next: %v", err)
+		}
+		data, err := io.ReadAll(tr)
+		if err != nil {
+			t.Fatalf("tar read: %v", err)
+		}
+		out[hdr.Name] = data
+	}
+	return out
 }
 
 func clearBaseURLEnv(t *testing.T) {
@@ -84,7 +138,7 @@ func TestEnrollSuccess(t *testing.T) {
 	}
 	defer d.Close()
 
-	peer, groups, mode, tu, err := d.ConsumeToken(context.Background(), tok)
+	peer, groups, mode, tu, _, err := d.ConsumeToken(context.Background(), tok)
 	if err != nil {
 		t.Fatalf("ConsumeToken: %v", err)
 	}
@@ -114,7 +168,7 @@ func TestEnrollDefaultUserEmpty(t *testing.T) {
 		t.Fatalf("reopen db: %v", err)
 	}
 	defer d.Close()
-	_, _, mode, tu, err := d.ConsumeToken(context.Background(), tok)
+	_, _, mode, tu, _, err := d.ConsumeToken(context.Background(), tok)
 	if err != nil {
 		t.Fatalf("ConsumeToken: %v", err)
 	}
@@ -138,7 +192,7 @@ func TestEnrollExplicitUserAlice(t *testing.T) {
 		t.Fatalf("reopen db: %v", err)
 	}
 	defer d.Close()
-	_, _, _, tu, err := d.ConsumeToken(context.Background(), tok)
+	_, _, _, tu, _, err := d.ConsumeToken(context.Background(), tok)
 	if err != nil {
 		t.Fatalf("ConsumeToken: %v", err)
 	}
@@ -159,7 +213,7 @@ func TestEnrollModeRoot(t *testing.T) {
 		t.Fatalf("reopen db: %v", err)
 	}
 	defer d.Close()
-	_, _, mode, tu, err := d.ConsumeToken(context.Background(), tok)
+	_, _, mode, tu, _, err := d.ConsumeToken(context.Background(), tok)
 	if err != nil {
 		t.Fatalf("ConsumeToken: %v", err)
 	}
@@ -183,7 +237,7 @@ func TestEnrollModeUserExplicitUser(t *testing.T) {
 		t.Fatalf("reopen db: %v", err)
 	}
 	defer d.Close()
-	_, _, mode, tu, err := d.ConsumeToken(context.Background(), tok)
+	_, _, mode, tu, _, err := d.ConsumeToken(context.Background(), tok)
 	if err != nil {
 		t.Fatalf("ConsumeToken: %v", err)
 	}
@@ -230,7 +284,7 @@ func TestEnrollGroupsDedupeAndTrim(t *testing.T) {
 		t.Fatalf("reopen db: %v", err)
 	}
 	defer d.Close()
-	_, groups, _, _, err := d.ConsumeToken(context.Background(), tok)
+	_, groups, _, _, _, err := d.ConsumeToken(context.Background(), tok)
 	if err != nil {
 		t.Fatalf("ConsumeToken: %v", err)
 	}
@@ -332,5 +386,128 @@ func TestEnrollBaseURLEnvBeatsPersistedNotFlag(t *testing.T) {
 	}
 	if tok := extractToken(t, out2.String(), "https://flag.wins"); tok == "" {
 		t.Fatal("empty token")
+	}
+}
+
+func TestEnrollBuildsRootTarball(t *testing.T) {
+	dbPath := setupDB(t)
+	stdout, stderr, err := runEnroll(t, dbPath, "rootvm", "--groups", "infra,databases", "--mode", "root")
+	if err != nil {
+		t.Fatalf("enroll: err=%v stderr=%s", err, stderr)
+	}
+	tok := extractToken(t, stdout, "https://certhold.home.lan")
+
+	tb := consumeTokenTarball(t, dbPath, tok)
+	if tb == nil {
+		t.Fatal("token row has nil tarball")
+	}
+	entries := extractTarEntries(t, tb)
+	for _, n := range []string{"etc/ssh/peer_ed25519", "etc/ssh/peer_ed25519-cert.pub", "etc/ssh/ca.pub", "etc/ssh/auth_principals/root"} {
+		if _, ok := entries[n]; !ok {
+			t.Errorf("missing entry %q", n)
+		}
+	}
+	certBytes := entries["etc/ssh/peer_ed25519-cert.pub"]
+	pk, _, _, _, err := ssh.ParseAuthorizedKey(certBytes)
+	if err != nil {
+		t.Fatalf("ParseAuthorizedKey: %v", err)
+	}
+	cert := pk.(*ssh.Certificate)
+	if cert.KeyId != "rootvm" {
+		t.Errorf("KeyId = %q, want rootvm", cert.KeyId)
+	}
+	want := []string{"rootvm", "infra", "databases"}
+	if strings.Join(cert.ValidPrincipals, ",") != strings.Join(want, ",") {
+		t.Errorf("principals = %v, want %v", cert.ValidPrincipals, want)
+	}
+
+	// A peer row was recorded at mint.
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer d.Close()
+	p, err := d.GetPeer(context.Background(), "rootvm")
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if p.Serial != cert.Serial {
+		t.Errorf("peer serial %d != cert serial %d", p.Serial, cert.Serial)
+	}
+}
+
+func TestEnrollBuildsUserTarball(t *testing.T) {
+	dbPath := setupDB(t)
+	stdout, stderr, err := runEnroll(t, dbPath, "uvm", "--groups", "infra", "--mode", "user", "--user", "alice")
+	if err != nil {
+		t.Fatalf("enroll: err=%v stderr=%s", err, stderr)
+	}
+	tok := extractToken(t, stdout, "https://certhold.home.lan")
+	tb := consumeTokenTarball(t, dbPath, tok)
+	entries := extractTarEntries(t, tb)
+	for _, n := range []string{"id_ed25519", "id_ed25519-cert.pub", "authorized_keys", "known_hosts", "config"} {
+		if _, ok := entries[n]; !ok {
+			t.Errorf("missing user-mode entry %q", n)
+		}
+	}
+	ak := string(entries["authorized_keys"])
+	if !strings.HasPrefix(ak, `cert-authority,principals="manager,infra" `) {
+		t.Errorf("authorized_keys = %q", ak)
+	}
+}
+
+func TestEnrollEncryptedCAViaEnv(t *testing.T) {
+	dataDir := t.TempDir()
+	dbPath := filepath.Join(dataDir, "state.db")
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	_ = d.Close()
+	if _, err := ca.GenerateWithPassphrase(filepath.Join(dataDir, "ca"), []byte("capw")); err != nil {
+		t.Fatalf("GenerateWithPassphrase: %v", err)
+	}
+
+	t.Setenv("CERTHOLD_CA_PASSPHRASE", "capw")
+	clearBaseURLEnv(t)
+	cmd := NewRootCmd()
+	var out, errBuf bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errBuf)
+	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "enroll", "encvm", "--groups", "infra", "--mode", "root"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("enroll with encrypted CA: err=%v stderr=%s", err, errBuf.String())
+	}
+	tok := extractToken(t, out.String(), "https://certhold.home.lan")
+	tb := consumeTokenTarball(t, dbPath, tok)
+	if tb == nil {
+		t.Fatal("encrypted-CA enroll produced nil tarball")
+	}
+	entries := extractTarEntries(t, tb)
+	if _, ok := entries["etc/ssh/peer_ed25519-cert.pub"]; !ok {
+		t.Error("missing signed cert in encrypted-CA tarball")
+	}
+}
+
+func TestEnrollWrongCAPassphraseFails(t *testing.T) {
+	dataDir := t.TempDir()
+	dbPath := filepath.Join(dataDir, "state.db")
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	_ = d.Close()
+	if _, err := ca.GenerateWithPassphrase(filepath.Join(dataDir, "ca"), []byte("right")); err != nil {
+		t.Fatalf("GenerateWithPassphrase: %v", err)
+	}
+	t.Setenv("CERTHOLD_CA_PASSPHRASE", "wrong")
+	clearBaseURLEnv(t)
+	cmd := NewRootCmd()
+	var out, errBuf bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errBuf)
+	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "enroll", "badvm", "--groups", "infra", "--mode", "root"})
+	if err := cmd.ExecuteContext(context.Background()); err == nil {
+		t.Fatal("enroll with wrong CA passphrase: want error, got nil")
 	}
 }

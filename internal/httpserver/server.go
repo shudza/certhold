@@ -2,7 +2,6 @@
 package httpserver
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,9 +9,6 @@ import (
 	"regexp"
 	"strings"
 
-	"golang.org/x/crypto/ssh"
-
-	"github.com/shudza/certhold/internal/ca"
 	"github.com/shudza/certhold/internal/db"
 	"github.com/shudza/certhold/internal/peerfiles"
 )
@@ -20,9 +16,31 @@ import (
 // POSIX-style usernames: lowercase letter or underscore, then [a-z0-9_-], optional trailing $.
 var validUsername = regexp.MustCompile(`^[a-z_][a-z0-9_-]*\$?$`)
 
-func New(database *db.DB, caObj *ca.CA, hostname string) http.Handler {
+// peerPassphraseBlock optionally encrypts the freshly installed peer key with a
+// passphrase the operator types at /dev/tty (or presets via env). It reads $KEY,
+// which each script body sets before splicing this in. Contains no '%' so it is
+// safe inside the fmt.Sprintf-built script bodies.
+const peerPassphraseBlock = `if [ "${CERTHOLD_NO_PASSPHRASE:-}" != "1" ]; then
+  PASS="${CERTHOLD_KEY_PASSPHRASE:-}"
+  if [ -z "$PASS" ] && [ -e /dev/tty ]; then
+    printf 'Passphrase for this peer key (empty = none): ' > /dev/tty
+    IFS= read -rs PASS < /dev/tty || PASS=""
+    printf '\n' > /dev/tty
+  fi
+  if [ -n "$PASS" ]; then
+    ssh-keygen -p -f "$KEY" -N "$PASS" -P "" >/dev/null 2>&1 || \
+      ssh-keygen -p -f "$KEY" -N "$PASS" >/dev/null 2>&1 || true
+    unset PASS
+  fi
+fi
+`
+
+// New builds the enroll HTTP handler. As of the sign-at-mint design the server no
+// longer holds the CA: tarballs are built and signed by the enroll CLI and stored
+// against the token row, so this handler is a CA-less byte-server.
+func New(database *db.DB) http.Handler {
 	mux := http.NewServeMux()
-	tarball := enrollHandler(database, caObj, hostname)
+	tarball := enrollHandler(database)
 	script := scriptHandler(database)
 	mux.HandleFunc("GET /enroll/{token}", func(w http.ResponseWriter, r *http.Request) {
 		tok := r.PathValue("token")
@@ -73,13 +91,16 @@ mkdir -p "$USER_HOME/.ssh"
 chmod 700 "$USER_HOME/.ssh"
 curl -kfsSL %s/enroll/%s?user=$TARGET_USER | tar -xzC "$USER_HOME/.ssh"
 chmod 600 "$USER_HOME/.ssh/id_ed25519"
-`, baseURL, token)
+KEY="$USER_HOME/.ssh/id_ed25519"
+%s`, baseURL, token, peerPassphraseBlock)
 		} else {
 			body = fmt.Sprintf(`#!/usr/bin/env bash
 set -e
 
 curl -kfsSL %s/enroll/%s | tar -xzC /
 
+KEY=/etc/ssh/peer_ed25519
+%s
 sed -i '/^# BEGIN certhold$/,/^# END certhold$/d' /etc/ssh/sshd_config
 cat >> /etc/ssh/sshd_config <<'SSHD_EOF'
 %sSSHD_EOF
@@ -89,7 +110,7 @@ cat >> /etc/ssh/ssh_config <<'SSH_EOF'
 %sSSH_EOF
 
 systemctl reload sshd
-`, baseURL, token, peerfiles.SshdBlockContents, peerfiles.SshClientBlockContents)
+`, baseURL, token, peerPassphraseBlock, peerfiles.SshdBlockContents, peerfiles.SshClientBlockContents)
 		}
 		w.Header().Set("Content-Type", "application/x-shellscript; charset=utf-8")
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
@@ -98,7 +119,7 @@ systemctl reload sshd
 	}
 }
 
-func enrollHandler(database *db.DB, caObj *ca.CA, hostname string) http.HandlerFunc {
+func enrollHandler(database *db.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 
@@ -137,7 +158,7 @@ func enrollHandler(database *db.DB, caObj *ca.CA, hostname string) http.HandlerF
 			}
 		}
 
-		peerName, groupsCSV, mode, targetUser, err := database.ConsumeToken(ctx, token)
+		peerName, _, mode, _, tarball, err := database.ConsumeToken(ctx, token)
 		if err != nil {
 			switch {
 			case errors.Is(err, db.ErrTokenNotFound):
@@ -151,85 +172,16 @@ func enrollHandler(database *db.DB, caObj *ca.CA, hostname string) http.HandlerF
 		}
 
 		if mode == db.ModeUser {
-			targetUser = queryUser
-		}
-
-		groups := parseGroupsCSV(groupsCSV)
-
-		principals := make([]string, 0, 1+len(groups))
-		principals = append(principals, peerName)
-		principals = append(principals, groups...)
-
-		priv, pubAuth, sshPub, err := ca.GeneratePeerKey()
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "generate peer key failed")
-			return
-		}
-
-		certBytes, serial, err := caObj.SignCert(ca.SignOptions{
-			Pubkey:     sshPub,
-			KeyID:      peerName,
-			Principals: principals,
-		})
-		if err != nil {
-			zero(priv)
-			writeErr(w, http.StatusInternalServerError, "sign cert failed")
-			return
-		}
-
-		fingerprint := ssh.FingerprintSHA256(sshPub)
-
-		if mode == "" {
-			mode = db.ModeRoot
-		}
-		if err := database.InsertPeerWithMode(ctx, peerName, serial, fingerprint, pubAuth, mode, targetUser); err != nil {
-			zero(priv)
-			writeErr(w, http.StatusInternalServerError, "insert peer failed")
-			return
-		}
-		for _, g := range groups {
-			if err := database.EnsureGroup(ctx, g); err != nil {
-				zero(priv)
-				writeErr(w, http.StatusInternalServerError, "ensure group failed")
+			if err := database.SetPeerTargetUser(ctx, peerName, queryUser); err != nil {
+				writeErr(w, http.StatusInternalServerError, "record target user failed")
 				return
 			}
 		}
-		if err := database.SetPeerGroups(ctx, peerName, groups); err != nil {
-			zero(priv)
-			writeErr(w, http.StatusInternalServerError, "set peer groups failed")
-			return
-		}
-		if err := database.SetPeerAllowedGroups(ctx, peerName, groups); err != nil {
-			zero(priv)
-			writeErr(w, http.StatusInternalServerError, "set peer allowed groups failed")
-			return
-		}
 
-		var tarball []byte
-		if mode == db.ModeUser {
-			tarball, err = peerfiles.BuildUser(peerfiles.UserPeerFiles{
-				TargetUser: targetUser,
-				PrivKey:    priv,
-				CertPub:    certBytes,
-				CAPub:      caObj.PublicKeyAuthorizedKey(),
-				Principals: groups,
-			})
-		} else {
-			caPubLine := string(bytes.TrimRight(caObj.PublicKeyAuthorizedKey(), "\n"))
-			caKnownHostsEntry := "@cert-authority " + hostname + " " + caPubLine
-			tarball, err = peerfiles.Build(peerfiles.PeerFiles{
-				Hostname:           peerName,
-				PrivKey:            priv,
-				CertPub:            certBytes,
-				CAPub:              caObj.PublicKeyAuthorizedKey(),
-				KRL:                nil,
-				AuthPrincipalsRoot: groups,
-				CAKnownHostsEntry:  caKnownHostsEntry,
-			})
-		}
-		if err != nil {
-			zero(priv)
-			writeErr(w, http.StatusInternalServerError, "build tarball failed")
+		if tarball == nil {
+			// Pre-upgrade token rows have no stored tarball. Such tokens must be
+			// re-issued with the sign-at-mint enroll CLI.
+			writeErr(w, http.StatusInternalServerError, "tarball not available")
 			return
 		}
 
@@ -237,26 +189,6 @@ func enrollHandler(database *db.DB, caObj *ca.CA, hostname string) http.HandlerF
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(tarball)))
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(tarball)
-
-		zero(priv)
-	}
-}
-
-func parseGroupsCSV(csv string) []string {
-	var out []string
-	for _, raw := range strings.Split(csv, ",") {
-		g := strings.TrimSpace(raw)
-		if g == "" {
-			continue
-		}
-		out = append(out, g)
-	}
-	return out
-}
-
-func zero(b []byte) {
-	for i := range b {
-		b[i] = 0
 	}
 }
 

@@ -87,6 +87,8 @@ func (m *rekeyMockPusher) Close() error { return nil }
 
 func setupRekeyEnv(t *testing.T, failOn map[string]error) (dataDir, dbPath, hostname string, rec *rekeyRecorder, cleanup func()) {
 	t.Helper()
+	t.Setenv("CERTHOLD_CA_PASSPHRASE", "test-ca-pw")
+	t.Setenv("CERTHOLD_PEER_PASSPHRASE", "test-peer-pw")
 	dir := t.TempDir()
 	dataDir = filepath.Join(dir, "data")
 	dbPath = filepath.Join(dir, "state.db")
@@ -345,6 +347,38 @@ func TestRekeyHappyPath(t *testing.T) {
 	}
 }
 
+func TestRekeyEncryptedCA_RotatedKeyUnlockableWithOriginalPassphrase(t *testing.T) {
+	const caPW = "test-ca-pw"
+	dataDir, dbPath, hostname, _, cleanup := setupRekeyEnv(t, nil)
+	defer cleanup()
+
+	caDir := filepath.Join(dataDir, "ca")
+	if enc, err := caKeyEncrypted(caDir); err != nil {
+		t.Fatalf("caKeyEncrypted: %v", err)
+	} else if !enc {
+		t.Fatal("test precondition: CA key should be encrypted after env-injected init")
+	}
+
+	_, stderr, err := runRekeyCmd(t, dataDir, dbPath, hostname)
+	if err != nil {
+		t.Fatalf("rekey: err=%v stderr=%s", err, stderr)
+	}
+
+	if enc, err := caKeyEncrypted(caDir); err != nil {
+		t.Fatalf("caKeyEncrypted after rekey: %v", err)
+	} else if !enc {
+		t.Fatal("rotated CA key is not encrypted; default rekey must preserve encryption")
+	}
+
+	_, err = ca.LoadWithPassphrase(caDir, func() ([]byte, error) {
+		return []byte(caPW), nil
+	})
+	if err != nil {
+		t.Fatalf("rotated CA not unlockable with original passphrase: %v "+
+			"(B1: memoized unlocker was zeroed in place, so the new CA was encrypted with zeros)", err)
+	}
+}
+
 func TestRekeyFailureAborts(t *testing.T) {
 	dataDir, dbPath, hostname, rec, cleanup := setupRekeyEnv(t, map[string]error{
 		"write:beta:/etc/ssh/ca.pub": errors.New("boom"),
@@ -414,6 +448,8 @@ func TestRekeyFailureAborts(t *testing.T) {
 }
 
 func TestRekeyUserModePeer_RewritesAuthorizedKeys_NoReload(t *testing.T) {
+	t.Setenv("CERTHOLD_CA_PASSPHRASE", "test-ca-pw")
+	t.Setenv("CERTHOLD_PEER_PASSPHRASE", "test-peer-pw")
 	dir := t.TempDir()
 	dataDir := filepath.Join(dir, "data")
 	dbPath := filepath.Join(dir, "state.db")

@@ -91,22 +91,29 @@ The script fetched from `/enroll/<token>.sh` is a short bash payload:
 
 **Manager handles `/enroll/<token>.sh`:** returns the install bash script that curls the tarball endpoint. Token is NOT consumed here; only inspected non-destructively (404 if missing, 410 if already consumed).
 
+**Sign-at-mint, not at fetch.** The CA-signing step happens inside the `certhold enroll` CLI command (which mints the token), not inside the HTTP handler. The CLI prompts for the CA passphrase, generates the peer keypair, signs the cert, builds the full tarball, stores the bytes against the token row, and wipes the CA key from memory. The HTTP `/enroll/<token>` handler then becomes a dumb byte-server. This keeps the long-lived `serve` process from ever needing CA-key access. See "Key passphrase protection" below.
+
+**`certhold enroll <name>` (CLI) does:**
+1. Validates name/groups; inserts token row
+2. Prompts for CA passphrase (unless `init` was run with `--no-passphrase`)
+3. Generates an ed25519 keypair in-memory
+4. Signs the cert with principals `<name>` plus the requested groups (NOT `manager` — only certhold's self-cert holds that principal)
+5. Builds the tarball with all files listed in the relevant mode's file layout. `auth_principals/root` (root mode) or the `cert-authority,principals="..."` line (user mode) always starts with `manager`, then the peer's groups.
+6. Stores `tarball` BLOB on the token row; wipes CA key and temp key material
+7. Records peer's pubkey fingerprint in the `peers` table for future operations
+
 **Manager handles `/enroll/<token>`:**
 1. Validates token, marks consumed
-2. Looks up the peer record (name, groups)
-3. Generates an ed25519 keypair in-memory
-4. Signs the cert: `ssh-keygen -s ca_key -I "<name>" -n "<name>,manager,group1,group2,..." pubkey`
-5. Builds the tarball with all files listed above. `auth_principals/root` always starts with `manager`, then the peer's groups.
-6. Returns the tarball, wipes temp key material
-7. Records peer's pubkey fingerprint in the database for future operations
+2. Streams the stored tarball bytes
+3. Clears the tarball blob on successful read (best-effort; row stays for audit)
 
 The peer ends up enrolled with no communication to any other peer. Existing peers don't know about the new one and don't need to — they already trust anything the CA signed.
 
 ## CLI surface
 
 ```
-certhold init                          # generate CA, self-enroll certhold as a peer
-certhold enroll <name> --groups a,b    # mint a token, print onboarding one-liner
+certhold init [--no-passphrase]        # generate CA, self-enroll certhold as a peer
+certhold enroll <name> --groups a,b    # mint a token, sign cert, build tarball, print onboarding one-liner
 certhold list [--peers|--groups]       # show state
 certhold update <name> --groups a,b,d  # reissue cert with new principals, push to peer, reload sshd
 certhold group allow <group> --on <peer>      # add group to peer's auth_principals/root, push
@@ -190,6 +197,7 @@ CREATE TABLE tokens (
   token TEXT PRIMARY KEY,
   peer_name TEXT,
   groups TEXT,
+  tarball BLOB,                        -- pre-built install bundle, signed at enroll-CLI time
   consumed INTEGER DEFAULT 0,
   created_at TIMESTAMP
 );
@@ -223,6 +231,100 @@ This is the big one. The CA private key is the crown jewel; if it lives as a fil
 TPM-backed CA key. Most modern hardware has a TPM 2.0. You can generate the CA key inside the TPM and sign through it — the key never exists as a file. An attacker with root on certhold can still request signatures while they're on the box, but can't exfiltrate the key to use later or elsewhere. ssh-tpm-agent or direct PKCS#11 via tpm2-pkcs11 both work with ssh-keygen. This is probably the single highest-leverage mitigation.
 YubiKey / hardware token. Same idea, removable. CA key on a YubiKey, plugged in only when you're actively administering. Great for homelab — matches the "I'm at my desk doing admin" workflow. Touch-to-sign means even with root on certhold, an attacker can't sign new certs without physical presence.
 Offline CA, online intermediate. Two-tier: a root CA that lives on an air-gapped machine or a USB stick in a drawer, which signs an intermediate CA on the bastion with a short lifetime (e.g. 90 days). Bastion compromise burns the intermediate; you sign a new one from the offline root. More ceremony than a homelab probably wants, but it's the textbook answer.
+
+3. **Passphrase-protect the keys on certhold.** Default in v1; see "Key passphrase protection" below. Cheap, large win against file-theft / backup-theft / disk-at-rest attacks. Does not protect against persistent RCE on certhold itself — that's what mitigation 2 (hardware-backed key) covers.
+
+
+## Key passphrase protection
+
+**Default behavior**: both keys on certhold (the CA private key, and certhold's own outbound peer key — the one paired with its `manager`-principal cert) are encrypted with passphrases at rest. Every CLI command that needs a key prompts for its passphrase, holds it unlocked only for the duration of the command, and wipes it on exit. The long-lived `serve` process never touches either key.
+
+### Threat model addressed
+
+Either key, in plaintext form, is full game-over:
+
+- **CA key** → an attacker can mint a `manager`-principal cert for any pubkey they own → root on every peer.
+- **Manager peer key** → an attacker can directly present certhold's existing manager cert → root on every peer immediately, no signing required.
+
+Both sit on the same disk in `<data-dir>`. Passphrase-protecting them defeats: stolen backups, snapshot exfiltration, disk-image theft, cold-boot, lost-laptop-with-certhold-data.
+
+It does **not** defeat persistent RCE on the certhold host — an attacker who can execute code at the moment a command is running can dump the unlocked key from process memory. That residual gap is what mitigation 2 above (TPM/YubiKey-backed CA, short-TTL per-op manager certs) closes.
+
+### Keys covered
+
+| Key | Location | Encrypted with |
+|---|---|---|
+| CA private key | `<data-dir>/ca/ca` | CA passphrase (set at `init`) |
+| Manager peer key | `<data-dir>/self/id_ed25519` (user mode) or `<data-dir>/self/peer_ed25519` (root mode) | Manager passphrase (set at `init`) |
+
+`init` prompts for one passphrase by default and uses it for both. Pass `--separate-passphrases` (or answer the second prompt with a different value when offered) to split them.
+
+### When the manager prompts
+
+| CLI command | CA key | Manager peer key |
+|---|---|---|
+| `init` | set (mint) | set (mint + sign self-cert) |
+| `enroll <name>` | unlock (sign peer cert) | — |
+| `update <name>` | unlock (re-sign cert) | unlock (push to peer) |
+| `group allow` / `group disallow` | — | unlock (push to peer) |
+| `revoke <name>` | unlock (sign new KRL) | unlock (push KRL to all non-revoked peers) |
+| `rekey` | set new + unlock old chain as needed | unlock old, set new |
+| `serve` | **never** | **never** |
+| `list` | — | — |
+
+Multi-peer push (`revoke`, `rekey`) prompts at most once per key, regardless of peer count: certhold uses a single outbound key for all peers, so unlocking it once covers the whole push. N peers never means N prompts. This is feasible because the design has no background or non-interactive push surface — every push is admin-initiated from the CLI, and offline-peer retries happen on the next manual run of the same command (state tracked in the db).
+
+### Per-peer passphrases (install-side, optional)
+
+When the install one-liner runs on a new peer, the install script gives the operator the option to passphrase-protect *that peer's* outbound key (`~/.ssh/id_ed25519` in user mode, `/etc/ssh/peer_ed25519` in root mode). Prompt reads from `/dev/tty` since the script is piped through `bash`. Operator can:
+
+- Type a passphrase → script runs `ssh-keygen -p` to encrypt the key before placing it.
+- Hit enter → key stays unencrypted (current behavior).
+- Pre-set `CERTHOLD_KEY_PASSPHRASE=…` in the environment when invoking the curl one-liner for non-interactive installs.
+- Pre-set `CERTHOLD_NO_PASSPHRASE=1` to skip the prompt entirely.
+
+The manager never sees this passphrase. It's a purely peer-local secret protecting that peer's outbound credentials against compromise of the peer itself.
+
+Note that peer-side passphrases don't affect certhold's inbound access to the peer: certhold authenticates by presenting its `manager`-principal cert, which sshd validates against the trusted CA pubkey on the peer — no peer-side passphrase enters that path.
+
+### Opt-out: `certhold init --no-passphrase`
+
+Disables passphrase protection for **both** certhold-side keys. The choice is implicit going forward — the keys are written unencrypted, and subsequent commands detect this and skip the prompt. No flag needs to be passed again.
+
+When `--no-passphrase` is set, `init` prints a banner before doing any work and requires the operator to type `yes` to proceed:
+
+```
+================================================================
+  WARNING: --no-passphrase
+================================================================
+  The CA private key and certhold's own peer key will be written
+  to disk UNENCRYPTED in <data-dir>. Anyone with read access to
+  these files obtains, immediately:
+
+    1. The CA key — can mint a manager-principal cert for any
+       attacker-chosen pubkey, giving root on every enrolled
+       peer.
+    2. The manager peer key and its cert — gives root on every
+       enrolled peer directly, no signing required.
+
+  These two keys are the entire trust root of certhold. Theft of
+  either is unrecoverable except by a full CA rekey AND re-enrolling
+  every peer from scratch.
+
+  The default (passphrase-protected) is strongly recommended.
+  Only proceed if <data-dir> is on storage you already protect
+  by other means (e.g. LUKS with a passphrase you trust, ephemeral
+  CI/test environment, etc.).
+================================================================
+Type 'yes' to confirm --no-passphrase:
+```
+
+### Implementation notes
+
+- Use `golang.org/x/crypto/ssh.MarshalPrivateKeyWithPassphrase` to write encrypted keys, `ssh.ParsePrivateKeyWithPassphrase` to read them. Detect encrypted-vs-not on read by trying unencrypted parse first and catching `*ssh.PassphraseMissingError`.
+- Read passphrases from `/dev/tty` (via `golang.org/x/term`) so they aren't echoed and aren't visible to processes parsing argv. Never accept passphrases as a flag value. Accept `CERTHOLD_CA_PASSPHRASE` / `CERTHOLD_PEER_PASSPHRASE` env vars for automation.
+- Wipe passphrase byte slices and unlocked-key material before command exit (`runtime.GC` is not enough; explicit zeroing of byte buffers where the key sits).
+- For rekey, the operator may want to keep the same passphrase across the rotation; the command should default to reusing the entered passphrase for the new keys and accept `--rotate-passphrase` to prompt for a fresh one.
 
 
 ## User level vs root level scoping

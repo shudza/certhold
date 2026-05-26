@@ -212,6 +212,8 @@ func TestRevokeUnknownPeer(t *testing.T) {
 // TestRevokeUserModeTriggersRekey verifies that revoking a user-mode peer
 // goes through the rekey path (rotates the CA) rather than pushing a KRL.
 func TestRevokeUserModeTriggersRekey(t *testing.T) {
+	t.Setenv("CERTHOLD_CA_PASSPHRASE", "test-ca-pw")
+	t.Setenv("CERTHOLD_PEER_PASSPHRASE", "test-peer-pw")
 	dir := t.TempDir()
 	dataDir := filepath.Join(dir, "data")
 	dbPath := filepath.Join(dir, "state.db")

@@ -134,7 +134,10 @@ func runGroupAction(cmd *cobra.Command, group string, allow bool) error {
 		return fmt.Errorf("set allowed groups: %w", err)
 	}
 
-	pushOpts := selfPushOptions(dataDir, peer.Mode)
+	peerUnlock := newPeerUnlocker()
+	defer peerUnlock.Zero()
+
+	pushOpts := selfPushOptions(dataDir, peer.Mode, peerUnlock.get)
 	pushOpts.User = pushUser(peer)
 	pusher, err := groupDial(ctx, host, pushOpts)
 	if err != nil {
@@ -143,11 +146,11 @@ func runGroupAction(cmd *cobra.Command, group string, allow bool) error {
 	defer pusher.Close()
 
 	if peer.Mode == db.ModeUser {
-		caObj, err := ca.Load(filepath.Join(dataDir, "ca"))
+		caPubBytes, err := ca.LoadPublicKey(filepath.Join(dataDir, "ca"))
 		if err != nil {
-			return fmt.Errorf("load ca: %w", err)
+			return fmt.Errorf("load ca public key: %w", err)
 		}
-		caPub, _, _, _, err := ssh.ParseAuthorizedKey(caObj.PublicKeyAuthorizedKey())
+		caPub, _, _, _, err := ssh.ParseAuthorizedKey(caPubBytes)
 		if err != nil {
 			return fmt.Errorf("parse ca pubkey: %w", err)
 		}

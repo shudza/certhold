@@ -493,4 +493,104 @@ func TestDialMissingKeyFile(t *testing.T) {
 	}
 }
 
+func TestDialEncryptedKeyWithPassphrase(t *testing.T) {
+	dir := t.TempDir()
+	caObj, err := ca.Generate(filepath.Join(dir, "ca"))
+	if err != nil {
+		t.Fatalf("ca.Generate: %v", err)
+	}
+	caPubAK := caObj.PublicKeyAuthorizedKey()
+	caPub, _, _, _, err := ssh.ParseAuthorizedKey(caPubAK)
+	if err != nil {
+		t.Fatalf("parse ca pub: %v", err)
+	}
+
+	const pass = "keypw"
+	peerPrivPEM, _, peerPub, err := ca.GeneratePeerKeyWithPassphrase([]byte(pass))
+	if err != nil {
+		t.Fatalf("GeneratePeerKeyWithPassphrase: %v", err)
+	}
+	keyPath := filepath.Join(dir, "peer_key")
+	if err := os.WriteFile(keyPath, peerPrivPEM, 0600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+	certBytes, _, err := caObj.SignCert(ca.SignOptions{Pubkey: peerPub, KeyID: "t", Principals: []string{"root", "manager"}})
+	if err != nil {
+		t.Fatalf("SignCert: %v", err)
+	}
+	certPath := filepath.Join(dir, "peer-cert.pub")
+	if err := os.WriteFile(certPath, certBytes, 0644); err != nil {
+		t.Fatalf("write cert: %v", err)
+	}
+	khPath := filepath.Join(dir, "known_hosts")
+
+	srv := newFakeServer(t, caPub)
+	defer srv.Close()
+
+	host, port, _ := net.SplitHostPort(srv.addr)
+	target := host
+	if port != "22" {
+		target = fmt.Sprintf("[%s]:%s", host, port)
+	}
+	hkLine := fmt.Sprintf("%s %s\n", target, strings.TrimSpace(string(ssh.MarshalAuthorizedKey(srv.hostKey.PublicKey()))))
+	if err := os.WriteFile(khPath, []byte(hkLine), 0644); err != nil {
+		t.Fatalf("write known_hosts: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	called := false
+	cl, err := Dial(ctx, srv.addr, Options{
+		CertPath:       certPath,
+		KeyPath:        keyPath,
+		KnownHostsPath: khPath,
+		User:           "root",
+		PassphraseFn: func() ([]byte, error) {
+			called = true
+			return []byte(pass), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Dial with encrypted key: %v", err)
+	}
+	defer cl.Close()
+	if !called {
+		t.Error("PassphraseFn was not invoked for an encrypted key")
+	}
+}
+
+func TestDialEncryptedKeyNilPassphraseFn(t *testing.T) {
+	dir := t.TempDir()
+	peerPrivPEM, _, _, err := ca.GeneratePeerKeyWithPassphrase([]byte("pw"))
+	if err != nil {
+		t.Fatalf("GeneratePeerKeyWithPassphrase: %v", err)
+	}
+	keyPath := filepath.Join(dir, "key")
+	if err := os.WriteFile(keyPath, peerPrivPEM, 0600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+	certPath := filepath.Join(dir, "cert.pub")
+	if err := os.WriteFile(certPath, []byte("unused"), 0644); err != nil {
+		t.Fatalf("write cert: %v", err)
+	}
+	khPath := filepath.Join(dir, "kh")
+	if err := os.WriteFile(khPath, []byte{}, 0644); err != nil {
+		t.Fatalf("write kh: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, err = Dial(ctx, "127.0.0.1:0", Options{
+		CertPath:       certPath,
+		KeyPath:        keyPath,
+		KnownHostsPath: khPath,
+	})
+	if err == nil {
+		t.Fatal("Dial with encrypted key and nil PassphraseFn: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "passphrase-protected") {
+		t.Errorf("error = %v, want mention of 'passphrase-protected'", err)
+	}
+}
+
 var _ Pusher = (*Client)(nil)

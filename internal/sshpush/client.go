@@ -20,6 +20,8 @@ import (
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
+
+	"github.com/shudza/certhold/internal/passphrase"
 )
 
 type Options struct {
@@ -27,6 +29,10 @@ type Options struct {
 	KeyPath        string
 	KnownHostsPath string
 	User           string
+	// PassphraseFn supplies the passphrase for an encrypted key. It is only
+	// invoked when the key file turns out to be encrypted; plaintext keys never
+	// call it, so callers with plaintext keys may leave it nil.
+	PassphraseFn func() ([]byte, error)
 }
 
 type Client struct {
@@ -42,7 +48,22 @@ func Dial(ctx context.Context, host string, opts Options) (*Client, error) {
 	}
 	rawKey, err := ssh.ParseRawPrivateKey(keyBytes)
 	if err != nil {
-		return nil, fmt.Errorf("parse private key %s: %w", opts.KeyPath, err)
+		var missing *ssh.PassphraseMissingError
+		if !errors.As(err, &missing) {
+			return nil, fmt.Errorf("parse private key %s: %w", opts.KeyPath, err)
+		}
+		if opts.PassphraseFn == nil {
+			return nil, fmt.Errorf("key %s is passphrase-protected but no passphrase source was provided", opts.KeyPath)
+		}
+		pass, perr := opts.PassphraseFn()
+		if perr != nil {
+			return nil, fmt.Errorf("obtain key passphrase for %s: %w", opts.KeyPath, perr)
+		}
+		rawKey, err = ssh.ParseRawPrivateKeyWithPassphrase(keyBytes, pass)
+		passphrase.Zero(pass)
+		if err != nil {
+			return nil, fmt.Errorf("parse encrypted private key %s: %w", opts.KeyPath, err)
+		}
 	}
 	signer, err := ssh.NewSignerFromKey(rawKey)
 	if err != nil {
