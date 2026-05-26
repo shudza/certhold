@@ -1,15 +1,20 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/crypto/ssh"
 
+	"github.com/shudza/certhold/internal/ca"
 	"github.com/shudza/certhold/internal/db"
+	"github.com/shudza/certhold/internal/peerfiles"
 	"github.com/shudza/certhold/internal/token"
 )
 
@@ -52,6 +57,24 @@ func newEnrollCmd() *cobra.Command {
 				return err
 			}
 
+			dataDir, err := cmd.Root().PersistentFlags().GetString("data-dir")
+			if err != nil {
+				return fmt.Errorf("get data-dir: %w", err)
+			}
+			dataDir = expandHome(dataDir)
+
+			hostname, err := cmd.Flags().GetString("hostname")
+			if err != nil {
+				return err
+			}
+			if hostname == "" {
+				h, herr := os.Hostname()
+				if herr != nil {
+					return fmt.Errorf("hostname: %w", herr)
+				}
+				hostname = h
+			}
+
 			dbPath, err := cmd.Flags().GetString("db")
 			if err != nil {
 				return err
@@ -73,10 +96,55 @@ func newEnrollCmd() *cobra.Command {
 				return fmt.Errorf("lookup peer: %w", err)
 			}
 
-			for _, g := range groups {
-				if err := d.EnsureGroup(ctx, g); err != nil {
-					return err
-				}
+			caUnlock := newCAUnlocker()
+			defer caUnlock.Zero()
+			caObj, err := ca.LoadWithPassphrase(filepath.Join(dataDir, "ca"), caUnlock.get)
+			if err != nil {
+				return fmt.Errorf("load ca: %w", err)
+			}
+
+			priv, pubAuth, sshPub, err := ca.GeneratePeerKey()
+			if err != nil {
+				return fmt.Errorf("generate peer key: %w", err)
+			}
+			defer zeroBytes(priv)
+
+			principals := append([]string{name}, groups...)
+			certBytes, serial, err := caObj.SignCert(ca.SignOptions{
+				Pubkey:     sshPub,
+				KeyID:      name,
+				Principals: principals,
+			})
+			if err != nil {
+				return fmt.Errorf("sign cert: %w", err)
+			}
+
+			fingerprint := ssh.FingerprintSHA256(sshPub)
+
+			var tarball []byte
+			if mode == db.ModeUser {
+				tarball, err = peerfiles.BuildUser(peerfiles.UserPeerFiles{
+					TargetUser: targetUser,
+					PrivKey:    priv,
+					CertPub:    certBytes,
+					CAPub:      caObj.PublicKeyAuthorizedKey(),
+					Principals: groups,
+				})
+			} else {
+				caPubLine := string(bytes.TrimRight(caObj.PublicKeyAuthorizedKey(), "\n"))
+				caKnownHostsEntry := "@cert-authority " + hostname + " " + caPubLine
+				tarball, err = peerfiles.Build(peerfiles.PeerFiles{
+					Hostname:           name,
+					PrivKey:            priv,
+					CertPub:            certBytes,
+					CAPub:              caObj.PublicKeyAuthorizedKey(),
+					KRL:                nil,
+					AuthPrincipalsRoot: groups,
+					CAKnownHostsEntry:  caKnownHostsEntry,
+				})
+			}
+			if err != nil {
+				return fmt.Errorf("build tarball: %w", err)
 			}
 
 			tok, err := token.Generate()
@@ -84,8 +152,22 @@ func newEnrollCmd() *cobra.Command {
 				return fmt.Errorf("generate token: %w", err)
 			}
 
-			if err := d.InsertTokenWithMode(ctx, tok, name, strings.Join(groups, ","), mode, targetUser); err != nil {
+			if err := d.InsertTokenWithMode(ctx, tok, name, strings.Join(groups, ","), mode, targetUser, tarball); err != nil {
 				return err
+			}
+			if err := d.InsertPeerWithMode(ctx, name, serial, fingerprint, pubAuth, mode, targetUser); err != nil {
+				return fmt.Errorf("insert peer: %w", err)
+			}
+			for _, g := range groups {
+				if err := d.EnsureGroup(ctx, g); err != nil {
+					return err
+				}
+			}
+			if err := d.SetPeerGroups(ctx, name, groups); err != nil {
+				return fmt.Errorf("set peer groups: %w", err)
+			}
+			if err := d.SetPeerAllowedGroups(ctx, name, groups); err != nil {
+				return fmt.Errorf("set peer allowed groups: %w", err)
 			}
 
 			fmt.Fprintf(cmd.OutOrStdout(), "curl -kfsSL %s/enroll/%s.sh | bash\n", baseURL, tok)
@@ -97,9 +179,16 @@ func newEnrollCmd() *cobra.Command {
 	cmd.Flags().String("base-url", legacyBaseURL, "base URL of certhold's enroll endpoint (defaults to value persisted by `init`, then $CERTHOLD_BASE_URL, then https://certhold.home.lan)")
 	cmd.Flags().String("mode", db.ModeUser, "install mode: 'user' (default, files under ~user/.ssh) or 'root' (files under /etc/ssh)")
 	cmd.Flags().String("user", "", "Unix user owning the ~/.ssh files; when set, acts as a hard constraint at install time (only meaningful with --mode=user)")
+	cmd.Flags().String("hostname", "", "hostname for the root-mode @cert-authority known_hosts entry (default: os.Hostname())")
 	_ = cmd.MarkFlagRequired("groups")
 
 	return cmd
+}
+
+func zeroBytes(b []byte) {
+	for i := range b {
+		b[i] = 0
+	}
 }
 
 func resolveBaseURL(cmd *cobra.Command) (string, error) {

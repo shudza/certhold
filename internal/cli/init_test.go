@@ -9,11 +9,22 @@ import (
 	"strings"
 	"testing"
 
+	"golang.org/x/crypto/ssh"
+
 	"github.com/shudza/certhold/internal/cli"
 	"github.com/shudza/certhold/internal/db"
 )
 
+// setInitPassphrases injects the CA + manager passphrases via env so init's
+// default (passphrase-protected) path never blocks on a tty in tests.
+func setInitPassphrases(t *testing.T) {
+	t.Helper()
+	t.Setenv("CERTHOLD_CA_PASSPHRASE", "test-ca-pw")
+	t.Setenv("CERTHOLD_PEER_PASSPHRASE", "test-peer-pw")
+}
+
 func TestInit_RootMode_HappyPath(t *testing.T) {
+	setInitPassphrases(t)
 	dataDir := t.TempDir()
 	dbPath := filepath.Join(dataDir, "state.db")
 
@@ -107,7 +118,50 @@ func TestInit_RootMode_HappyPath(t *testing.T) {
 	}
 }
 
+func TestInit_NoPassphrase_WritesPlaintext(t *testing.T) {
+	dataDir := t.TempDir()
+	dbPath := filepath.Join(dataDir, "state.db")
+
+	cmd := cli.NewRootCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetIn(strings.NewReader("yes\n"))
+	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", "m", "--mode", "root", "--listen-ip", "127.0.0.1", "--no-prompt", "--no-passphrase"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v\nout:\n%s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "WARNING: --no-passphrase") {
+		t.Errorf("banner not printed:\n%s", out.String())
+	}
+
+	// The CA key must be plaintext-parseable (no passphrase).
+	keyBytes, err := os.ReadFile(filepath.Join(dataDir, "ca", "ca"))
+	if err != nil {
+		t.Fatalf("read ca key: %v", err)
+	}
+	if _, err := ssh.ParsePrivateKey(keyBytes); err != nil {
+		t.Errorf("ca key should be plaintext-parseable: %v", err)
+	}
+}
+
+func TestInit_NoPassphrase_RequiresYes(t *testing.T) {
+	dataDir := t.TempDir()
+	dbPath := filepath.Join(dataDir, "state.db")
+
+	cmd := cli.NewRootCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetIn(strings.NewReader("no\n"))
+	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", "m", "--mode", "root", "--listen-ip", "127.0.0.1", "--no-prompt", "--no-passphrase"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected error when --no-passphrase not confirmed")
+	}
+}
+
 func TestInit_UserMode_HappyPath(t *testing.T) {
+	setInitPassphrases(t)
 	dataDir := t.TempDir()
 	dbPath := filepath.Join(dataDir, "state.db")
 
@@ -159,6 +213,7 @@ func TestInit_UserMode_HappyPath(t *testing.T) {
 }
 
 func TestInit_UserMode_DefaultsToCurrentUser(t *testing.T) {
+	setInitPassphrases(t)
 	dataDir := t.TempDir()
 	dbPath := filepath.Join(dataDir, "state.db")
 
@@ -201,6 +256,7 @@ func TestInit_UserMode_DefaultsToCurrentUser(t *testing.T) {
 }
 
 func TestInit_PersistsBaseURL(t *testing.T) {
+	setInitPassphrases(t)
 	dataDir := t.TempDir()
 	dbPath := filepath.Join(dataDir, "state.db")
 
@@ -243,6 +299,7 @@ func TestInit_InvalidListenIP(t *testing.T) {
 }
 
 func TestInit_Idempotency(t *testing.T) {
+	setInitPassphrases(t)
 	dataDir := t.TempDir()
 	dbPath := filepath.Join(dataDir, "state.db")
 

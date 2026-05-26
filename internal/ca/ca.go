@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/shudza/certhold/internal/passphrase"
 )
 
 type CA struct {
@@ -27,7 +29,16 @@ type SignOptions struct {
 	ValidBefore time.Time
 }
 
+// Generate writes a plaintext (unencrypted) CA key pair. Thin wrapper over
+// GenerateWithPassphrase with a nil passphrase, kept for tests and callers that
+// have opted out of at-rest protection.
 func Generate(dir string) (*CA, error) {
+	return GenerateWithPassphrase(dir, nil)
+}
+
+// GenerateWithPassphrase writes a CA key pair, encrypting the private key with
+// passphrase when len(passphrase) > 0 and writing it in plaintext otherwise.
+func GenerateWithPassphrase(dir string, pass []byte) (*CA, error) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, fmt.Errorf("mkdir %s: %w", dir, err)
 	}
@@ -44,7 +55,12 @@ func Generate(dir string) (*CA, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ed25519 keygen: %w", err)
 	}
-	block, err := ssh.MarshalPrivateKey(priv, "certhold-ca")
+	var block *pem.Block
+	if len(pass) > 0 {
+		block, err = ssh.MarshalPrivateKeyWithPassphrase(priv, "certhold-ca", pass)
+	} else {
+		block, err = ssh.MarshalPrivateKey(priv, "certhold-ca")
+	}
 	if err != nil {
 		return nil, fmt.Errorf("marshal private key: %w", err)
 	}
@@ -67,7 +83,18 @@ func Generate(dir string) (*CA, error) {
 	return &CA{signer: signer, pubAuthorizedKey: pubBytes}, nil
 }
 
+// Load reads a plaintext CA key pair. It fails on an encrypted key; use
+// LoadWithPassphrase for keys that may be passphrase-protected.
 func Load(dir string) (*CA, error) {
+	return LoadWithPassphrase(dir, nil)
+}
+
+// LoadWithPassphrase reads a CA key pair, transparently handling both plaintext
+// and passphrase-encrypted private keys. A plaintext key parses on the first try
+// and unlock is never invoked (existing plaintext deployments need no prompt).
+// An encrypted key triggers unlock() to obtain the passphrase; unlock may be nil
+// only when the key is known to be plaintext.
+func LoadWithPassphrase(dir string, unlock func() ([]byte, error)) (*CA, error) {
 	privPath := filepath.Join(dir, "ca")
 	pubPath := filepath.Join(dir, "ca.pub")
 	privBytes, err := os.ReadFile(privPath)
@@ -80,12 +107,42 @@ func Load(dir string) (*CA, error) {
 	}
 	signer, err := ssh.ParsePrivateKey(privBytes)
 	if err != nil {
-		return nil, fmt.Errorf("parse private key: %w", err)
+		var missing *ssh.PassphraseMissingError
+		if !errors.As(err, &missing) {
+			return nil, fmt.Errorf("parse private key: %w", err)
+		}
+		if unlock == nil {
+			return nil, fmt.Errorf("ca key %s is passphrase-protected but no passphrase source was provided", privPath)
+		}
+		pass, uerr := unlock()
+		if uerr != nil {
+			return nil, fmt.Errorf("obtain ca passphrase: %w", uerr)
+		}
+		signer, err = ssh.ParsePrivateKeyWithPassphrase(privBytes, pass)
+		passphrase.Zero(pass)
+		if err != nil {
+			return nil, fmt.Errorf("parse encrypted private key: %w", err)
+		}
 	}
 	if _, _, _, _, err := ssh.ParseAuthorizedKey(pubBytes); err != nil {
 		return nil, fmt.Errorf("parse public key: %w", err)
 	}
 	return &CA{signer: signer, pubAuthorizedKey: pubBytes}, nil
+}
+
+// LoadPublicKey returns just the CA's public key (authorized_keys form), reading
+// only ca.pub. Used by commands that never sign (e.g. group) so they never need
+// the CA passphrase.
+func LoadPublicKey(dir string) ([]byte, error) {
+	pubPath := filepath.Join(dir, "ca.pub")
+	pubBytes, err := os.ReadFile(pubPath)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", pubPath, err)
+	}
+	if _, _, _, _, err := ssh.ParseAuthorizedKey(pubBytes); err != nil {
+		return nil, fmt.Errorf("parse public key: %w", err)
+	}
+	return pubBytes, nil
 }
 
 func (c *CA) PublicKeyAuthorizedKey() []byte {

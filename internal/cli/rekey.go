@@ -38,6 +38,7 @@ func newRekeyCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().String("hostname", "", "certhold's own peer name (default: os.Hostname())")
+	cmd.Flags().Bool("rotate-passphrase", false, "prompt for a fresh CA passphrase for the new key instead of reusing the current one")
 	return cmd
 }
 
@@ -58,19 +59,32 @@ func runRekey(cmd *cobra.Command, hostname string) error {
 	dataDir = expandHome(dataDir)
 	dbPath = expandHome(dbPath)
 
+	rotate, err := cmd.Flags().GetBool("rotate-passphrase")
+	if err != nil {
+		return fmt.Errorf("get rotate-passphrase: %w", err)
+	}
+
 	d, err := db.Open(dbPath)
 	if err != nil {
 		return fmt.Errorf("open db: %w", err)
 	}
 	defer d.Close()
 
+	caUnlock := newCAUnlocker()
+	defer caUnlock.Zero()
+	peerUnlock := newPeerUnlocker()
+	defer peerUnlock.Zero()
+
 	deps := rekeyDeps{
-		DataDir:  dataDir,
-		Hostname: hostname,
-		DB:       d,
-		Out:      cmd.OutOrStdout(),
-		Err:      cmd.ErrOrStderr(),
-		Dial:     rekeyDial,
+		DataDir:          dataDir,
+		Hostname:         hostname,
+		DB:               d,
+		Out:              cmd.OutOrStdout(),
+		Err:              cmd.ErrOrStderr(),
+		Dial:             rekeyDial,
+		CAUnlock:         caUnlock.get,
+		PeerPassFn:       peerUnlock.get,
+		RotatePassphrase: rotate,
 	}
 	return runRekeyCore(ctx, deps, nil)
 }

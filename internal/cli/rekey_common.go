@@ -14,6 +14,7 @@ import (
 
 	"github.com/shudza/certhold/internal/ca"
 	"github.com/shudza/certhold/internal/db"
+	"github.com/shudza/certhold/internal/passphrase"
 	"github.com/shudza/certhold/internal/sshpush"
 )
 
@@ -27,6 +28,14 @@ type rekeyDeps struct {
 	// rekey share this so test mocks can intercept either entry point through
 	// the single package-level rekeyDial var.
 	Dial func(ctx context.Context, host string, opts sshpush.Options) (sshpush.Pusher, error)
+	// CAUnlock supplies the passphrase for the current (old) CA key; nil means
+	// plaintext-only (erroring if an encrypted key is hit). PeerPassFn supplies
+	// the manager peer key passphrase for pushes. RotatePassphrase, when true,
+	// prompts for a fresh passphrase for the new CA key instead of reusing the
+	// old one.
+	CAUnlock         func() ([]byte, error)
+	PeerPassFn       func() ([]byte, error)
+	RotatePassphrase bool
 }
 
 // runRekeyCore generates a new CA, signs new certs for every non-revoked peer
@@ -35,7 +44,7 @@ type rekeyDeps struct {
 // on user-mode peers (where there is no native KRL).
 func runRekeyCore(ctx context.Context, deps rekeyDeps, exclude map[string]bool) error {
 	caDir := filepath.Join(deps.DataDir, "ca")
-	if _, err := ca.Load(caDir); err != nil {
+	if _, err := ca.LoadWithPassphrase(caDir, deps.CAUnlock); err != nil {
 		return fmt.Errorf("load ca: %w", err)
 	}
 
@@ -65,13 +74,19 @@ func runRekeyCore(ctx context.Context, deps rekeyDeps, exclude map[string]bool) 
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("stat %s: %w", nextCADir, err)
 	}
-	newCA, err := ca.Generate(nextCADir)
+
+	newCAPass, err := newCAPassphrase(caDir, deps)
+	if err != nil {
+		return err
+	}
+	defer zeroBytes(newCAPass)
+	newCA, err := ca.GenerateWithPassphrase(nextCADir, newCAPass)
 	if err != nil {
 		return fmt.Errorf("generate new ca: %w", err)
 	}
 	newCAPub := newCA.PublicKeyAuthorizedKey()
 
-	pushOpts := selfPushOptions(deps.DataDir, self.Mode)
+	pushOpts := selfPushOptions(deps.DataDir, self.Mode, deps.PeerPassFn)
 	pushOpts.User = pushUser(self)
 
 	var updated []string
@@ -165,6 +180,56 @@ func runRekeyCore(ctx context.Context, deps rekeyDeps, exclude map[string]bool) 
 
 	fmt.Fprintf(deps.Out, "Rekey complete: %d peers rotated, CA version %d active, old CA archived at %s\n", len(updated), newVer, oldCADir)
 	return nil
+}
+
+// newCAPassphrase decides the passphrase for the freshly generated CA key.
+// When --rotate-passphrase is set it prompts (with confirmation) for a fresh
+// one. Otherwise it mirrors the old CA's protection: an encrypted old CA reuses
+// the same (memoized) passphrase; a plaintext old CA yields a nil passphrase so
+// the new key is also plaintext (no spurious prompt).
+func newCAPassphrase(caDir string, deps rekeyDeps) ([]byte, error) {
+	if deps.RotatePassphrase {
+		pass, err := passphrase.PromptConfirm("New CA passphrase: ", "")
+		if err != nil {
+			return nil, fmt.Errorf("read new ca passphrase: %w", err)
+		}
+		return pass, nil
+	}
+	encrypted, err := caKeyEncrypted(caDir)
+	if err != nil {
+		return nil, err
+	}
+	if !encrypted {
+		return nil, nil
+	}
+	if deps.CAUnlock == nil {
+		return nil, fmt.Errorf("ca key is passphrase-protected but no passphrase source was provided")
+	}
+	pass, err := deps.CAUnlock()
+	if err != nil {
+		return nil, fmt.Errorf("obtain ca passphrase: %w", err)
+	}
+	dup := make([]byte, len(pass))
+	copy(dup, pass)
+	return dup, nil
+}
+
+// caKeyEncrypted reports whether the CA private key at caDir/ca is passphrase
+// encrypted, without unlocking it.
+func caKeyEncrypted(caDir string) (bool, error) {
+	b, err := os.ReadFile(filepath.Join(caDir, "ca"))
+	if err != nil {
+		return false, fmt.Errorf("read ca key: %w", err)
+	}
+	_, err = ssh.ParsePrivateKey(b)
+	if err == nil {
+		return false, nil
+	}
+	var missing *ssh.PassphraseMissingError
+	if errors.As(err, &missing) {
+		return true, nil
+	}
+	return false, fmt.Errorf("parse ca key: %w", err)
 }
 
 // pushPeerRekey delivers the new CA + cert to a single peer, branching on the

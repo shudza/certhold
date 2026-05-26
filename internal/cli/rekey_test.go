@@ -87,6 +87,8 @@ func (m *rekeyMockPusher) Close() error { return nil }
 
 func setupRekeyEnv(t *testing.T, failOn map[string]error) (dataDir, dbPath, hostname string, rec *rekeyRecorder, cleanup func()) {
 	t.Helper()
+	t.Setenv("CERTHOLD_CA_PASSPHRASE", "test-ca-pw")
+	t.Setenv("CERTHOLD_PEER_PASSPHRASE", "test-peer-pw")
 	dir := t.TempDir()
 	dataDir = filepath.Join(dir, "data")
 	dbPath = filepath.Join(dir, "state.db")
@@ -414,6 +416,8 @@ func TestRekeyFailureAborts(t *testing.T) {
 }
 
 func TestRekeyUserModePeer_RewritesAuthorizedKeys_NoReload(t *testing.T) {
+	t.Setenv("CERTHOLD_CA_PASSPHRASE", "test-ca-pw")
+	t.Setenv("CERTHOLD_PEER_PASSPHRASE", "test-peer-pw")
 	dir := t.TempDir()
 	dataDir := filepath.Join(dir, "data")
 	dbPath := filepath.Join(dir, "state.db")

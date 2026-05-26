@@ -58,7 +58,6 @@ func TestServeStartupAndShutdown(t *testing.T) {
 		"--data-dir", tempDir,
 		"serve",
 		"--addr", "127.0.0.1:0",
-		"--hostname", "test",
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -126,7 +125,6 @@ func TestServeAutoTLSAcceptsHTTPSHandshake(t *testing.T) {
 		"--data-dir", tempDir,
 		"serve",
 		"--addr", "127.0.0.1:0",
-		"--hostname", "test",
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -207,7 +205,6 @@ func TestServeMismatchedTLSFlags(t *testing.T) {
 		"--data-dir", tempDir,
 		"serve",
 		"--addr", "127.0.0.1:0",
-		"--hostname", "test",
 		"--tls-cert", "/tmp/nonexistent.crt",
 	})
 

@@ -130,6 +130,23 @@ func (db *DB) UpdatePeerCertSerial(ctx context.Context, name string, serial uint
 	return nil
 }
 
+// SetPeerTargetUser records the redeem-time user for a user-mode peer. The byte-server
+// calls this when a ?user= install request consumes the token.
+func (db *DB) SetPeerTargetUser(ctx context.Context, name, targetUser string) error {
+	res, err := db.sql.ExecContext(ctx, `UPDATE peers SET target_user = ? WHERE name = ?`, targetUser, name)
+	if err != nil {
+		return fmt.Errorf("set peer target_user: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set peer target_user rows: %w", err)
+	}
+	if n == 0 {
+		return ErrPeerNotFound
+	}
+	return nil
+}
+
 func (db *DB) UpdatePeerLastKRL(ctx context.Context, name string, version int) error {
 	res, err := db.sql.ExecContext(ctx, `UPDATE peers SET last_krl_version = ? WHERE name = ?`, version, name)
 	if err != nil {
