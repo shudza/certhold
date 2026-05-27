@@ -174,20 +174,9 @@ func selfPushOptions(dataDir, _ string, peerPassFn func() ([]byte, error)) sshpu
 }
 
 func peerCertRemotePath(p *db.Peer) string {
-	if p.Mode == db.ModeUser {
-		user := p.TargetUser
-		if user == "" {
-			user = "root"
-		}
-		return peerfiles.HomeOf(user) + "/.ssh/id_ed25519-cert.pub"
-	}
-	return "/etc/ssh/peer_ed25519-cert.pub"
+	return peerfiles.PathsFor(p.LayoutVersion, p.Mode, p.TargetUser, "").Cert
 }
 
 func peerAuthorizedKeysRemotePath(p *db.Peer) string {
-	user := p.TargetUser
-	if user == "" {
-		user = "root"
-	}
-	return peerfiles.HomeOf(user) + "/.ssh/authorized_keys"
+	return peerfiles.PathsFor(p.LayoutVersion, db.ModeUser, p.TargetUser, "").AuthorizedKeys
 }

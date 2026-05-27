@@ -101,16 +101,16 @@ curl -kfsSL %s/enroll/%s | tar -xzC /
 
 KEY=/etc/ssh/peer_ed25519
 %s
-sed -i '/^# BEGIN certhold$/,/^# END certhold$/d' /etc/ssh/sshd_config
+sed -i -E '/^# BEGIN certhold( v[0-9]+)?$/,/^# END certhold( v[0-9]+)?$/d' /etc/ssh/sshd_config
 cat >> /etc/ssh/sshd_config <<'SSHD_EOF'
 %sSSHD_EOF
 
-sed -i '/^# BEGIN certhold$/,/^# END certhold$/d' /etc/ssh/ssh_config
+sed -i -E '/^# BEGIN certhold( v[0-9]+)?$/,/^# END certhold( v[0-9]+)?$/d' /etc/ssh/ssh_config
 cat >> /etc/ssh/ssh_config <<'SSH_EOF'
 %sSSH_EOF
 
 systemctl reload sshd
-`, baseURL, token, peerPassphraseBlock, peerfiles.SshdBlockContents, peerfiles.SshClientBlockContents)
+`, baseURL, token, peerPassphraseBlock, peerfiles.SshdBlock(peerfiles.CurrentLayout), peerfiles.SshClientBlock(peerfiles.CurrentLayout))
 		}
 		w.Header().Set("Content-Type", "application/x-shellscript; charset=utf-8")
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -109,7 +110,7 @@ func (e *testEnv) seedUserTarball(t *testing.T, name, targetUser string, groups 
 func (e *testEnv) seedPeerRow(t *testing.T, name, mode, targetUser string) {
 	t.Helper()
 	ctx := context.Background()
-	if err := e.db.InsertPeerWithMode(ctx, name, 1, "fp-"+name, []byte("authk-"+name), mode, targetUser); err != nil {
+	if err := e.db.InsertPeerWithMode(ctx, name, 1, "fp-"+name, []byte("authk-"+name), mode, targetUser, peerfiles.CurrentLayout); err != nil {
 		t.Fatalf("InsertPeerWithMode: %v", err)
 	}
 }
@@ -295,12 +296,12 @@ func TestEnrollScriptSuccess(t *testing.T) {
 		"#!/usr/bin/env bash",
 		"set -e",
 		"curl -kfsSL " + env.srv.URL + "/enroll/" + tok + " | tar -xzC /",
-		"sed -i '/^# BEGIN certhold$/,/^# END certhold$/d' /etc/ssh/sshd_config",
+		"sed -i -E '/^# BEGIN certhold( v[0-9]+)?$/,/^# END certhold( v[0-9]+)?$/d' /etc/ssh/sshd_config",
 		"cat >> /etc/ssh/sshd_config <<'SSHD_EOF'",
-		"# BEGIN certhold",
-		"# END certhold",
+		"# BEGIN certhold v1",
+		"# END certhold v1",
 		"SSHD_EOF",
-		"sed -i '/^# BEGIN certhold$/,/^# END certhold$/d' /etc/ssh/ssh_config",
+		"sed -i -E '/^# BEGIN certhold( v[0-9]+)?$/,/^# END certhold( v[0-9]+)?$/d' /etc/ssh/ssh_config",
 		"cat >> /etc/ssh/ssh_config <<'SSH_EOF'",
 		"SSH_EOF",
 		"systemctl reload sshd",
@@ -324,6 +325,14 @@ func TestEnrollScriptSuccess(t *testing.T) {
 	// The passphrase block must run before the sshd reload.
 	if idxBlock, idxReload := strings.Index(bodyStr, `ssh-keygen -p -f "$KEY"`), strings.Index(bodyStr, "systemctl reload sshd"); idxBlock < 0 || idxReload < 0 || idxBlock > idxReload {
 		t.Errorf("passphrase block (%d) must precede systemctl reload sshd (%d)", idxBlock, idxReload)
+	}
+
+	// The sed ERE matches both the legacy bare sentinel and any versioned one.
+	beginRe := regexp.MustCompile(`^# BEGIN certhold( v[0-9]+)?$`)
+	for _, line := range []string{"# BEGIN certhold", "# BEGIN certhold v1"} {
+		if !beginRe.MatchString(line) {
+			t.Errorf("begin sentinel regex did not match %q", line)
+		}
 	}
 
 	resp2, err := http.Get(env.srv.URL + "/enroll/" + tok)

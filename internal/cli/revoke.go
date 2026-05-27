@@ -13,6 +13,7 @@ import (
 	"github.com/shudza/certhold/internal/ca"
 	"github.com/shudza/certhold/internal/db"
 	"github.com/shudza/certhold/internal/krl"
+	"github.com/shudza/certhold/internal/peerfiles"
 	"github.com/shudza/certhold/internal/sshpush"
 )
 
@@ -196,7 +197,8 @@ func pushOne(ctx context.Context, dial func(context.Context, string, sshpush.Opt
 		return fmt.Errorf("dial: %w", err)
 	}
 	defer p.Close()
-	if err := p.WriteFileAtomic(ctx, "/etc/ssh/krl", krlBytes, fs.FileMode(0644)); err != nil {
+	krlPath := peerfiles.PathsFor(peerfiles.CurrentLayout, db.ModeRoot, "", "").KRL
+	if err := p.WriteFileAtomic(ctx, krlPath, krlBytes, fs.FileMode(0644)); err != nil {
 		return fmt.Errorf("write krl: %w", err)
 	}
 	if err := p.ReloadSSHD(ctx); err != nil {

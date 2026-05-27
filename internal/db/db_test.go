@@ -417,7 +417,7 @@ func TestInsertPeerLegacyDefaultsToRoot(t *testing.T) {
 func TestSetPeerTargetUser(t *testing.T) {
 	ctx := t.Context()
 	d := newTestDB(t)
-	if err := d.InsertPeerWithMode(ctx, "vmU", 1, "fp", []byte("k"), ModeUser, ""); err != nil {
+	if err := d.InsertPeerWithMode(ctx, "vmU", 1, "fp", []byte("k"), ModeUser, "", 1); err != nil {
 		t.Fatalf("InsertPeerWithMode: %v", err)
 	}
 	if err := d.SetPeerTargetUser(ctx, "vmU", "carol"); err != nil {
@@ -438,7 +438,7 @@ func TestSetPeerTargetUser(t *testing.T) {
 func TestInsertPeerWithMode(t *testing.T) {
 	ctx := t.Context()
 	d := newTestDB(t)
-	if err := d.InsertPeerWithMode(ctx, "vm", 1, "fp", []byte("k"), ModeUser, "alice"); err != nil {
+	if err := d.InsertPeerWithMode(ctx, "vm", 1, "fp", []byte("k"), ModeUser, "alice", 1); err != nil {
 		t.Fatalf("InsertPeerWithMode: %v", err)
 	}
 	p, err := d.GetPeer(ctx, "vm")
@@ -457,6 +457,28 @@ func TestInsertPeerWithMode(t *testing.T) {
 	}
 }
 
+func TestInsertPeerWithModeRoundTripsLayoutVersion(t *testing.T) {
+	ctx := t.Context()
+	d := newTestDB(t)
+	if err := d.InsertPeerWithMode(ctx, "lv", 1, "fp", []byte("k"), ModeRoot, "", 1); err != nil {
+		t.Fatalf("InsertPeerWithMode: %v", err)
+	}
+	p, err := d.GetPeer(ctx, "lv")
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if p.LayoutVersion != 1 {
+		t.Errorf("LayoutVersion = %d, want 1", p.LayoutVersion)
+	}
+	ps, err := d.ListPeers(ctx)
+	if err != nil {
+		t.Fatalf("ListPeers: %v", err)
+	}
+	if len(ps) != 1 || ps[0].LayoutVersion != 1 {
+		t.Errorf("ListPeers LayoutVersion wrong: %+v", ps)
+	}
+}
+
 func TestWithTxCommitsAtomically(t *testing.T) {
 	ctx := t.Context()
 	d := newTestDB(t)
@@ -465,7 +487,7 @@ func TestWithTxCommitsAtomically(t *testing.T) {
 		if err := tx.InsertTokenWithMode(ctx, "tokA", "vmA", "infra", ModeRoot, "", []byte("tar")); err != nil {
 			return err
 		}
-		if err := tx.InsertPeerWithMode(ctx, "vmA", 7, "fp", []byte("k"), ModeRoot, ""); err != nil {
+		if err := tx.InsertPeerWithMode(ctx, "vmA", 7, "fp", []byte("k"), ModeRoot, "", 1); err != nil {
 			return err
 		}
 		if err := tx.EnsureGroup(ctx, "infra"); err != nil {
@@ -503,7 +525,7 @@ func TestWithTxRollsBackOrphanedToken(t *testing.T) {
 	ctx := t.Context()
 	d := newTestDB(t)
 
-	if err := d.InsertPeerWithMode(ctx, "dup", 1, "fp", []byte("k"), ModeRoot, ""); err != nil {
+	if err := d.InsertPeerWithMode(ctx, "dup", 1, "fp", []byte("k"), ModeRoot, "", 1); err != nil {
 		t.Fatalf("seed peer: %v", err)
 	}
 
@@ -511,7 +533,7 @@ func TestWithTxRollsBackOrphanedToken(t *testing.T) {
 		if err := tx.InsertTokenWithMode(ctx, "orphan-tok", "dup", "infra", ModeRoot, "", []byte("tar")); err != nil {
 			return err
 		}
-		return tx.InsertPeerWithMode(ctx, "dup", 2, "fp2", []byte("k2"), ModeRoot, "")
+		return tx.InsertPeerWithMode(ctx, "dup", 2, "fp2", []byte("k2"), ModeRoot, "", 1)
 	})
 	if err == nil {
 		t.Fatal("expected duplicate peer insert to fail the tx")

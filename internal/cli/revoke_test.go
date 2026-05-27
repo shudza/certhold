@@ -246,7 +246,7 @@ func TestRevokeUserModeTriggersRekey(t *testing.T) {
 			t.Fatalf("GeneratePeerKey %s: %v", name, err)
 		}
 		_ = sshPub
-		if err := d.InsertPeerWithMode(ctx, name, 100, "fp-"+name, pubAuth, db.ModeUser, "root"); err != nil {
+		if err := d.InsertPeerWithMode(ctx, name, 100, "fp-"+name, pubAuth, db.ModeUser, "root", 1); err != nil {
 			t.Fatalf("InsertPeerWithMode %s: %v", name, err)
 		}
 		if err := d.EnsureGroup(ctx, "infra"); err != nil {

@@ -156,7 +156,7 @@ func newEnrollCmd() *cobra.Command {
 				if err := tx.InsertTokenWithMode(ctx, tok, name, strings.Join(groups, ","), mode, targetUser, tarball); err != nil {
 					return err
 				}
-				if err := tx.InsertPeerWithMode(ctx, name, serial, fingerprint, pubAuth, mode, targetUser); err != nil {
+				if err := tx.InsertPeerWithMode(ctx, name, serial, fingerprint, pubAuth, mode, targetUser, peerfiles.CurrentLayout); err != nil {
 					return fmt.Errorf("insert peer: %w", err)
 				}
 				for _, g := range groups {
