@@ -525,7 +525,7 @@ func TestRekeyUserModePeer_RewritesAuthorizedKeys_NoReload(t *testing.T) {
 	}
 	ctx := context.Background()
 	_, pubAuth, _, _ := ca.GeneratePeerKey()
-	if err := d.InsertPeerWithMode(ctx, "vmU", 100, "fp-u", pubAuth, db.ModeUser, "alice"); err != nil {
+	if err := d.InsertPeerWithMode(ctx, "vmU", 100, "fp-u", pubAuth, db.ModeUser, "alice", 1); err != nil {
 		t.Fatalf("InsertPeerWithMode: %v", err)
 	}
 	_ = d.EnsureGroup(ctx, "infra")

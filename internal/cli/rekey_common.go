@@ -15,6 +15,7 @@ import (
 	"github.com/shudza/certhold/internal/ca"
 	"github.com/shudza/certhold/internal/db"
 	"github.com/shudza/certhold/internal/passphrase"
+	"github.com/shudza/certhold/internal/peerfiles"
 	"github.com/shudza/certhold/internal/sshpush"
 )
 
@@ -263,10 +264,11 @@ func pushPeerRekey(ctx context.Context, dial func(context.Context, string, sshpu
 			return fmt.Errorf("write peer cert: %w", err)
 		}
 	} else {
-		if err := cl.WriteFileAtomic(ctx, "/etc/ssh/ca.pub", newCAPub, fs.FileMode(0644)); err != nil {
+		paths := peerfiles.PathsFor(p.LayoutVersion, p.Mode, p.TargetUser, "")
+		if err := cl.WriteFileAtomic(ctx, paths.CAPub, newCAPub, fs.FileMode(0644)); err != nil {
 			return fmt.Errorf("write ca.pub: %w", err)
 		}
-		if err := cl.WriteFileAtomic(ctx, "/etc/ssh/peer_ed25519-cert.pub", certBytes, fs.FileMode(0644)); err != nil {
+		if err := cl.WriteFileAtomic(ctx, paths.Cert, certBytes, fs.FileMode(0644)); err != nil {
 			return fmt.Errorf("write peer cert: %w", err)
 		}
 		if err := cl.ReloadSSHD(ctx); err != nil {
@@ -320,6 +322,7 @@ func trimTrailingNewline(b []byte) []byte {
 }
 
 func writeSelfRekey(dataDir string, self *db.Peer, newCAPub, selfCert []byte) error {
+	paths := peerfiles.PathsFor(self.LayoutVersion, self.Mode, self.TargetUser, "")
 	if self.Mode == db.ModeUser {
 		user := self.TargetUser
 		if user == "" {
@@ -330,19 +333,19 @@ func writeSelfRekey(dataDir string, self *db.Peer, newCAPub, selfCert []byte) er
 			return err
 		}
 		ak := userAuthorizedKeysLine(newCAPub, nil)
-		if err := writeFileAtomicLocal(filepath.Join(base, "authorized_keys"), ak, 0644); err != nil {
+		if err := writeFileAtomicLocal(filepath.Join(base, filepath.Base(paths.AuthorizedKeys)), ak, 0644); err != nil {
 			return fmt.Errorf("write self authorized_keys: %w", err)
 		}
-		if err := writeFileAtomicLocal(filepath.Join(base, "id_ed25519-cert.pub"), selfCert, 0644); err != nil {
+		if err := writeFileAtomicLocal(filepath.Join(base, filepath.Base(paths.Cert)), selfCert, 0644); err != nil {
 			return fmt.Errorf("write self cert: %w", err)
 		}
 		return nil
 	}
 	selfSSHDir := filepath.Join(dataDir, "self", "etc", "ssh")
-	if err := writeFileAtomicLocal(filepath.Join(selfSSHDir, "ca.pub"), newCAPub, 0644); err != nil {
+	if err := writeFileAtomicLocal(filepath.Join(selfSSHDir, filepath.Base(paths.CAPub)), newCAPub, 0644); err != nil {
 		return fmt.Errorf("write self ca.pub: %w", err)
 	}
-	if err := writeFileAtomicLocal(filepath.Join(selfSSHDir, "peer_ed25519-cert.pub"), selfCert, 0644); err != nil {
+	if err := writeFileAtomicLocal(filepath.Join(selfSSHDir, filepath.Base(paths.Cert)), selfCert, 0644); err != nil {
 		return fmt.Errorf("write self cert: %w", err)
 	}
 	return nil

@@ -17,8 +17,6 @@ import (
 	"github.com/shudza/certhold/internal/sshpush"
 )
 
-const authPrincipalsRootPath = "/etc/ssh/auth_principals/root"
-
 // groupDial is overridden in tests.
 var groupDial = func(ctx context.Context, host string, opts sshpush.Options) (sshpush.Pusher, error) {
 	return sshpush.Dial(ctx, host, opts)
@@ -167,6 +165,7 @@ func runGroupAction(cmd *cobra.Command, group string, allow bool) error {
 			return fmt.Errorf("write %s: %w", remote, err)
 		}
 	} else {
+		authPrincipalsRootPath := peerfiles.PathsFor(peer.LayoutVersion, peer.Mode, peer.TargetUser, "").AuthorizedKeys
 		content := renderAuthPrincipalsRoot(current)
 		if err := pusher.WriteFileAtomic(ctx, authPrincipalsRootPath, []byte(content), fs.FileMode(0644)); err != nil {
 			return fmt.Errorf("write %s: %w", authPrincipalsRootPath, err)

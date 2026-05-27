@@ -32,8 +32,8 @@ func WriteSelfFiles(dir string, p PeerFiles) error {
 		{"etc/ssh/krl", 0644, krl},
 		{"etc/ssh/auth_principals/root", 0644, authPrincipals},
 		{"etc/ssh/ca_known_hosts", 0644, []byte(p.CAKnownHostsEntry + "\n")},
-		{"etc/ssh/sshd_config_block.conf", 0644, []byte(SshdBlockContents)},
-		{"etc/ssh/ssh_config_block.conf", 0644, []byte(SshClientBlockContents)},
+		{"etc/ssh/sshd_config_block.conf", 0644, []byte(SshdBlock(LayoutV1))},
+		{"etc/ssh/ssh_config_block.conf", 0644, []byte(SshClientBlock(LayoutV1))},
 	}
 
 	for _, e := range entries {

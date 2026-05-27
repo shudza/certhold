@@ -235,7 +235,7 @@ func setupUpdateUserPeer(t *testing.T, peerName, targetUser string) (dataDir, db
 		t.Fatalf("db.Open: %v", err)
 	}
 	defer d.Close()
-	if err := d.InsertPeerWithMode(context.Background(), peerName, 1, ssh.FingerprintSHA256(sshPub), pubAuth, db.ModeUser, targetUser); err != nil {
+	if err := d.InsertPeerWithMode(context.Background(), peerName, 1, ssh.FingerprintSHA256(sshPub), pubAuth, db.ModeUser, targetUser, 1); err != nil {
 		t.Fatalf("InsertPeerWithMode: %v", err)
 	}
 	return dataDir, dbPath

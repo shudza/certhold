@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 3
+const schemaVersion = 4
 
 // The peers table extends PLAN.md with authorized_key BLOB and created_at TIMESTAMP.
 // We persist the peer's pubkey so certhold can re-sign certs on update/rekey without
@@ -78,6 +78,9 @@ func (db *DB) migrate(ctx context.Context) error {
 	if err := db.addTarballColumn(ctx); err != nil {
 		return err
 	}
+	if err := db.addLayoutVersionColumn(ctx); err != nil {
+		return err
+	}
 	if _, err := db.sql.ExecContext(ctx,
 		`INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)`,
 		fmt.Sprintf("%d", schemaVersion),
@@ -118,6 +121,20 @@ func (db *DB) addTarballColumn(ctx context.Context) error {
 		if _, err := db.sql.ExecContext(ctx,
 			`ALTER TABLE tokens ADD COLUMN tarball BLOB`); err != nil {
 			return fmt.Errorf("alter tokens add tarball: %w", err)
+		}
+	}
+	return nil
+}
+
+func (db *DB) addLayoutVersionColumn(ctx context.Context) error {
+	has, err := db.tableHasColumns(ctx, "peers")
+	if err != nil {
+		return err
+	}
+	if !has["layout_version"] {
+		if _, err := db.sql.ExecContext(ctx,
+			`ALTER TABLE peers ADD COLUMN layout_version INTEGER NOT NULL DEFAULT 1`); err != nil {
+			return fmt.Errorf("alter peers add layout_version: %w", err)
 		}
 	}
 	return nil

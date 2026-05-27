@@ -18,23 +18,6 @@ type PeerFiles struct {
 	CAKnownHostsEntry  string
 }
 
-const SshdBlockContents = `# BEGIN certhold
-HostKey /etc/ssh/peer_ed25519
-HostCertificate /etc/ssh/peer_ed25519-cert.pub
-TrustedUserCAKeys /etc/ssh/ca.pub
-RevokedKeys /etc/ssh/krl
-AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u
-# END certhold
-`
-
-const SshClientBlockContents = `# BEGIN certhold
-Host *
-    CertificateFile /etc/ssh/peer_ed25519-cert.pub
-    IdentityFile /etc/ssh/peer_ed25519
-    UserKnownHostsFile /etc/ssh/ca_known_hosts
-# END certhold
-`
-
 func Build(p PeerFiles) ([]byte, error) {
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)

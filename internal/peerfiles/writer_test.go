@@ -50,10 +50,10 @@ func TestWriteSelfFiles_AllEntriesAndModes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read sshd_config_block.conf: %v", err)
 	}
-	if string(sshdBlock) != SshdBlockContents {
-		t.Errorf("sshd_config_block.conf mismatch:\ngot:\n%s\nwant:\n%s", sshdBlock, SshdBlockContents)
+	if string(sshdBlock) != SshdBlock(LayoutV1) {
+		t.Errorf("sshd_config_block.conf mismatch:\ngot:\n%s\nwant:\n%s", sshdBlock, SshdBlock(LayoutV1))
 	}
-	if !strings.Contains(string(sshdBlock), "# BEGIN certhold\n") || !strings.Contains(string(sshdBlock), "\n# END certhold\n") {
+	if !strings.Contains(string(sshdBlock), "# BEGIN certhold v1\n") || !strings.Contains(string(sshdBlock), "\n# END certhold v1\n") {
 		t.Errorf("sshd_config_block.conf missing sentinels: %q", sshdBlock)
 	}
 
@@ -61,10 +61,10 @@ func TestWriteSelfFiles_AllEntriesAndModes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read ssh_config_block.conf: %v", err)
 	}
-	if string(sshBlock) != SshClientBlockContents {
-		t.Errorf("ssh_config_block.conf mismatch:\ngot:\n%s\nwant:\n%s", sshBlock, SshClientBlockContents)
+	if string(sshBlock) != SshClientBlock(LayoutV1) {
+		t.Errorf("ssh_config_block.conf mismatch:\ngot:\n%s\nwant:\n%s", sshBlock, SshClientBlock(LayoutV1))
 	}
-	if !strings.Contains(string(sshBlock), "# BEGIN certhold\n") || !strings.Contains(string(sshBlock), "\n# END certhold\n") {
+	if !strings.Contains(string(sshBlock), "# BEGIN certhold v1\n") || !strings.Contains(string(sshBlock), "\n# END certhold v1\n") {
 		t.Errorf("ssh_config_block.conf missing sentinels: %q", sshBlock)
 	}
 

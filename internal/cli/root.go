@@ -16,9 +16,9 @@ func NewRootCmd() *cobra.Command {
 	defaultDB := filepath.Join(defaultDataDir, "state.db")
 
 	cmd := &cobra.Command{
-		Use:           "certhold",
-		Short:         "Certhold — homelab SSH access manager",
-		Long:          "Certhold is a homelab SSH access manager. It runs an SSH certificate authority, signs peer certs, and pushes config to peers over SSH.",
+		Use:          "certhold",
+		Short:        "Certhold — homelab SSH access manager",
+		Long:         "Certhold is a homelab SSH access manager. It runs an SSH certificate authority, signs peer certs, and pushes config to peers over SSH.",
 		SilenceUsage: true,
 	}
 

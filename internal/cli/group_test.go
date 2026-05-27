@@ -329,7 +329,7 @@ func setupGroupUserModeDB(t *testing.T, peerName, targetUser string, allowed []s
 		t.Fatalf("db.Open: %v", err)
 	}
 	defer d.Close()
-	if err := d.InsertPeerWithMode(context.Background(), peerName, 1, "fp", []byte("k"), db.ModeUser, targetUser); err != nil {
+	if err := d.InsertPeerWithMode(context.Background(), peerName, 1, "fp", []byte("k"), db.ModeUser, targetUser, 1); err != nil {
 		t.Fatalf("InsertPeerWithMode: %v", err)
 	}
 	for _, g := range allowed {
@@ -428,7 +428,7 @@ func TestGroupAllow_UserMode_EncryptedCA_NoCAPassphrase(t *testing.T) {
 		t.Fatalf("db.Open: %v", err)
 	}
 	ctx := context.Background()
-	if err := d.InsertPeerWithMode(ctx, "vmU", 1, "fp", []byte("k"), db.ModeUser, "alice"); err != nil {
+	if err := d.InsertPeerWithMode(ctx, "vmU", 1, "fp", []byte("k"), db.ModeUser, "alice", 1); err != nil {
 		t.Fatalf("InsertPeerWithMode: %v", err)
 	}
 	if err := d.EnsureGroup(ctx, "infra"); err != nil {
