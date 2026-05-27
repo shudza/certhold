@@ -168,7 +168,7 @@ func runRevoke(cmd *cobra.Command, name string) error {
 		}
 		if p.Mode == db.ModeUser {
 			// User-mode peers have RevokedKeys disabled. Skip; document the
-			// known limitation in the report and USAGE.md.
+			// known limitation in the report and docs/maintenance-and-operations.md.
 			continue
 		}
 		targets++
