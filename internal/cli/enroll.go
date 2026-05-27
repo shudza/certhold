@@ -152,22 +152,27 @@ func newEnrollCmd() *cobra.Command {
 				return fmt.Errorf("generate token: %w", err)
 			}
 
-			if err := d.InsertTokenWithMode(ctx, tok, name, strings.Join(groups, ","), mode, targetUser, tarball); err != nil {
-				return err
-			}
-			if err := d.InsertPeerWithMode(ctx, name, serial, fingerprint, pubAuth, mode, targetUser); err != nil {
-				return fmt.Errorf("insert peer: %w", err)
-			}
-			for _, g := range groups {
-				if err := d.EnsureGroup(ctx, g); err != nil {
+			if err := d.WithTx(ctx, func(tx *db.Tx) error {
+				if err := tx.InsertTokenWithMode(ctx, tok, name, strings.Join(groups, ","), mode, targetUser, tarball); err != nil {
 					return err
 				}
-			}
-			if err := d.SetPeerGroups(ctx, name, groups); err != nil {
-				return fmt.Errorf("set peer groups: %w", err)
-			}
-			if err := d.SetPeerAllowedGroups(ctx, name, groups); err != nil {
-				return fmt.Errorf("set peer allowed groups: %w", err)
+				if err := tx.InsertPeerWithMode(ctx, name, serial, fingerprint, pubAuth, mode, targetUser); err != nil {
+					return fmt.Errorf("insert peer: %w", err)
+				}
+				for _, g := range groups {
+					if err := tx.EnsureGroup(ctx, g); err != nil {
+						return err
+					}
+				}
+				if err := tx.SetPeerGroups(ctx, name, groups); err != nil {
+					return fmt.Errorf("set peer groups: %w", err)
+				}
+				if err := tx.SetPeerAllowedGroups(ctx, name, groups); err != nil {
+					return fmt.Errorf("set peer allowed groups: %w", err)
+				}
+				return nil
+			}); err != nil {
+				return err
 			}
 
 			fmt.Fprintf(cmd.OutOrStdout(), "curl -kfsSL %s/enroll/%s.sh | bash\n", baseURL, tok)

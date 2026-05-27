@@ -409,6 +409,63 @@ func TestGroupAllow_UserMode_RewritesAuthorizedKeys_NoReload(t *testing.T) {
 	}
 }
 
+// TestGroupAllow_UserMode_EncryptedCA_NoCAPassphrase asserts that group only
+// reads the CA public key: with an encrypted CA on disk and CERTHOLD_CA_PASSPHRASE
+// deliberately unset, the command still succeeds (it never prompts for the CA
+// passphrase — only the peer passphrase, which the mock dialer never exercises).
+func TestGroupAllow_UserMode_EncryptedCA_NoCAPassphrase(t *testing.T) {
+	t.Setenv("CERTHOLD_CA_PASSPHRASE", "")
+	t.Setenv("CERTHOLD_PEER_PASSPHRASE", "peer-secret")
+
+	dataDir := t.TempDir()
+	caObj, err := ca.GenerateWithPassphrase(filepath.Join(dataDir, "ca"), []byte("ca-secret"))
+	if err != nil {
+		t.Fatalf("ca.GenerateWithPassphrase: %v", err)
+	}
+	dbPath := filepath.Join(dataDir, "state.db")
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	ctx := context.Background()
+	if err := d.InsertPeerWithMode(ctx, "vmU", 1, "fp", []byte("k"), db.ModeUser, "alice"); err != nil {
+		t.Fatalf("InsertPeerWithMode: %v", err)
+	}
+	if err := d.EnsureGroup(ctx, "infra"); err != nil {
+		t.Fatalf("EnsureGroup: %v", err)
+	}
+	if err := d.SetPeerAllowedGroups(ctx, "vmU", []string{"infra"}); err != nil {
+		t.Fatalf("SetPeerAllowedGroups: %v", err)
+	}
+	d.Close()
+
+	caTrim := strings.TrimRight(string(caObj.PublicKeyAuthorizedKey()), "\n")
+	existing := []byte(`cert-authority,principals="manager,infra" ` + caTrim + "\n")
+	fp := &fakePusher{readData: map[string][]byte{
+		"/home/alice/.ssh/authorized_keys": existing,
+	}}
+	prev := groupDial
+	groupDial = func(ctx context.Context, host string, opts sshpush.Options) (sshpush.Pusher, error) {
+		return fp, nil
+	}
+	t.Cleanup(func() { groupDial = prev })
+
+	out, err := runGroupUserModeCmd(t, dataDir, dbPath, "allow", "db", "--on", "vmU")
+	if err != nil {
+		t.Fatalf("group allow against encrypted CA without CA passphrase: err=%v out=%s", err, out)
+	}
+
+	var wrote bool
+	for _, c := range fp.Calls() {
+		if c.op == "write" && strings.Contains(string(c.content), `principals="manager,infra,db"`) {
+			wrote = true
+		}
+	}
+	if !wrote {
+		t.Errorf("expected authorized_keys rewrite with db added; calls=%+v", fp.Calls())
+	}
+}
+
 func TestGroupAllowRequiresOnFlag(t *testing.T) {
 	dbPath := seedGroupDB(t, nil)
 	installFakePusher(t)

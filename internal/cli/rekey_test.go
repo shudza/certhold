@@ -379,6 +379,59 @@ func TestRekeyEncryptedCA_RotatedKeyUnlockableWithOriginalPassphrase(t *testing.
 	}
 }
 
+func TestRekeyRotatePassphrase_NewUnlocksOldFails(t *testing.T) {
+	const oldPW = "test-ca-pw"
+	const newPW = "rotated-ca-pw"
+	dataDir, dbPath, hostname, _, cleanup := setupRekeyEnv(t, nil)
+	defer cleanup()
+
+	caDir := filepath.Join(dataDir, "ca")
+	if enc, err := caKeyEncrypted(caDir); err != nil {
+		t.Fatalf("caKeyEncrypted: %v", err)
+	} else if !enc {
+		t.Fatal("test precondition: CA key should be encrypted after env-injected init")
+	}
+
+	origPrompt := promptNewCAPassphrase
+	var newPromptCalls int
+	promptNewCAPassphrase = func() ([]byte, error) {
+		newPromptCalls++
+		return []byte(newPW), nil
+	}
+	defer func() { promptNewCAPassphrase = origPrompt }()
+
+	cmd := NewRootCmd()
+	var out, errBuf bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errBuf)
+	cmd.SetArgs([]string{"--data-dir", dataDir, "--db", dbPath, "rekey", "--hostname", hostname, "--rotate-passphrase"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("rekey --rotate-passphrase: err=%v stderr=%s stdout=%s", err, errBuf.String(), out.String())
+	}
+
+	if newPromptCalls == 0 {
+		t.Fatal("expected the new-passphrase prompt to be invoked in rotate mode")
+	}
+
+	if enc, err := caKeyEncrypted(caDir); err != nil {
+		t.Fatalf("caKeyEncrypted after rekey: %v", err)
+	} else if !enc {
+		t.Fatal("rotated CA key is not encrypted; --rotate-passphrase must still encrypt")
+	}
+
+	if _, err := ca.LoadWithPassphrase(caDir, func() ([]byte, error) {
+		return []byte(newPW), nil
+	}); err != nil {
+		t.Fatalf("rotated CA not unlockable with the NEW passphrase: %v", err)
+	}
+
+	if _, err := ca.LoadWithPassphrase(caDir, func() ([]byte, error) {
+		return []byte(oldPW), nil
+	}); err == nil {
+		t.Fatal("rotated CA unlocked with the OLD passphrase; --rotate-passphrase did not change the key encryption")
+	}
+}
+
 func TestRekeyFailureAborts(t *testing.T) {
 	dataDir, dbPath, hostname, rec, cleanup := setupRekeyEnv(t, map[string]error{
 		"write:beta:/etc/ssh/ca.pub": errors.New("boom"),

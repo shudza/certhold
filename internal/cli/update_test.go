@@ -284,6 +284,91 @@ func TestUpdateUserMode_RootUserHomeIsSlashRoot(t *testing.T) {
 	}
 }
 
+func setupUpdateEncryptedCAEnv(t *testing.T, peerName string, initialGroups []string, caPW string) (dataDir, dbPath string, oldSerial uint64) {
+	t.Helper()
+	dataDir = t.TempDir()
+	caObj, err := ca.GenerateWithPassphrase(filepath.Join(dataDir, "ca"), []byte(caPW))
+	if err != nil {
+		t.Fatalf("ca.GenerateWithPassphrase: %v", err)
+	}
+	_, pubAuth, sshPub, err := ca.GeneratePeerKey()
+	if err != nil {
+		t.Fatalf("GeneratePeerKey: %v", err)
+	}
+	_, serial, err := caObj.SignCert(ca.SignOptions{
+		Pubkey:     sshPub,
+		KeyID:      peerName,
+		Principals: append([]string{peerName}, initialGroups...),
+	})
+	if err != nil {
+		t.Fatalf("SignCert: %v", err)
+	}
+
+	dbPath = filepath.Join(dataDir, "state.db")
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer d.Close()
+	ctx := context.Background()
+	if err := d.InsertPeer(ctx, peerName, serial, ssh.FingerprintSHA256(sshPub), pubAuth); err != nil {
+		t.Fatalf("InsertPeer: %v", err)
+	}
+	for _, g := range initialGroups {
+		if err := d.EnsureGroup(ctx, g); err != nil {
+			t.Fatalf("EnsureGroup: %v", err)
+		}
+	}
+	if len(initialGroups) > 0 {
+		if err := d.SetPeerGroups(ctx, peerName, initialGroups); err != nil {
+			t.Fatalf("SetPeerGroups: %v", err)
+		}
+	}
+	return dataDir, dbPath, serial
+}
+
+func TestUpdateEncryptedCAViaEnv(t *testing.T) {
+	const caPW = "ca-secret"
+	dataDir, dbPath, oldSerial := setupUpdateEncryptedCAEnv(t, "peerEnc", []string{"oldA"}, caPW)
+	mp := withMockPusher(t)
+
+	t.Setenv("CERTHOLD_CA_PASSPHRASE", caPW)
+	t.Setenv("CERTHOLD_PEER_PASSPHRASE", "peer-secret")
+
+	stdout, stderr, err := runUpdate(t, dataDir, dbPath, "peerEnc", "--groups", "newA,newB")
+	if err != nil {
+		t.Fatalf("update against encrypted CA: err=%v stderr=%s stdout=%s", err, stderr, stdout)
+	}
+
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer d.Close()
+	peer, err := d.GetPeer(context.Background(), "peerEnc")
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if peer.Serial == oldSerial {
+		t.Errorf("serial unchanged after encrypted-CA update: %d", peer.Serial)
+	}
+
+	mp.mu.Lock()
+	defer mp.mu.Unlock()
+	if len(mp.calls) == 0 || mp.calls[0].op != "write" {
+		t.Fatalf("expected a cert write after encrypted-CA update; calls=%+v", mp.calls)
+	}
+}
+
+func TestUpdateEncryptedCAWrongPassphraseFails(t *testing.T) {
+	dataDir, dbPath, _ := setupUpdateEncryptedCAEnv(t, "peerEnc", []string{"oldA"}, "right")
+	withMockPusher(t)
+	t.Setenv("CERTHOLD_CA_PASSPHRASE", "wrong")
+	if _, _, err := runUpdate(t, dataDir, dbPath, "peerEnc", "--groups", "x"); err == nil {
+		t.Fatal("update with wrong CA passphrase: want error, got nil")
+	}
+}
+
 func TestUpdateEmptyGroups(t *testing.T) {
 	dataDir, dbPath, _ := setupUpdateEnv(t, "peer1", []string{"oldA"}, false)
 	withMockPusher(t)

@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 )
 
@@ -62,6 +63,19 @@ func (db *DB) setPeerGroupsTable(ctx context.Context, table, peer string, groups
 		return fmt.Errorf("begin set %s: %w", table, err)
 	}
 	defer tx.Rollback()
+	if err := setPeerGroupsTableTx(ctx, tx, table, peer, groups); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit %s: %w", table, err)
+	}
+	return nil
+}
+
+// setPeerGroupsTableTx performs the delete-then-reinsert against an existing
+// transaction so it can be composed into a larger atomic unit (enroll) or used
+// standalone via setPeerGroupsTable.
+func setPeerGroupsTableTx(ctx context.Context, tx *sql.Tx, table, peer string, groups []string) error {
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE peer_name = ?`, table), peer); err != nil {
 		return fmt.Errorf("delete %s: %w", table, err)
 	}
@@ -72,9 +86,6 @@ func (db *DB) setPeerGroupsTable(ctx context.Context, table, peer string, groups
 		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s(peer_name, group_name) VALUES (?, ?)`, table), peer, g); err != nil {
 			return fmt.Errorf("insert %s: %w", table, err)
 		}
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit %s: %w", table, err)
 	}
 	return nil
 }

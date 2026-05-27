@@ -457,6 +457,71 @@ func TestInsertPeerWithMode(t *testing.T) {
 	}
 }
 
+func TestWithTxCommitsAtomically(t *testing.T) {
+	ctx := t.Context()
+	d := newTestDB(t)
+
+	err := d.WithTx(ctx, func(tx *Tx) error {
+		if err := tx.InsertTokenWithMode(ctx, "tokA", "vmA", "infra", ModeRoot, "", []byte("tar")); err != nil {
+			return err
+		}
+		if err := tx.InsertPeerWithMode(ctx, "vmA", 7, "fp", []byte("k"), ModeRoot, ""); err != nil {
+			return err
+		}
+		if err := tx.EnsureGroup(ctx, "infra"); err != nil {
+			return err
+		}
+		if err := tx.SetPeerGroups(ctx, "vmA", []string{"infra"}); err != nil {
+			return err
+		}
+		return tx.SetPeerAllowedGroups(ctx, "vmA", []string{"infra"})
+	})
+	if err != nil {
+		t.Fatalf("WithTx: %v", err)
+	}
+
+	if _, _, _, _, _, err := d.LookupToken(ctx, "tokA"); err != nil {
+		t.Fatalf("token row missing after committed tx: %v", err)
+	}
+	if _, err := d.GetPeer(ctx, "vmA"); err != nil {
+		t.Fatalf("peer row missing after committed tx: %v", err)
+	}
+	groups, err := d.GetPeerGroups(ctx, "vmA")
+	if err != nil {
+		t.Fatalf("GetPeerGroups: %v", err)
+	}
+	if len(groups) != 1 || groups[0] != "infra" {
+		t.Errorf("groups = %v, want [infra]", groups)
+	}
+}
+
+// TestWithTxRollsBackOrphanedToken mirrors the enroll insert order (token row
+// first, then the peer row) and forces the peer insert to fail with a primary
+// key conflict. It asserts the token row is rolled back rather than orphaned —
+// the exact regression that motivated wrapping enroll's inserts in a tx.
+func TestWithTxRollsBackOrphanedToken(t *testing.T) {
+	ctx := t.Context()
+	d := newTestDB(t)
+
+	if err := d.InsertPeerWithMode(ctx, "dup", 1, "fp", []byte("k"), ModeRoot, ""); err != nil {
+		t.Fatalf("seed peer: %v", err)
+	}
+
+	err := d.WithTx(ctx, func(tx *Tx) error {
+		if err := tx.InsertTokenWithMode(ctx, "orphan-tok", "dup", "infra", ModeRoot, "", []byte("tar")); err != nil {
+			return err
+		}
+		return tx.InsertPeerWithMode(ctx, "dup", 2, "fp2", []byte("k2"), ModeRoot, "")
+	})
+	if err == nil {
+		t.Fatal("expected duplicate peer insert to fail the tx")
+	}
+
+	if _, _, _, _, _, lerr := d.LookupToken(ctx, "orphan-tok"); !errors.Is(lerr, ErrTokenNotFound) {
+		t.Fatalf("token row survived a rolled-back tx (orphaned): err=%v", lerr)
+	}
+}
+
 func TestCAVersions(t *testing.T) {
 	ctx := t.Context()
 	d := newTestDB(t)
