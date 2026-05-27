@@ -70,9 +70,13 @@ before any push, so the manager's view is correct even if a push fails), then
 takes one of **two paths depending on the revoked peer's mode**. The revoked peer
 itself is never contacted.
 
-### Root-mode peers — KRL push
+The path is selected by the revoked peer's **layout version** and mode: **only
+legacy v1 root peers** take the KRL path; **v1 user-mode and all v2 peers
+(including v2 root)** take the partial-CA-rekey path.
 
-Root-mode peers carry `RevokedKeys /etc/ssh/krl` from day one (the file ships
+### Legacy v1 root-mode peers — KRL push
+
+v1 root-mode peers carry `RevokedKeys /etc/ssh/krl` from day one (the file ships
 empty). On revoke, certhold:
 
 1. Rebuilds the KRL from the **certificate serials** of **all** currently-revoked
@@ -91,30 +95,42 @@ Because revocation keys on the certificate serial, reissuing a cert (`update`,
 `rekey`) changes the serial; the KRL is always rebuilt from the live serials of
 revoked peers, so it stays correct.
 
-### User-mode peers — partial CA rekey
+### v1 user-mode and all v2 peers — partial CA rekey
 
-User-mode peers have no `RevokedKeys` directive and no KRL file — trust lives in
-the `cert-authority` line in `authorized_keys`, with nowhere to push a revocation
-list. So revoking a user-mode peer instead performs a **partial CA rekey**: it
-rotates the entire CA and reissues every other peer, **excluding** the revoked
-one. The revoked peer never receives a new cert, and its old cert was signed by
-the now-retired CA, so it stops being accepted as the new CA propagates.
+These peers have no `RevokedKeys` directive and no KRL file — trust lives in the
+`cert-authority` line in `authorized_keys`, with nowhere to push a revocation
+list. So revoking such a peer instead performs a **partial CA rekey**: it rotates
+the entire CA and reissues every other peer, **excluding** the revoked one. The
+revoked peer never receives a new cert, and its old cert was signed by the
+now-retired CA, so it stops being accepted as the new CA propagates.
 
-This is heavy — revoking one user-mode peer rolls the whole fleet — and, like all
-rekeys, **fail-fast** (see below).
+**Because v2 root mode is user-mode trust, revoking a v2 root peer is also a
+partial CA rekey** — there is no KRL for v2 root. This is heavier than a v1 root
+KRL push (it rolls the whole per-instance fleet) and, like all rekeys, is
+**fail-fast** (see below). For a v2 peer the rekey rewrites only *this* instance's
+`cert-authority` line in each peer's `authorized_keys` (matched by the old CA
+pubkey) and pushes the namespaced cert — other instances' lines are preserved.
 
 ### Mixed fleets
 
 The two paths do not bridge:
 
-- A **root-mode revoke** pushes a KRL and skips user-mode peers; they do not learn
-  of the revocation through it.
-- A **user-mode revoke** triggers a full CA rotation, which in a mixed fleet also
-  rolls root-mode peers (they receive the new CA + cert through their rekey
-  branch).
+- A **v1 root-mode revoke** pushes a KRL and skips v1-user/v2 peers; they do not
+  learn of the revocation through it.
+- A **v1-user / v2 revoke** triggers a full CA rotation, which in a mixed fleet
+  also rolls v1 root-mode peers (they receive the new CA + cert through their
+  rekey branch).
 
 If a fleet is mixed and you need both populations to drop a revoked cert
 immediately, run `rekey`.
+
+### Multi-instance peers
+
+A v2 peer can be managed by several certhold instances at once; each owns a
+separate, key-namespaced `cert-authority` line and `config` block (see
+[peer-file-layout.md](peer-file-layout.md#layout-v2--multi-instance)). Revoke /
+rekey from one instance touches only that instance's lines and certs, so the
+other instances keep managing the peer uninterrupted.
 
 ## Rekey
 

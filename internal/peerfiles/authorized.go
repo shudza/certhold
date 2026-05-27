@@ -57,6 +57,43 @@ func RewritePrincipals(existing []byte, caPubKey ssh.PublicKey, principals []str
 	return out.Bytes(), nil
 }
 
+// ReplaceCALine rewrites a multi-instance authorized_keys so the cert-authority
+// line trusting oldCAPubKey is swapped for newLine (which already carries the
+// new CA's key bytes). Lines for other CAs are preserved verbatim. If no line
+// matches oldCAPubKey, newLine is appended. Used by v2 CA rekey: the line's key
+// changes (not just its principals), so RewritePrincipals — which preserves the
+// key — cannot be used.
+func ReplaceCALine(existing []byte, oldCAPubKey ssh.PublicKey, newLine []byte) []byte {
+	oldMarshalled := oldCAPubKey.Marshal()
+	trimmedNew := bytes.TrimRight(newLine, "\n")
+
+	var out bytes.Buffer
+	scanner := newLineScanner(existing)
+	replaced := false
+	for scanner.next() {
+		line := scanner.line()
+		raw := strings.TrimRight(string(line), "\r")
+		trim := strings.TrimSpace(raw)
+		if trim == "" || strings.HasPrefix(trim, "#") {
+			writeLine(&out, line)
+			continue
+		}
+		matched, err := lineMatchesCA(trim, oldMarshalled)
+		if err != nil || !matched {
+			writeLine(&out, line)
+			continue
+		}
+		out.Write(trimmedNew)
+		out.WriteByte('\n')
+		replaced = true
+	}
+	if !replaced {
+		out.Write(trimmedNew)
+		out.WriteByte('\n')
+	}
+	return out.Bytes()
+}
+
 func dedupPrincipals(principals []string) []string {
 	all := []string{"manager"}
 	seen := map[string]struct{}{"manager": {}}

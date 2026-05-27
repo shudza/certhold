@@ -323,6 +323,94 @@ func TestRevokeUserModeTriggersRekey(t *testing.T) {
 	}
 }
 
+// TestRevokeV2Root_TriggersRekey_NoKRL verifies a v2 root peer revoke takes the
+// partial-CA-rekey path (rewrites a non-revoked v2 peer's authorized_keys + cert)
+// and never pushes a KRL.
+func TestRevokeV2Root_TriggersRekey_NoKRL(t *testing.T) {
+	t.Setenv("CERTHOLD_CA_PASSPHRASE", "test-ca-pw")
+	t.Setenv("CERTHOLD_PEER_PASSPHRASE", "test-peer-pw")
+	dir := t.TempDir()
+	dataDir := filepath.Join(dir, "data")
+	dbPath := filepath.Join(dir, "state.db")
+	hostname := "mgr"
+	if err := os.MkdirAll(dataDir, 0700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	cmd := NewRootCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", hostname, "--mode", "root"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("init: %v\n%s", err, buf.String())
+	}
+
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	ctx := context.Background()
+	key, _, _ := d.GetMeta(ctx, db.MetaInstanceKey)
+	for _, name := range []string{"alpha", "beta"} {
+		_, pubAuth, _, _ := ca.GeneratePeerKey()
+		if err := d.InsertPeerWithMode(ctx, name, 100, "fp-"+name, pubAuth, db.ModeRoot, "", 2); err != nil {
+			t.Fatalf("InsertPeerWithMode %s: %v", name, err)
+		}
+		_ = d.EnsureGroup(ctx, "infra")
+		_ = d.SetPeerGroups(ctx, name, []string{"infra"})
+		_ = d.SetPeerAllowedGroups(ctx, name, []string{"infra"})
+	}
+	d.Close()
+
+	rec := &rekeyRecorder{}
+	origRekeyDial := rekeyDial
+	rekeyDial = func(ctx context.Context, host string, opts sshpush.Options) (sshpush.Pusher, error) {
+		return &rekeyMockPusher{host: host, rec: rec}, nil
+	}
+	defer func() { rekeyDial = origRekeyDial }()
+
+	cmd2 := NewRootCmd()
+	var out, errBuf bytes.Buffer
+	cmd2.SetOut(&out)
+	cmd2.SetErr(&errBuf)
+	cmd2.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "revoke", "alpha", "--hostname", hostname})
+	if err := cmd2.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("revoke: err=%v stderr=%s stdout=%s", err, errBuf.String(), out.String())
+	}
+
+	sawBetaAK := false
+	sawBetaCert := false
+	sawKRL := false
+	sawAlphaPush := false
+	for _, c := range rec.snapshot() {
+		if c.host == "alpha" && c.op == "write" {
+			sawAlphaPush = true
+		}
+		if c.host == "beta" && c.op == "write" && c.path == "/root/.ssh/authorized_keys" {
+			sawBetaAK = true
+		}
+		if c.host == "beta" && c.op == "write" && c.path == "/root/.ssh/id_ed25519_"+key+"-cert.pub" {
+			sawBetaCert = true
+		}
+		if c.path == "/etc/ssh/krl" {
+			sawKRL = true
+		}
+	}
+	if sawAlphaPush {
+		t.Errorf("revoked peer alpha must not be pushed to")
+	}
+	if !sawBetaAK {
+		t.Errorf("beta v2 authorized_keys should be rewritten on v2-root revoke")
+	}
+	if !sawBetaCert {
+		t.Errorf("beta v2 namespaced cert should be pushed on v2-root revoke")
+	}
+	if sawKRL {
+		t.Errorf("v2-root revoke must NOT push a KRL")
+	}
+}
+
 func TestRevokePushFailureContinues(t *testing.T) {
 	dataDir, dbPath, rec, cleanup := setupRevokeEnv(t, map[string]error{
 		"dial:alpha": errors.New("boom"),

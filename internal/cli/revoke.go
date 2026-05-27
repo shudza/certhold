@@ -83,12 +83,12 @@ func runRevoke(cmd *cobra.Command, name string) error {
 	peerUnlock := newPeerUnlocker()
 	defer peerUnlock.Zero()
 
-	if peer.Mode == db.ModeUser {
-		// User-mode peers have no KRL; rotate the CA, skipping the revoked
-		// peer, so its old (now CA-retired) cert stops being accepted.
-		// Known limitation in mixed fleets: a root-mode revoke does NOT
-		// reach user-mode peers, and a user-mode revoke triggers a full
-		// CA rotation that ALSO rolls root-mode peers (root-mode peers
+	if peer.Mode == db.ModeUser || peer.LayoutVersion >= peerfiles.LayoutV2 {
+		// User-mode and v2 peers (incl. v2 root) have no KRL; rotate the CA,
+		// skipping the revoked peer, so its old (now CA-retired) cert stops
+		// being accepted. Known limitation in mixed fleets: a legacy v1 root
+		// revoke does NOT reach user-mode/v2 peers, and a v2/user-mode revoke
+		// triggers a full CA rotation that ALSO rolls v1 root peers (they
 		// handle ca.pub rotation in their per-peer rekey branch).
 		hostname, err := cmd.Flags().GetString("hostname")
 		if err != nil {
@@ -149,7 +149,7 @@ func runRevoke(cmd *cobra.Command, name string) error {
 		return fmt.Errorf("next krl version: %w", err)
 	}
 
-	pushOpts := selfPushOptions(dataDir, db.ModeRoot, peerUnlock.get)
+	pushOpts := selfPushOptions(dataDir, resolveSelfIdent(ctx, d), peerUnlock.get)
 	pushOpts.User = "root"
 
 	dial := revokeDial
@@ -167,9 +167,10 @@ func runRevoke(cmd *cobra.Command, name string) error {
 		if p.Name == name {
 			continue
 		}
-		if p.Mode == db.ModeUser {
-			// User-mode peers have RevokedKeys disabled. Skip; document the
-			// known limitation in the report and docs/maintenance-and-operations.md.
+		if p.Mode == db.ModeUser || p.LayoutVersion >= peerfiles.LayoutV2 {
+			// User-mode and v2 peers have RevokedKeys disabled. KRL push is
+			// only meaningful for legacy v1 root peers. Skip; documented in
+			// docs/maintenance-and-operations.md.
 			continue
 		}
 		targets++
@@ -197,7 +198,8 @@ func pushOne(ctx context.Context, dial func(context.Context, string, sshpush.Opt
 		return fmt.Errorf("dial: %w", err)
 	}
 	defer p.Close()
-	krlPath := peerfiles.PathsFor(peerfiles.CurrentLayout, db.ModeRoot, "", "").KRL
+	// KRL is only pushed to legacy v1 root peers; resolve the v1 root path.
+	krlPath := peerfiles.PathsFor(peerfiles.LayoutV1, db.ModeRoot, "", "").KRL
 	if err := p.WriteFileAtomic(ctx, krlPath, krlBytes, fs.FileMode(0644)); err != nil {
 		return fmt.Errorf("write krl: %w", err)
 	}

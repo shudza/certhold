@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -63,18 +62,6 @@ func newEnrollCmd() *cobra.Command {
 			}
 			dataDir = expandHome(dataDir)
 
-			hostname, err := cmd.Flags().GetString("hostname")
-			if err != nil {
-				return err
-			}
-			if hostname == "" {
-				h, herr := os.Hostname()
-				if herr != nil {
-					return fmt.Errorf("hostname: %w", herr)
-				}
-				hostname = h
-			}
-
 			dbPath, err := cmd.Flags().GetString("db")
 			if err != nil {
 				return err
@@ -88,6 +75,11 @@ func newEnrollCmd() *cobra.Command {
 			ctx := cmd.Context()
 			if ctx == nil {
 				ctx = context.Background()
+			}
+
+			instanceKey, err := EnsureInstanceKey(ctx, d)
+			if err != nil {
+				return fmt.Errorf("ensure instance key: %w", err)
 			}
 
 			if _, err := d.GetPeer(ctx, name); err == nil {
@@ -121,28 +113,22 @@ func newEnrollCmd() *cobra.Command {
 
 			fingerprint := ssh.FingerprintSHA256(sshPub)
 
-			var tarball []byte
-			if mode == db.ModeUser {
-				tarball, err = peerfiles.BuildUser(peerfiles.UserPeerFiles{
-					TargetUser: targetUser,
-					PrivKey:    priv,
-					CertPub:    certBytes,
-					CAPub:      caObj.PublicKeyAuthorizedKey(),
-					Principals: groups,
-				})
-			} else {
-				caPubLine := string(bytes.TrimRight(caObj.PublicKeyAuthorizedKey(), "\n"))
-				caKnownHostsEntry := "@cert-authority " + hostname + " " + caPubLine
-				tarball, err = peerfiles.Build(peerfiles.PeerFiles{
-					Hostname:           name,
-					PrivKey:            priv,
-					CertPub:            certBytes,
-					CAPub:              caObj.PublicKeyAuthorizedKey(),
-					KRL:                nil,
-					AuthPrincipalsRoot: groups,
-					CAKnownHostsEntry:  caKnownHostsEntry,
-				})
+			// Newly enrolled peers are layout v2 for BOTH modes: root mode is
+			// implemented as user-mode trust targeting /root, so the tarball
+			// is always the namespaced user-style file set.
+			tarballUser := targetUser
+			if mode == db.ModeRoot {
+				tarballUser = "root"
 			}
+			tarball, err := peerfiles.BuildUser(peerfiles.UserPeerFiles{
+				TargetUser:  tarballUser,
+				PrivKey:     priv,
+				CertPub:     certBytes,
+				CAPub:       caObj.PublicKeyAuthorizedKey(),
+				Principals:  groups,
+				Layout:      peerfiles.CurrentLayout,
+				InstanceKey: instanceKey,
+			})
 			if err != nil {
 				return fmt.Errorf("build tarball: %w", err)
 			}
@@ -184,7 +170,7 @@ func newEnrollCmd() *cobra.Command {
 	cmd.Flags().String("base-url", legacyBaseURL, "base URL of certhold's enroll endpoint (defaults to value persisted by `init`, then $CERTHOLD_BASE_URL, then https://certhold.home.lan)")
 	cmd.Flags().String("mode", db.ModeUser, "install mode: 'user' (default, files under ~user/.ssh) or 'root' (files under /etc/ssh)")
 	cmd.Flags().String("user", "", "Unix user owning the ~/.ssh files; when set, acts as a hard constraint at install time (only meaningful with --mode=user)")
-	cmd.Flags().String("hostname", "", "hostname for the root-mode @cert-authority known_hosts entry (default: os.Hostname())")
+	cmd.Flags().String("hostname", "", "deprecated/unused under layout v2 (host trust is TOFU known_hosts)")
 	_ = cmd.MarkFlagRequired("groups")
 
 	return cmd

@@ -59,7 +59,7 @@ func scriptHandler(database *db.DB) func(http.ResponseWriter, *http.Request, str
 			writeErr(w, http.StatusBadRequest, "missing token")
 			return
 		}
-		_, _, mode, _, consumed, err := database.LookupToken(r.Context(), token)
+		peerName, _, mode, targetUser, consumed, err := database.LookupToken(r.Context(), token)
 		if err != nil {
 			if errors.Is(err, db.ErrTokenNotFound) {
 				writeErr(w, http.StatusNotFound, "token not found")
@@ -72,6 +72,15 @@ func scriptHandler(database *db.DB) func(http.ResponseWriter, *http.Request, str
 			writeErr(w, http.StatusGone, "token already consumed")
 			return
 		}
+
+		// Derive the layout from the peer row (no token-schema change). Newly
+		// enrolled peers are v2; pre-existing rows stay v1.
+		layout := peerfiles.LayoutV1
+		if peer, perr := database.GetPeer(r.Context(), peerName); perr == nil {
+			layout = peer.LayoutVersion
+		}
+		instanceKey, _, _ := database.GetMeta(r.Context(), db.MetaInstanceKey)
+
 		scheme := "http"
 		if r.TLS != nil {
 			scheme = "https"
@@ -81,7 +90,9 @@ func scriptHandler(database *db.DB) func(http.ResponseWriter, *http.Request, str
 		}
 		baseURL := fmt.Sprintf("%s://%s", scheme, r.Host)
 		var body string
-		if mode == db.ModeUser {
+		if layout >= peerfiles.LayoutV2 {
+			body = v2Script(baseURL, token, instanceKey, mode, targetUser)
+		} else if mode == db.ModeUser {
 			body = fmt.Sprintf(`#!/usr/bin/env bash
 set -e
 TARGET_USER="$(id -un)"
@@ -110,12 +121,76 @@ cat >> /etc/ssh/ssh_config <<'SSH_EOF'
 %sSSH_EOF
 
 systemctl reload sshd
-`, baseURL, token, peerPassphraseBlock, peerfiles.SshdBlock(peerfiles.CurrentLayout), peerfiles.SshClientBlock(peerfiles.CurrentLayout))
+`, baseURL, token, peerPassphraseBlock, peerfiles.SshdBlock(peerfiles.LayoutV1), peerfiles.SshClientBlock(peerfiles.LayoutV1))
 		}
 		w.Header().Set("Content-Type", "application/x-shellscript; charset=utf-8")
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(body))
+	}
+}
+
+// v2Script builds the layout-v2 install script. It targets the user's (or
+// root's) ~/.ssh, untars the namespaced identity files into a staging dir,
+// installs them, appends this instance's cert-authority line idempotently
+// (grep-guarded by the CA pubkey), and splices the keyed client-config block
+// with a per-instance, version-agnostic sed so multiple certhold instances
+// coexist. For root tokens it additionally strips any legacy host-level
+// certhold block from /etc/ssh/{sshd_config,ssh_config} and reloads sshd once;
+// it carries NO TrustedUserCAKeys/AuthorizedPrincipalsFile/RevokedKeys/
+// HostCertificate directives.
+func v2Script(baseURL, token, instanceKey, mode, targetUser string) string {
+	block := peerfiles.V2SshClientBlock(instanceKey)
+	keyFile := peerfiles.V2KeyFileName(instanceKey)
+
+	var sb strings.Builder
+	sb.WriteString("#!/usr/bin/env bash\nset -e\n")
+	if mode == db.ModeUser {
+		fmt.Fprintf(&sb, "TARGET_USER=\"$(id -un)\"\nUSER_HOME=\"$HOME\"\n")
+		fmt.Fprintf(&sb, "[ -n \"$USER_HOME\" ] || { echo \"no \\$HOME\" >&2; exit 1; }\n")
+		curl := fmt.Sprintf("curl -kfsSL %s/enroll/%s?user=$TARGET_USER", baseURL, token)
+		writeV2Body(&sb, curl, keyFile, block, instanceKey, false)
+	} else {
+		fmt.Fprintf(&sb, "USER_HOME=/root\n")
+		curl := fmt.Sprintf("curl -kfsSL %s/enroll/%s", baseURL, token)
+		writeV2Body(&sb, curl, keyFile, block, instanceKey, true)
+	}
+	return sb.String()
+}
+
+func writeV2Body(sb *strings.Builder, curl, keyFile, block, instanceKey string, rootMigration bool) {
+	fmt.Fprintf(sb, "mkdir -p \"$USER_HOME/.ssh\"\n")
+	fmt.Fprintf(sb, "chmod 700 \"$USER_HOME/.ssh\"\n")
+	fmt.Fprintf(sb, "STAGE=\"$(mktemp -d \"$USER_HOME/.ssh/.certhold.XXXXXX\")\"\n")
+	fmt.Fprintf(sb, "%s | tar -xzC \"$STAGE\"\n", curl)
+	fmt.Fprintf(sb, "install -m 600 \"$STAGE/%s\" \"$USER_HOME/.ssh/%s\"\n", keyFile, keyFile)
+	fmt.Fprintf(sb, "install -m 644 \"$STAGE/%s-cert.pub\" \"$USER_HOME/.ssh/%s-cert.pub\"\n", keyFile, keyFile)
+	fmt.Fprintf(sb, "KEY=\"$USER_HOME/.ssh/%s\"\n", keyFile)
+	sb.WriteString(peerPassphraseBlock)
+
+	fmt.Fprintf(sb, "touch \"$USER_HOME/.ssh/known_hosts\"\n")
+	fmt.Fprintf(sb, "if [ -s \"$STAGE/known_hosts\" ]; then cat \"$STAGE/known_hosts\" >> \"$USER_HOME/.ssh/known_hosts\"; fi\n")
+	fmt.Fprintf(sb, "touch \"$USER_HOME/.ssh/authorized_keys\"\n")
+	fmt.Fprintf(sb, "chmod 600 \"$USER_HOME/.ssh/authorized_keys\"\n")
+	// Append this instance's cert-authority line only if its CA pubkey isn't
+	// already trusted. The CA pubkey field is the 3rd whitespace token of the
+	// shipped line ("cert-authority,principals=..." <type> <base64> <comment>).
+	fmt.Fprintf(sb, "CA_KEY=\"$(awk '{print $3}' \"$STAGE/ca_authorized_keys\")\"\n")
+	fmt.Fprintf(sb, "if ! grep -qF \"$CA_KEY\" \"$USER_HOME/.ssh/authorized_keys\"; then cat \"$STAGE/ca_authorized_keys\" >> \"$USER_HOME/.ssh/authorized_keys\"; fi\n")
+
+	fmt.Fprintf(sb, "touch \"$USER_HOME/.ssh/config\"\n")
+	fmt.Fprintf(sb, "sed -i -E \"/^# BEGIN certhold %s( v[0-9]+)?\\$/,/^# END certhold %s( v[0-9]+)?\\$/d\" \"$USER_HOME/.ssh/config\"\n", instanceKey, instanceKey)
+	fmt.Fprintf(sb, "cat >> \"$USER_HOME/.ssh/config\" <<'CHCFG_EOF'\n%sCHCFG_EOF\n", block)
+
+	fmt.Fprintf(sb, "rm -rf \"$STAGE\"\n")
+
+	if rootMigration {
+		// Strip any legacy/v1 host-level certhold block (keyless sentinels, so
+		// at most one) from the global sshd/ssh configs, then reload once. v2
+		// trust lives entirely in /root/.ssh, so no host-level directives remain.
+		sb.WriteString("sed -i -E '/^# BEGIN certhold( v[0-9]+)?$/,/^# END certhold( v[0-9]+)?$/d' /etc/ssh/sshd_config\n")
+		sb.WriteString("sed -i -E '/^# BEGIN certhold( v[0-9]+)?$/,/^# END certhold( v[0-9]+)?$/d' /etc/ssh/ssh_config\n")
+		sb.WriteString("systemctl reload sshd\n")
 	}
 }
 

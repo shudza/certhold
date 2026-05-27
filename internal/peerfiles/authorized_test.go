@@ -126,3 +126,54 @@ func TestRewritePrincipals_PreservesLineOrder(t *testing.T) {
 		t.Errorf("rewritten line wrong: %q", lines[2])
 	}
 }
+
+func TestReplaceCALine_PreservesOtherInstances(t *testing.T) {
+	caA, caAAK := newTestCAKey(t)
+	caB, caBAK := newTestCAKey(t)
+	_ = caB
+	caATrim := strings.TrimRight(string(caAAK), "\n")
+	caBTrim := strings.TrimRight(string(caBAK), "\n")
+
+	// authorized_keys with two instances' lines (A and B).
+	existing := []byte(`# header
+cert-authority,principals="manager,infra" ` + caATrim + `
+cert-authority,principals="manager,db" ` + caBTrim + `
+`)
+
+	// Rotate instance A's CA to caB-shaped new line (simulated): produce a new
+	// line whose key differs from the old caA. Reuse caB's bytes as the "new"
+	// key for A — the test only checks that A's old line is swapped and B's
+	// line (matched by its own CA) is untouched.
+	newCAPub, newCAAK := newTestCAKey(t)
+	_ = newCAPub
+	newLine := []byte(`cert-authority,principals="manager,infra" ` + strings.TrimRight(string(newCAAK), "\n") + "\n")
+
+	out := ReplaceCALine(existing, caA, newLine)
+	s := string(out)
+	if strings.Contains(s, caATrim) {
+		t.Errorf("old CA-A line should have been replaced:\n%s", s)
+	}
+	if !strings.Contains(s, strings.TrimRight(string(newCAAK), "\n")) {
+		t.Errorf("new CA-A line missing:\n%s", s)
+	}
+	if !strings.Contains(s, caBTrim) {
+		t.Errorf("other instance (CA-B) line must be preserved:\n%s", s)
+	}
+	if !strings.Contains(s, "# header") {
+		t.Errorf("comment line must be preserved:\n%s", s)
+	}
+}
+
+func TestReplaceCALine_AppendsWhenAbsent(t *testing.T) {
+	caA, caAAK := newTestCAKey(t)
+	existing := []byte("# only a comment\n")
+	newLine := []byte(`cert-authority,principals="manager" ` + strings.TrimRight(string(caAAK), "\n") + "\n")
+	_ = caA
+	out := ReplaceCALine(existing, caA, newLine)
+	if !strings.Contains(string(out), strings.TrimRight(string(caAAK), "\n")) {
+		t.Errorf("new line should be appended when no match:\n%s", out)
+	}
+	if !strings.Contains(string(out), "# only a comment") {
+		t.Errorf("existing content must be preserved:\n%s", out)
+	}
+}

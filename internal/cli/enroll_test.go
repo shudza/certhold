@@ -389,6 +389,23 @@ func TestEnrollBaseURLEnvBeatsPersistedNotFlag(t *testing.T) {
 	}
 }
 
+func instanceKeyOf(t *testing.T, dbPath string) string {
+	t.Helper()
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer d.Close()
+	k, ok, err := d.GetMeta(context.Background(), db.MetaInstanceKey)
+	if err != nil || !ok {
+		t.Fatalf("GetMeta instance_key: ok=%v err=%v", ok, err)
+	}
+	return k
+}
+
+// TestEnrollBuildsRootTarball: newly enrolled root peers are layout v2 — the
+// tarball is the namespaced user-style set targeting /root (no /etc/ssh files,
+// no auth_principals/root).
 func TestEnrollBuildsRootTarball(t *testing.T) {
 	dbPath := setupDB(t)
 	stdout, stderr, err := runEnroll(t, dbPath, "rootvm", "--groups", "infra,databases", "--mode", "root")
@@ -396,18 +413,24 @@ func TestEnrollBuildsRootTarball(t *testing.T) {
 		t.Fatalf("enroll: err=%v stderr=%s", err, stderr)
 	}
 	tok := extractToken(t, stdout, "https://certhold.home.lan")
+	key := instanceKeyOf(t, dbPath)
 
 	tb := consumeTokenTarball(t, dbPath, tok)
 	if tb == nil {
 		t.Fatal("token row has nil tarball")
 	}
 	entries := extractTarEntries(t, tb)
-	for _, n := range []string{"etc/ssh/peer_ed25519", "etc/ssh/peer_ed25519-cert.pub", "etc/ssh/ca.pub", "etc/ssh/auth_principals/root"} {
+	for _, n := range []string{"id_ed25519_" + key, "id_ed25519_" + key + "-cert.pub", "config", "ca_authorized_keys"} {
 		if _, ok := entries[n]; !ok {
-			t.Errorf("missing entry %q", n)
+			t.Errorf("missing entry %q (have %v)", n, keysOf(entries))
 		}
 	}
-	certBytes := entries["etc/ssh/peer_ed25519-cert.pub"]
+	for _, forbidden := range []string{"etc/ssh/peer_ed25519", "etc/ssh/auth_principals/root", "authorized_keys"} {
+		if _, ok := entries[forbidden]; ok {
+			t.Errorf("v2 root tarball must not contain %q", forbidden)
+		}
+	}
+	certBytes := entries["id_ed25519_"+key+"-cert.pub"]
 	pk, _, _, _, err := ssh.ParseAuthorizedKey(certBytes)
 	if err != nil {
 		t.Fatalf("ParseAuthorizedKey: %v", err)
@@ -421,7 +444,6 @@ func TestEnrollBuildsRootTarball(t *testing.T) {
 		t.Errorf("principals = %v, want %v", cert.ValidPrincipals, want)
 	}
 
-	// A peer row was recorded at mint.
 	d, err := db.Open(dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
@@ -434,6 +456,9 @@ func TestEnrollBuildsRootTarball(t *testing.T) {
 	if p.Serial != cert.Serial {
 		t.Errorf("peer serial %d != cert serial %d", p.Serial, cert.Serial)
 	}
+	if p.LayoutVersion != 2 {
+		t.Errorf("peer layout = %d, want 2", p.LayoutVersion)
+	}
 }
 
 func TestEnrollBuildsUserTarball(t *testing.T) {
@@ -443,17 +468,41 @@ func TestEnrollBuildsUserTarball(t *testing.T) {
 		t.Fatalf("enroll: err=%v stderr=%s", err, stderr)
 	}
 	tok := extractToken(t, stdout, "https://certhold.home.lan")
+	key := instanceKeyOf(t, dbPath)
 	tb := consumeTokenTarball(t, dbPath, tok)
 	entries := extractTarEntries(t, tb)
-	for _, n := range []string{"id_ed25519", "id_ed25519-cert.pub", "authorized_keys", "known_hosts", "config"} {
+	for _, n := range []string{"id_ed25519_" + key, "id_ed25519_" + key + "-cert.pub", "known_hosts", "config", "ca_authorized_keys"} {
 		if _, ok := entries[n]; !ok {
-			t.Errorf("missing user-mode entry %q", n)
+			t.Errorf("missing user-mode entry %q (have %v)", n, keysOf(entries))
 		}
 	}
-	ak := string(entries["authorized_keys"])
-	if !strings.HasPrefix(ak, `cert-authority,principals="manager,infra" `) {
-		t.Errorf("authorized_keys = %q", ak)
+	if _, ok := entries["authorized_keys"]; ok {
+		t.Errorf("v2 tarball must not ship a whole authorized_keys file")
 	}
+	ak := string(entries["ca_authorized_keys"])
+	if !strings.HasPrefix(ak, `cert-authority,principals="manager,infra" `) {
+		t.Errorf("ca_authorized_keys = %q", ak)
+	}
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer d.Close()
+	p, err := d.GetPeer(context.Background(), "uvm")
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if p.LayoutVersion != 2 {
+		t.Errorf("peer layout = %d, want 2", p.LayoutVersion)
+	}
+}
+
+func keysOf(m map[string][]byte) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }
 
 func TestEnrollEncryptedCAViaEnv(t *testing.T) {
@@ -479,13 +528,14 @@ func TestEnrollEncryptedCAViaEnv(t *testing.T) {
 		t.Fatalf("enroll with encrypted CA: err=%v stderr=%s", err, errBuf.String())
 	}
 	tok := extractToken(t, out.String(), "https://certhold.home.lan")
+	key := instanceKeyOf(t, dbPath)
 	tb := consumeTokenTarball(t, dbPath, tok)
 	if tb == nil {
 		t.Fatal("encrypted-CA enroll produced nil tarball")
 	}
 	entries := extractTarEntries(t, tb)
-	if _, ok := entries["etc/ssh/peer_ed25519-cert.pub"]; !ok {
-		t.Error("missing signed cert in encrypted-CA tarball")
+	if _, ok := entries["id_ed25519_"+key+"-cert.pub"]; !ok {
+		t.Errorf("missing signed cert in encrypted-CA tarball (have %v)", keysOf(entries))
 	}
 }
 

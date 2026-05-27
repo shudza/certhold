@@ -1,10 +1,19 @@
 # Peer file layout
 
 The exact files certhold installs on a peer, with permissions and contents. The
-layout depends on the peer's [mode](architecture.md#operating-modes). The tarball
-is built and signed by `enroll` and delivered once during
-[onboarding](usage.md#onboarding-a-peer). Tarball entries are reproducible
-(ownership comes from the extracting user, not baked in).
+layout depends on the peer's [mode](architecture.md#operating-modes) and its
+**layout version** (`peers.layout_version`). The tarball is built and signed by
+`enroll` and delivered once during [onboarding](usage.md#onboarding-a-peer).
+Tarball entries are reproducible (ownership comes from the extracting user, not
+baked in).
+
+> **Layout versions.** v1 (described under *User mode* / *Root mode* below) is
+> the original layout and is retained byte-for-byte for already-enrolled peers.
+> **v2** (described under *Layout v2 — multi-instance* at the end) is what every
+> `init` / `enroll` now produces. v2 converges **both** modes onto the user-mode
+> trust model and lets multiple certhold instances manage the same peer.
+> Upgrading a peer v1→v2 = revoke + re-enroll (a `--reenroll` convenience flag is
+> a planned follow-up).
 
 ## User mode
 
@@ -115,7 +124,80 @@ OpenSSH floor at 6.5; see
 ### The manager's own files
 
 At `init`, certhold writes the same set for itself under `<data-dir>/self/`,
-mirroring the chosen mode. In root mode it additionally emits
+mirroring the chosen mode. In root mode (v1) it additionally emits
 `sshd_config_block.conf` and `ssh_config_block.conf` for the operator to splice
 into the manager host by hand — `init` does not edit the manager's `sshd_config`
 automatically.
+
+## Layout v2 — multi-instance
+
+A peer running v1 root mode can only be managed by **one** certhold: inbound
+trust lives in global `sshd` directives (`TrustedUserCAKeys`,
+`AuthorizedPrincipalsFile`, `RevokedKeys`) that `sshd` honours
+first-occurrence-only, so two CAs cannot coexist. Layout v2 fixes this by
+implementing **root mode as user-mode trust targeting `/root`** and giving each
+certhold instance a stable **per-instance key** (16 lowercase hex chars, stored
+in `meta.instance_key`, generated at first `init`/`enroll` and **never changed by
+rekey**). Host certs are dropped; host identity is verified by TOFU `known_hosts`,
+exactly like user mode.
+
+Everything lands under `<home>/.ssh/` (root → `/root/.ssh/`). Identity files are
+**namespaced by the instance key** so instances never collide; the inbound
+`cert-authority` line and the outbound client block are **per-instance** and
+isolated. Tarball entries (relative to `<home>/.ssh/`):
+
+| File | Mode | Contents |
+|---|---|---|
+| `id_ed25519_<key>` | `0600` | This instance's outbound private key. |
+| `id_ed25519_<key>-cert.pub` | `0644` | CA-signed certificate for that key. |
+| `known_hosts` | `0644` | Outbound host trust; **empty** by default (TOFU). |
+| `config` | `0644` | This instance's keyed client block (below). |
+| `ca_authorized_keys` | `0644` | The `cert-authority` line for this instance's CA; the install script **appends** it to `authorized_keys` idempotently and then removes this staging file. |
+
+A whole `authorized_keys` file is **never shipped** — the install script appends
+this instance's line only if its CA pubkey isn't already trusted (grep-guarded),
+so other instances' lines survive.
+
+**Keyed sentinel block** (spliced into `<home>/.ssh/config`):
+
+```
+# BEGIN certhold <key> v2
+Host *
+    CertificateFile ~/.ssh/id_ed25519_<key>-cert.pub
+    IdentityFile ~/.ssh/id_ed25519_<key>
+    UserKnownHostsFile ~/.ssh/known_hosts
+# END certhold <key> v2
+```
+
+The key precedes the version so the install splice uses a **per-instance,
+version-agnostic** `sed`:
+
+```
+sed -i -E "/^# BEGIN certhold <key>( v[0-9]+)?$/,/^# END certhold <key>( v[0-9]+)?$/d" <home>/.ssh/config
+```
+
+which removes only *this* instance's block before re-appending — other instances'
+blocks are untouched.
+
+> **Known limitation (`Host *` first-match).** Each instance contributes its own
+> `Host *` block. SSH applies the **first** match per option, so when an outbound
+> connection could use more than one instance's identity, `CertificateFile` /
+> `UserKnownHostsFile` resolve to the first block in `config`. `IdentityFile`
+> lines are additive (SSH tries each), so authentication still works; this only
+> affects which cert/known_hosts file is *preferred*. Acceptable for leaf peers.
+
+**v2 root migration.** A root-token v2 install additionally strips any leftover
+keyless v1 host-level block from `/etc/ssh/sshd_config` and `/etc/ssh/ssh_config`
+(`sed -E '/^# BEGIN certhold( v[0-9]+)?$/,/^# END certhold( v[0-9]+)?$/d'`) and
+runs `systemctl reload sshd` **once**. The v2 script contains **no**
+`TrustedUserCAKeys` / `AuthorizedPrincipalsFile` / `RevokedKeys` /
+`HostCertificate` directives. The v2 **user**-token install never touches global
+configs and never reloads `sshd`.
+
+### The manager's own files (v2)
+
+`init` writes the manager's own v2 files under `<data-dir>/self/<home>/.ssh/`
+(root → `<data-dir>/self/root/.ssh/`): the namespaced identity pair, a local
+`authorized_keys` mirror, and the keyed `config` block. Existing v1 manager
+self-files are not migrated automatically; `EnsureInstanceKey` only backfills the
+key on an upgraded DB.

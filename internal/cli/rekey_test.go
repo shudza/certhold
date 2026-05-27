@@ -242,15 +242,19 @@ func TestRekeyHappyPath(t *testing.T) {
 		}
 	}
 
-	selfCAPub, err := os.ReadFile(filepath.Join(dataDir, "self", "etc", "ssh", "ca.pub"))
+	// v2 manager self files: no ca.pub; the new CA's trust lives in the v2
+	// authorized_keys cert-authority line, and the cert is namespaced.
+	key := instanceKeyFromDBPkg(t, dbPath)
+	selfBase := filepath.Join(dataDir, "self", "root", ".ssh")
+	selfAK, err := os.ReadFile(filepath.Join(selfBase, "authorized_keys"))
 	if err != nil {
-		t.Fatalf("read self ca.pub: %v", err)
+		t.Fatalf("read self authorized_keys: %v", err)
 	}
-	if !bytes.Equal(selfCAPub, newCAPub) {
-		t.Error("self ca.pub does not match new ca.pub")
+	if !bytes.Contains(selfAK, bytes.TrimRight(newCAPub, "\n")) {
+		t.Error("self authorized_keys does not carry the new CA pubkey")
 	}
 
-	selfCert, err := os.ReadFile(filepath.Join(dataDir, "self", "etc", "ssh", "peer_ed25519-cert.pub"))
+	selfCert, err := os.ReadFile(filepath.Join(selfBase, "id_ed25519_"+key+"-cert.pub"))
 	if err != nil {
 		t.Fatalf("read self cert: %v", err)
 	}
@@ -443,13 +447,15 @@ func TestRekeyFailureAborts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read old ca.pub: %v", err)
 	}
-	selfCertBefore, err := os.ReadFile(filepath.Join(dataDir, "self", "etc", "ssh", "peer_ed25519-cert.pub"))
+	key := instanceKeyFromDBPkg(t, dbPath)
+	selfBase := filepath.Join(dataDir, "self", "root", ".ssh")
+	selfCertBefore, err := os.ReadFile(filepath.Join(selfBase, "id_ed25519_"+key+"-cert.pub"))
 	if err != nil {
 		t.Fatalf("read self cert: %v", err)
 	}
-	selfCAPubBefore, err := os.ReadFile(filepath.Join(dataDir, "self", "etc", "ssh", "ca.pub"))
+	selfAKBefore, err := os.ReadFile(filepath.Join(selfBase, "authorized_keys"))
 	if err != nil {
-		t.Fatalf("read self ca.pub: %v", err)
+		t.Fatalf("read self authorized_keys: %v", err)
 	}
 
 	_, stderr, err := runRekeyCmd(t, dataDir, dbPath, hostname)
@@ -468,19 +474,19 @@ func TestRekeyFailureAborts(t *testing.T) {
 		t.Error("CA was rotated despite failure; expected old CA to remain in place")
 	}
 
-	selfCertAfter, err := os.ReadFile(filepath.Join(dataDir, "self", "etc", "ssh", "peer_ed25519-cert.pub"))
+	selfCertAfter, err := os.ReadFile(filepath.Join(selfBase, "id_ed25519_"+key+"-cert.pub"))
 	if err != nil {
 		t.Fatalf("read self cert after: %v", err)
 	}
 	if !bytes.Equal(selfCertAfter, selfCertBefore) {
 		t.Error("self cert was modified despite failure")
 	}
-	selfCAPubAfter, err := os.ReadFile(filepath.Join(dataDir, "self", "etc", "ssh", "ca.pub"))
+	selfAKAfter, err := os.ReadFile(filepath.Join(selfBase, "authorized_keys"))
 	if err != nil {
-		t.Fatalf("read self ca.pub after: %v", err)
+		t.Fatalf("read self authorized_keys after: %v", err)
 	}
-	if !bytes.Equal(selfCAPubAfter, selfCAPubBefore) {
-		t.Error("self ca.pub was modified despite failure")
+	if !bytes.Equal(selfAKAfter, selfAKBefore) {
+		t.Error("self authorized_keys was modified despite failure")
 	}
 
 	d, err := db.Open(dbPath)
@@ -583,6 +589,20 @@ func TestRekeyUserModePeer_RewritesAuthorizedKeys_NoReload(t *testing.T) {
 	}
 }
 
+func instanceKeyFromDBPkg(t *testing.T, dbPath string) string {
+	t.Helper()
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer d.Close()
+	k, ok, err := d.GetMeta(context.Background(), db.MetaInstanceKey)
+	if err != nil || !ok {
+		t.Fatalf("GetMeta: ok=%v err=%v", ok, err)
+	}
+	return k
+}
+
 func equalStr(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
@@ -593,4 +613,77 @@ func equalStr(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// TestRekeyV2RootPeer_RewritesAuthorizedKeys_NoReload exercises CA rekey against
+// a v2 root peer: its namespaced cert and the swapped cert-authority line are
+// pushed to /root/.ssh, with no sshd reload.
+func TestRekeyV2RootPeer_RewritesAuthorizedKeys_NoReload(t *testing.T) {
+	t.Setenv("CERTHOLD_CA_PASSPHRASE", "test-ca-pw")
+	t.Setenv("CERTHOLD_PEER_PASSPHRASE", "test-peer-pw")
+	dir := t.TempDir()
+	dataDir := filepath.Join(dir, "data")
+	dbPath := filepath.Join(dir, "state.db")
+	hostname := "mgr"
+	if err := os.MkdirAll(dataDir, 0700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	cmd := NewRootCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", hostname, "--mode", "root"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("init: %v\n%s", err, buf.String())
+	}
+
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	ctx := context.Background()
+	key, _, _ := d.GetMeta(ctx, db.MetaInstanceKey)
+	_, pubAuth, _, _ := ca.GeneratePeerKey()
+	if err := d.InsertPeerWithMode(ctx, "vmV2", 100, "fp-v2", pubAuth, db.ModeRoot, "", 2); err != nil {
+		t.Fatalf("InsertPeerWithMode: %v", err)
+	}
+	_ = d.EnsureGroup(ctx, "infra")
+	_ = d.SetPeerGroups(ctx, "vmV2", []string{"infra"})
+	_ = d.SetPeerAllowedGroups(ctx, "vmV2", []string{"infra"})
+	d.Close()
+
+	rec := &rekeyRecorder{}
+	origDial := rekeyDial
+	rekeyDial = func(ctx context.Context, host string, opts sshpush.Options) (sshpush.Pusher, error) {
+		return &rekeyMockPusher{host: host, rec: rec}, nil
+	}
+	defer func() { rekeyDial = origDial }()
+
+	if _, stderr, err := runRekeyCmd(t, dataDir, dbPath, hostname); err != nil {
+		t.Fatalf("rekey: err=%v stderr=%s", err, stderr)
+	}
+
+	gotAK, gotCert, gotReload := false, false, false
+	for _, c := range rec.snapshot() {
+		if c.host != "vmV2" {
+			continue
+		}
+		switch {
+		case c.op == "write" && c.path == "/root/.ssh/authorized_keys":
+			gotAK = true
+		case c.op == "write" && c.path == "/root/.ssh/id_ed25519_"+key+"-cert.pub":
+			gotCert = true
+		case c.op == "reload":
+			gotReload = true
+		}
+	}
+	if !gotAK {
+		t.Errorf("v2 root rekey must rewrite /root/.ssh/authorized_keys")
+	}
+	if !gotCert {
+		t.Errorf("v2 root rekey must push the namespaced cert")
+	}
+	if gotReload {
+		t.Errorf("v2 root rekey must NOT reload sshd")
+	}
 }

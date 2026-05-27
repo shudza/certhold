@@ -159,6 +159,11 @@ func newInitCmd() *cobra.Command {
 			}
 			defer database.Close()
 
+			instanceKey, err := EnsureInstanceKey(ctx, database)
+			if err != nil {
+				return fmt.Errorf("ensure instance key: %w", err)
+			}
+
 			caObj, err := ca.GenerateWithPassphrase(filepath.Join(dataDir, "ca"), caPass)
 			if err != nil {
 				return fmt.Errorf("generate ca: %w", err)
@@ -191,31 +196,24 @@ func newInitCmd() *cobra.Command {
 				return fmt.Errorf("set allowed groups: %w", err)
 			}
 
+			// Layout v2 converges both modes onto the user-mode trust model:
+			// the manager's own outbound identity lives under <home>/.ssh/ with
+			// namespaced files. Root mode resolves the home of "root" (/root).
 			selfDir := filepath.Join(dataDir, "self")
-			if mode == db.ModeUser {
-				if err := peerfiles.WriteUserSelfFiles(selfDir, peerfiles.UserPeerFiles{
-					TargetUser: targetUser,
-					PrivKey:    priv,
-					CertPub:    certBytes,
-					CAPub:      caObj.PublicKeyAuthorizedKey(),
-					Principals: nil,
-				}); err != nil {
-					return fmt.Errorf("write self files: %w", err)
-				}
-			} else {
-				caPubLine := strings.TrimRight(string(caObj.PublicKeyAuthorizedKey()), "\n")
-				caKnownHostsEntry := "@cert-authority * " + caPubLine
-				if err := peerfiles.WriteSelfFiles(selfDir, peerfiles.PeerFiles{
-					Hostname:           hostname,
-					PrivKey:            priv,
-					CertPub:            certBytes,
-					CAPub:              caObj.PublicKeyAuthorizedKey(),
-					KRL:                nil,
-					AuthPrincipalsRoot: nil,
-					CAKnownHostsEntry:  caKnownHostsEntry,
-				}); err != nil {
-					return fmt.Errorf("write self files: %w", err)
-				}
+			selfUser := targetUser
+			if mode == db.ModeRoot {
+				selfUser = "root"
+			}
+			if err := peerfiles.WriteUserSelfFiles(selfDir, peerfiles.UserPeerFiles{
+				TargetUser:  selfUser,
+				PrivKey:     priv,
+				CertPub:     certBytes,
+				CAPub:       caObj.PublicKeyAuthorizedKey(),
+				Principals:  nil,
+				Layout:      peerfiles.CurrentLayout,
+				InstanceKey: instanceKey,
+			}); err != nil {
+				return fmt.Errorf("write self files: %w", err)
 			}
 
 			caPubParsed, _, _, _, err := ssh.ParseAuthorizedKey(caObj.PublicKeyAuthorizedKey())

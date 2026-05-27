@@ -466,6 +466,68 @@ func TestGroupAllow_UserMode_EncryptedCA_NoCAPassphrase(t *testing.T) {
 	}
 }
 
+// TestGroupAllow_V2Root_RewritesAuthorizedKeys_NoReload asserts a v2 root peer
+// takes the user-mode RewritePrincipals branch on /root/.ssh/authorized_keys and
+// does NOT touch auth_principals/root or reload sshd.
+func TestGroupAllow_V2Root_RewritesAuthorizedKeys_NoReload(t *testing.T) {
+	dataDir := t.TempDir()
+	caObj, err := ca.Generate(filepath.Join(dataDir, "ca"))
+	if err != nil {
+		t.Fatalf("ca.Generate: %v", err)
+	}
+	dbPath := filepath.Join(dataDir, "state.db")
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	ctx := context.Background()
+	if err := d.InsertPeerWithMode(ctx, "vmV2R", 1, "fp", []byte("k"), db.ModeRoot, "", 2); err != nil {
+		t.Fatalf("InsertPeerWithMode: %v", err)
+	}
+	if err := d.EnsureGroup(ctx, "infra"); err != nil {
+		t.Fatalf("EnsureGroup: %v", err)
+	}
+	if err := d.SetPeerAllowedGroups(ctx, "vmV2R", []string{"infra"}); err != nil {
+		t.Fatalf("SetPeerAllowedGroups: %v", err)
+	}
+	d.Close()
+
+	caTrim := strings.TrimRight(string(caObj.PublicKeyAuthorizedKey()), "\n")
+	existing := []byte(`cert-authority,principals="manager,infra" ` + caTrim + "\n")
+	fp := &fakePusher{readData: map[string][]byte{
+		"/root/.ssh/authorized_keys": existing,
+	}}
+	prev := groupDial
+	groupDial = func(ctx context.Context, host string, opts sshpush.Options) (sshpush.Pusher, error) {
+		return fp, nil
+	}
+	t.Cleanup(func() { groupDial = prev })
+
+	out, err := runGroupUserModeCmd(t, dataDir, dbPath, "allow", "db", "--on", "vmV2R")
+	if err != nil {
+		t.Fatalf("allow: err=%v out=%s", err, out)
+	}
+
+	var ops []string
+	var writeCall *fakePushCall
+	calls := fp.Calls()
+	for i := range calls {
+		ops = append(ops, calls[i].op)
+		if calls[i].op == "write" {
+			writeCall = &calls[i]
+		}
+	}
+	if !reflect.DeepEqual(ops, []string{"read", "write", "verify"}) {
+		t.Errorf("ops = %v, want [read write verify] (no reload)", ops)
+	}
+	if writeCall == nil || writeCall.path != "/root/.ssh/authorized_keys" {
+		t.Fatalf("write must target /root/.ssh/authorized_keys; got %+v", writeCall)
+	}
+	if !strings.Contains(string(writeCall.content), `principals="manager,infra,db"`) {
+		t.Errorf("rewritten authorized_keys wrong: %q", writeCall.content)
+	}
+}
+
 func TestGroupAllowRequiresOnFlag(t *testing.T) {
 	dbPath := seedGroupDB(t, nil)
 	installFakePusher(t)
