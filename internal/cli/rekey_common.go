@@ -182,6 +182,16 @@ func runRekeyCore(ctx context.Context, deps rekeyDeps, exclude map[string]bool) 
 	return nil
 }
 
+// promptNewCAPassphrase obtains a fresh CA passphrase (with confirmation) for
+// --rotate-passphrase. It is a package var so tests can drive a new passphrase
+// distinct from the old one without a tty; production wiring prompts twice via
+// passphrase.PromptConfirm. The empty envVar is deliberate: reusing
+// CERTHOLD_CA_PASSPHRASE here would make the new passphrase indistinguishable
+// from the old one that deps.CAUnlock already reads.
+var promptNewCAPassphrase = func() ([]byte, error) {
+	return passphrase.PromptConfirm("New CA passphrase: ", "")
+}
+
 // newCAPassphrase decides the passphrase for the freshly generated CA key.
 // When --rotate-passphrase is set it prompts (with confirmation) for a fresh
 // one. Otherwise it mirrors the old CA's protection: an encrypted old CA reuses
@@ -189,7 +199,7 @@ func runRekeyCore(ctx context.Context, deps rekeyDeps, exclude map[string]bool) 
 // the new key is also plaintext (no spurious prompt).
 func newCAPassphrase(caDir string, deps rekeyDeps) ([]byte, error) {
 	if deps.RotatePassphrase {
-		pass, err := passphrase.PromptConfirm("New CA passphrase: ", "")
+		pass, err := promptNewCAPassphrase()
 		if err != nil {
 			return nil, fmt.Errorf("read new ca passphrase: %w", err)
 		}
