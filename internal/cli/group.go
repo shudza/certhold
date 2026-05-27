@@ -135,7 +135,7 @@ func runGroupAction(cmd *cobra.Command, group string, allow bool) error {
 	peerUnlock := newPeerUnlocker()
 	defer peerUnlock.Zero()
 
-	pushOpts := selfPushOptions(dataDir, peer.Mode, peerUnlock.get)
+	pushOpts := selfPushOptions(dataDir, resolveSelfIdent(ctx, d), peerUnlock.get)
 	pushOpts.User = pushUser(peer)
 	pusher, err := groupDial(ctx, host, pushOpts)
 	if err != nil {
@@ -143,7 +143,10 @@ func runGroupAction(cmd *cobra.Command, group string, allow bool) error {
 	}
 	defer pusher.Close()
 
-	if peer.Mode == db.ModeUser {
+	// v2 (both modes) and v1 user mode carry inbound trust in
+	// <home>/.ssh/authorized_keys, isolated per CA — rewrite it in place, no
+	// reload. Only legacy v1 root uses the global auth_principals/root file.
+	if peer.Mode == db.ModeUser || peer.LayoutVersion >= peerfiles.LayoutV2 {
 		caPubBytes, err := ca.LoadPublicKey(filepath.Join(dataDir, "ca"))
 		if err != nil {
 			return fmt.Errorf("load ca public key: %w", err)

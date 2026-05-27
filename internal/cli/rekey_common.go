@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -45,8 +46,20 @@ type rekeyDeps struct {
 // on user-mode peers (where there is no native KRL).
 func runRekeyCore(ctx context.Context, deps rekeyDeps, exclude map[string]bool) error {
 	caDir := filepath.Join(deps.DataDir, "ca")
-	if _, err := ca.LoadWithPassphrase(caDir, deps.CAUnlock); err != nil {
+	oldCA, err := ca.LoadWithPassphrase(caDir, deps.CAUnlock)
+	if err != nil {
 		return fmt.Errorf("load ca: %w", err)
+	}
+	oldCAPub, _, _, _, err := ssh.ParseAuthorizedKey(oldCA.PublicKeyAuthorizedKey())
+	if err != nil {
+		return fmt.Errorf("parse old ca pubkey: %w", err)
+	}
+
+	// The per-instance key is stable across CA rekey — meta is never touched
+	// here, only read.
+	instanceKey, err := EnsureInstanceKey(ctx, deps.DB)
+	if err != nil {
+		return fmt.Errorf("ensure instance key: %w", err)
 	}
 
 	self, err := deps.DB.GetPeer(ctx, deps.Hostname)
@@ -87,7 +100,12 @@ func runRekeyCore(ctx context.Context, deps rekeyDeps, exclude map[string]bool) 
 	}
 	newCAPub := newCA.PublicKeyAuthorizedKey()
 
-	pushOpts := selfPushOptions(deps.DataDir, self.Mode, deps.PeerPassFn)
+	pushOpts := selfPushOptions(deps.DataDir, selfIdent{
+		layout:      self.LayoutVersion,
+		targetUser:  selfHomeUser(self),
+		instanceKey: instanceKey,
+		resolved:    true,
+	}, deps.PeerPassFn)
 	pushOpts.User = pushUser(self)
 
 	var updated []string
@@ -115,7 +133,7 @@ func runRekeyCore(ctx context.Context, deps rekeyDeps, exclude map[string]bool) 
 		if err != nil {
 			return abortRekey(deps.Err, fmt.Errorf("get allowed groups for %s: %w", p.Name, err), updated)
 		}
-		if err := pushPeerRekey(ctx, deps.Dial, &peerForPush, newCAPub, certBytes, allowed, pushOpts); err != nil {
+		if err := pushPeerRekey(ctx, deps.Dial, &peerForPush, oldCAPub, newCAPub, instanceKey, certBytes, allowed, pushOpts); err != nil {
 			return abortRekey(deps.Err, fmt.Errorf("push %s: %w", p.Name, err), updated)
 		}
 		if err := deps.DB.UpdatePeerCertSerial(ctx, p.Name, serial); err != nil {
@@ -148,7 +166,7 @@ func runRekeyCore(ctx context.Context, deps rekeyDeps, exclude map[string]bool) 
 		return abortRekey(deps.Err, fmt.Errorf("sign self cert: %w", err), updated)
 	}
 
-	if err := writeSelfRekey(deps.DataDir, self, newCAPub, selfCertBytes); err != nil {
+	if err := writeSelfRekey(deps.DataDir, self, oldCAPub, newCAPub, instanceKey, selfCertBytes); err != nil {
 		return abortRekey(deps.Err, fmt.Errorf("update self files: %w", err), updated)
 	}
 	if err := deps.DB.UpdatePeerCertSerial(ctx, deps.Hostname, selfSerial); err != nil {
@@ -242,10 +260,11 @@ func caKeyEncrypted(caDir string) (bool, error) {
 }
 
 // pushPeerRekey delivers the new CA + cert to a single peer, branching on the
-// peer's mode. Root-mode pushes ca.pub + cert and reloads sshd. User-mode
-// rebuilds authorized_keys with the new CA's pubkey and pushes the new cert;
-// no reload.
-func pushPeerRekey(ctx context.Context, dial func(context.Context, string, sshpush.Options) (sshpush.Pusher, error), p *db.Peer, newCAPub, certBytes []byte, allowed []string, opts sshpush.Options) error {
+// peer's layout/mode. v2 (both modes) and v1 user mode swap this instance's
+// cert-authority line in <home>/.ssh/authorized_keys (preserving any other
+// instance's lines) and push the namespaced cert; no reload. Legacy v1 root
+// pushes ca.pub + cert and reloads sshd.
+func pushPeerRekey(ctx context.Context, dial func(context.Context, string, sshpush.Options) (sshpush.Pusher, error), p *db.Peer, oldCAPub ssh.PublicKey, newCAPub []byte, instanceKey string, certBytes []byte, allowed []string, opts sshpush.Options) error {
 	if p.Name == "" {
 		return errors.New("empty host")
 	}
@@ -255,12 +274,23 @@ func pushPeerRekey(ctx context.Context, dial func(context.Context, string, sshpu
 	}
 	defer cl.Close()
 
-	if p.Mode == db.ModeUser {
-		akContent := userAuthorizedKeysLine(newCAPub, allowed)
-		if err := cl.WriteFileAtomic(ctx, peerAuthorizedKeysRemotePath(p), akContent, fs.FileMode(0644)); err != nil {
+	if p.Mode == db.ModeUser || p.LayoutVersion >= peerfiles.LayoutV2 {
+		akPath := peerAuthorizedKeysRemotePath(p)
+		newLine := userAuthorizedKeysLine(newCAPub, allowed)
+		var akContent []byte
+		if p.LayoutVersion >= peerfiles.LayoutV2 {
+			existing, err := cl.ReadFile(ctx, akPath)
+			if err != nil {
+				return fmt.Errorf("read authorized_keys: %w", err)
+			}
+			akContent = peerfiles.ReplaceCALine(existing, oldCAPub, newLine)
+		} else {
+			akContent = newLine
+		}
+		if err := cl.WriteFileAtomic(ctx, akPath, akContent, fs.FileMode(0644)); err != nil {
 			return fmt.Errorf("write authorized_keys: %w", err)
 		}
-		if err := cl.WriteFileAtomic(ctx, peerCertRemotePath(p), certBytes, fs.FileMode(0644)); err != nil {
+		if err := cl.WriteFileAtomic(ctx, peerCertRemotePath(p, instanceKey), certBytes, fs.FileMode(0644)); err != nil {
 			return fmt.Errorf("write peer cert: %w", err)
 		}
 	} else {
@@ -321,7 +351,24 @@ func trimTrailingNewline(b []byte) []byte {
 	return b
 }
 
-func writeSelfRekey(dataDir string, self *db.Peer, newCAPub, selfCert []byte) error {
+func writeSelfRekey(dataDir string, self *db.Peer, oldCAPub ssh.PublicKey, newCAPub []byte, instanceKey string, selfCert []byte) error {
+	if self.LayoutVersion >= peerfiles.LayoutV2 {
+		homeRel := strings.TrimPrefix(peerfiles.HomeOf(selfHomeUser(self)), "/")
+		base := filepath.Join(dataDir, "self", homeRel, ".ssh")
+		if err := os.MkdirAll(base, 0700); err != nil {
+			return err
+		}
+		newLine := userAuthorizedKeysLine(newCAPub, nil)
+		akPath := filepath.Join(base, "authorized_keys")
+		existing, _ := os.ReadFile(akPath)
+		if err := writeFileAtomicLocal(akPath, peerfiles.ReplaceCALine(existing, oldCAPub, newLine), 0644); err != nil {
+			return fmt.Errorf("write self authorized_keys: %w", err)
+		}
+		if err := writeFileAtomicLocal(filepath.Join(base, peerfiles.V2CertFileName(instanceKey)), selfCert, 0644); err != nil {
+			return fmt.Errorf("write self cert: %w", err)
+		}
+		return nil
+	}
 	paths := peerfiles.PathsFor(self.LayoutVersion, self.Mode, self.TargetUser, "")
 	if self.Mode == db.ModeUser {
 		user := self.TargetUser

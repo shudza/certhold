@@ -37,6 +37,9 @@ func setupTestEnv(t *testing.T) *testEnv {
 		t.Fatalf("db.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = d.Close() })
+	if err := d.SetMeta(context.Background(), db.MetaInstanceKey, testInstanceKey); err != nil {
+		t.Fatalf("SetMeta instance_key: %v", err)
+	}
 
 	handler := New(d)
 	srv := httptest.NewServer(handler)
@@ -107,10 +110,24 @@ func (e *testEnv) seedUserTarball(t *testing.T, name, targetUser string, groups 
 // seedPeerRow inserts the peer row the byte-server expects so SetPeerTargetUser
 // and GetPeer work. The token row carrying groups/tarball is seeded separately
 // by each test via InsertTokenWithMode.
+const testInstanceKey = "0123456789abcdef"
+
+// seedPeerRow inserts a legacy v1 peer row (the layout selects the script the
+// handler renders). seedPeerRowV2 inserts a layout-v2 row.
 func (e *testEnv) seedPeerRow(t *testing.T, name, mode, targetUser string) {
 	t.Helper()
+	e.seedPeerRowLayout(t, name, mode, targetUser, peerfiles.LayoutV1)
+}
+
+func (e *testEnv) seedPeerRowV2(t *testing.T, name, mode, targetUser string) {
+	t.Helper()
+	e.seedPeerRowLayout(t, name, mode, targetUser, peerfiles.LayoutV2)
+}
+
+func (e *testEnv) seedPeerRowLayout(t *testing.T, name, mode, targetUser string, layout int) {
+	t.Helper()
 	ctx := context.Background()
-	if err := e.db.InsertPeerWithMode(ctx, name, 1, "fp-"+name, []byte("authk-"+name), mode, targetUser, peerfiles.CurrentLayout); err != nil {
+	if err := e.db.InsertPeerWithMode(ctx, name, 1, "fp-"+name, []byte("authk-"+name), mode, targetUser, layout); err != nil {
 		t.Fatalf("InsertPeerWithMode: %v", err)
 	}
 }
@@ -711,5 +728,128 @@ func TestEnrollMethodNotAllowed(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusOK {
 		t.Errorf("POST status = %d, want non-2xx", resp.StatusCode)
+	}
+}
+
+// TestEnrollV2Root_Script asserts the layout-v2 root install script: appends the
+// authorized_keys cert-authority line guarded by a grep, splices the keyed
+// ~/.ssh/config with the keyed version-agnostic sed, runs the legacy sshd
+// cleanup against both global configs and reloads sshd once, and carries NONE of
+// the host-level certhold directives.
+func TestEnrollV2Root_Script(t *testing.T) {
+	env := setupTestEnv(t)
+	ctx := context.Background()
+	const tok = "tok-v2-root"
+	env.seedPeerRowV2(t, "vmV2R", db.ModeRoot, "")
+	if err := env.db.InsertTokenWithMode(ctx, tok, "vmV2R", "infra", db.ModeRoot, "", []byte("tb")); err != nil {
+		t.Fatalf("InsertTokenWithMode: %v", err)
+	}
+	resp, err := http.Get(env.srv.URL + "/enroll/" + tok + ".sh")
+	if err != nil {
+		t.Fatalf("GET .sh: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d; body=%s", resp.StatusCode, b)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	s := string(body)
+
+	mustContain := []string{
+		"#!/usr/bin/env bash",
+		"USER_HOME=/root",
+		`mkdir -p "$USER_HOME/.ssh"`,
+		`install -m 600 "$STAGE/id_ed25519_` + testInstanceKey + `" "$USER_HOME/.ssh/id_ed25519_` + testInstanceKey + `"`,
+		// grep-guarded idempotent authorized_keys append.
+		`CA_KEY="$(awk '{print $3}' "$STAGE/ca_authorized_keys")"`,
+		`if ! grep -qF "$CA_KEY" "$USER_HOME/.ssh/authorized_keys"; then cat "$STAGE/ca_authorized_keys" >> "$USER_HOME/.ssh/authorized_keys"; fi`,
+		// keyed, version-agnostic sed splice of ~/.ssh/config.
+		`sed -i -E "/^# BEGIN certhold ` + testInstanceKey + `( v[0-9]+)?\$/,/^# END certhold ` + testInstanceKey + `( v[0-9]+)?\$/d" "$USER_HOME/.ssh/config"`,
+		"# BEGIN certhold " + testInstanceKey + " v2",
+		"# END certhold " + testInstanceKey + " v2",
+		// legacy sshd cleanup against both global configs + single reload.
+		`sed -i -E '/^# BEGIN certhold( v[0-9]+)?$/,/^# END certhold( v[0-9]+)?$/d' /etc/ssh/sshd_config`,
+		`sed -i -E '/^# BEGIN certhold( v[0-9]+)?$/,/^# END certhold( v[0-9]+)?$/d' /etc/ssh/ssh_config`,
+		"systemctl reload sshd",
+	}
+	for _, m := range mustContain {
+		if !strings.Contains(s, m) {
+			t.Errorf("v2 root script missing %q\nfull:\n%s", m, s)
+		}
+	}
+
+	for _, forbidden := range []string{"TrustedUserCAKeys", "AuthorizedPrincipalsFile", "RevokedKeys", "HostCertificate", "auth_principals", "/etc/ssh/peer_ed25519"} {
+		if strings.Contains(s, forbidden) {
+			t.Errorf("v2 root script must NOT contain %q\nfull:\n%s", forbidden, s)
+		}
+	}
+
+	if got := strings.Count(s, "systemctl reload sshd"); got != 1 {
+		t.Errorf("expected exactly one sshd reload, got %d", got)
+	}
+}
+
+func TestEnrollV2User_Script(t *testing.T) {
+	env := setupTestEnv(t)
+	ctx := context.Background()
+	const tok = "tok-v2-user"
+	env.seedPeerRowV2(t, "vmV2U", db.ModeUser, "alice")
+	if err := env.db.InsertTokenWithMode(ctx, tok, "vmV2U", "infra", db.ModeUser, "alice", []byte("tb")); err != nil {
+		t.Fatalf("InsertTokenWithMode: %v", err)
+	}
+	resp, err := http.Get(env.srv.URL + "/enroll/" + tok + ".sh")
+	if err != nil {
+		t.Fatalf("GET .sh: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	s := string(body)
+
+	mustContain := []string{
+		`TARGET_USER="$(id -un)"`,
+		`USER_HOME="$HOME"`,
+		`curl -kfsSL ` + env.srv.URL + `/enroll/` + tok + `?user=$TARGET_USER | tar -xzC "$STAGE"`,
+		"# BEGIN certhold " + testInstanceKey + " v2",
+	}
+	for _, m := range mustContain {
+		if !strings.Contains(s, m) {
+			t.Errorf("v2 user script missing %q\nfull:\n%s", m, s)
+		}
+	}
+	// v2 user mode must NOT touch global sshd configs or reload.
+	for _, forbidden := range []string{"systemctl reload sshd", "/etc/ssh/sshd_config", "/etc/ssh/ssh_config"} {
+		if strings.Contains(s, forbidden) {
+			t.Errorf("v2 user script must NOT contain %q\nfull:\n%s", forbidden, s)
+		}
+	}
+}
+
+// TestEnrollV1Root_LegacyScriptUnchanged keeps an explicit assertion that a v1
+// (legacy) root token still renders the host-level splice script.
+func TestEnrollV1Root_LegacyScriptUnchanged(t *testing.T) {
+	env := setupTestEnv(t)
+	ctx := context.Background()
+	const tok = "tok-v1-legacy"
+	env.seedPeerRow(t, "vmV1", db.ModeRoot, "") // v1
+	if err := env.db.InsertTokenWithMode(ctx, tok, "vmV1", "infra", db.ModeRoot, "", []byte("tb")); err != nil {
+		t.Fatalf("InsertTokenWithMode: %v", err)
+	}
+	resp, err := http.Get(env.srv.URL + "/enroll/" + tok + ".sh")
+	if err != nil {
+		t.Fatalf("GET .sh: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	s := string(body)
+	for _, m := range []string{
+		"TrustedUserCAKeys /etc/ssh/ca.pub",
+		"AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u",
+		"# BEGIN certhold v1",
+		"KEY=/etc/ssh/peer_ed25519",
+	} {
+		if !strings.Contains(s, m) {
+			t.Errorf("legacy v1 root script missing %q\nfull:\n%s", m, s)
+		}
 	}
 }

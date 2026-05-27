@@ -269,6 +269,60 @@ func TestUpdateUserMode_NoReload(t *testing.T) {
 	}
 }
 
+func setupUpdateV2Peer(t *testing.T, peerName, mode, targetUser string) (dataDir, dbPath, key string) {
+	t.Helper()
+	dataDir = t.TempDir()
+	if _, err := ca.Generate(filepath.Join(dataDir, "ca")); err != nil {
+		t.Fatalf("ca.Generate: %v", err)
+	}
+	_, pubAuth, sshPub, err := ca.GeneratePeerKey()
+	if err != nil {
+		t.Fatalf("GeneratePeerKey: %v", err)
+	}
+	dbPath = filepath.Join(dataDir, "state.db")
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	ctx := context.Background()
+	key, err = EnsureInstanceKey(ctx, d)
+	if err != nil {
+		t.Fatalf("EnsureInstanceKey: %v", err)
+	}
+	if err := d.InsertPeerWithMode(ctx, peerName, 1, ssh.FingerprintSHA256(sshPub), pubAuth, mode, targetUser, 2); err != nil {
+		t.Fatalf("InsertPeerWithMode: %v", err)
+	}
+	d.Close()
+	return dataDir, dbPath, key
+}
+
+func TestUpdateV2Root_NamespacedCert_NoReload(t *testing.T) {
+	dataDir, dbPath, key := setupUpdateV2Peer(t, "vmV2", db.ModeRoot, "")
+	mp := withMockPusher(t)
+	if _, _, err := runUpdate(t, dataDir, dbPath, "vmV2", "--groups", "infra"); err != nil {
+		t.Fatalf("update v2 root: %v", err)
+	}
+	mp.mu.Lock()
+	defer mp.mu.Unlock()
+	wantPath := "/root/.ssh/id_ed25519_" + key + "-cert.pub"
+	gotPath := ""
+	reloaded := false
+	for _, c := range mp.calls {
+		if c.op == "write" {
+			gotPath = c.path
+		}
+		if c.op == "reload" {
+			reloaded = true
+		}
+	}
+	if gotPath != wantPath {
+		t.Errorf("v2 root write path = %q, want %q", gotPath, wantPath)
+	}
+	if reloaded {
+		t.Errorf("v2 update must NOT reload sshd; calls=%+v", mp.calls)
+	}
+}
+
 func TestUpdateUserMode_RootUserHomeIsSlashRoot(t *testing.T) {
 	dataDir, dbPath := setupUpdateUserPeer(t, "vmR", "root")
 	mp := withMockPusher(t)

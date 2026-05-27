@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
@@ -112,20 +114,26 @@ func newUpdateCmd() *cobra.Command {
 				return fmt.Errorf("update peer cert serial: %w", err)
 			}
 
-			pusher, err := dialFn(ctx, host, selfPushOptions(dataDir, peer.Mode, peerUnlock.get))
+			instanceKey, err := EnsureInstanceKey(ctx, d)
+			if err != nil {
+				return fmt.Errorf("ensure instance key: %w", err)
+			}
+
+			pusher, err := dialFn(ctx, host, selfPushOptions(dataDir, resolveSelfIdent(ctx, d), peerUnlock.get))
 			if err != nil {
 				return fmt.Errorf("ssh dial %s: %w", host, err)
 			}
 			defer pusher.Close()
 
-			certPath := peerCertRemotePath(peer)
+			certPath := peerCertRemotePath(peer, instanceKey)
 			if err := pusher.WriteFileAtomic(ctx, certPath, certBytes, 0644); err != nil {
 				return fmt.Errorf("write cert: %w", err)
 			}
-			// User-mode peers do not need sshd reloaded — authorized_keys is
-			// read per-connection. Root-mode peers need a reload so sshd
-			// re-evaluates HostCertificate / TrustedUserCAKeys.
-			if peer.Mode != db.ModeUser {
+			// v1 user-mode and all v2 peers read trust per-connection from
+			// authorized_keys, so no sshd reload is needed. Only legacy v1
+			// root peers need a reload to re-evaluate HostCertificate /
+			// TrustedUserCAKeys.
+			if peer.Mode != db.ModeUser && peer.LayoutVersion < peerfiles.LayoutV2 {
 				if err := pusher.ReloadSSHD(ctx); err != nil {
 					return fmt.Errorf("reload sshd: %w", err)
 				}
@@ -144,27 +152,69 @@ func newUpdateCmd() *cobra.Command {
 	return cmd
 }
 
+// selfIdent describes the manager's own outbound SSH identity as recorded in
+// the DB: the layout the self files were written at, the target user owning
+// <home>/.ssh/, and (for v2) the per-instance key namespacing the files.
+type selfIdent struct {
+	layout      int
+	targetUser  string
+	instanceKey string
+	resolved    bool
+}
+
+// resolveSelfIdent reads the manager's own peer row + instance key from the DB.
+// The manager peer is named for the host certhold runs on (os.Hostname at init).
+// When the row is absent (e.g. before init, or a renamed host) resolved stays
+// false so selfPushOptions falls back to the historical v1 root layout.
+func resolveSelfIdent(ctx context.Context, d *db.DB) selfIdent {
+	host, err := osHostname()
+	if err != nil || host == "" {
+		return selfIdent{}
+	}
+	self, err := d.GetPeer(ctx, host)
+	if err != nil {
+		return selfIdent{}
+	}
+	key, _, _ := d.GetMeta(ctx, db.MetaInstanceKey)
+	return selfIdent{layout: self.LayoutVersion, targetUser: selfHomeUser(self), instanceKey: key, resolved: true}
+}
+
+func selfHomeUser(p *db.Peer) string {
+	if p.Mode == db.ModeRoot || p.TargetUser == "" {
+		return "root"
+	}
+	return p.TargetUser
+}
+
+var osHostname = os.Hostname
+
 // selfPushOptions assembles the sshpush.Options that point at certhold's own
-// peer cert + key + known_hosts files. Manager's outbound files are written
-// by init/rekey to one of two layouts. Resolve at call time by checking which
-// one exists; prefer root layout (the historical default) when neither (yet)
-// exists so legacy tests that never wrote self files still get a deterministic
-// answer.
-func selfPushOptions(dataDir, _ string, peerPassFn func() ([]byte, error)) sshpush.Options {
-	rootSSH := filepath.Join(dataDir, "self", "etc", "ssh")
-	userBase := filepath.Join(dataDir, "self", "home")
-	rootPresent := existsFile(filepath.Join(rootSSH, "peer_ed25519"))
-	if !rootPresent {
-		if user, ok := firstSelfHomeUser(userBase); ok {
-			userSSH := filepath.Join(userBase, user, ".ssh")
-			return sshpush.Options{
-				CertPath:       filepath.Join(userSSH, "id_ed25519-cert.pub"),
-				KeyPath:        filepath.Join(userSSH, "id_ed25519"),
-				KnownHostsPath: filepath.Join(userSSH, "known_hosts"),
-				PassphraseFn:   peerPassFn,
-			}
+// peer cert + key + known_hosts files, resolved DB-first from the manager's own
+// layout_version + instance key. v1 self files live under self/etc/ssh/
+// (root) or self/home/<user>/.ssh/; v2 self files are namespaced under
+// self/<home>/.ssh/id_ed25519_<key>. When the manager row is unknown, default
+// to the historical v1 root layout so callers without an init still resolve.
+func selfPushOptions(dataDir string, self selfIdent, peerPassFn func() ([]byte, error)) sshpush.Options {
+	if self.resolved && self.layout >= peerfiles.LayoutV2 {
+		homeRel := strings.TrimPrefix(peerfiles.HomeOf(self.targetUser), "/")
+		base := filepath.Join(dataDir, "self", homeRel, ".ssh")
+		return sshpush.Options{
+			CertPath:       filepath.Join(base, peerfiles.V2CertFileName(self.instanceKey)),
+			KeyPath:        filepath.Join(base, peerfiles.V2KeyFileName(self.instanceKey)),
+			KnownHostsPath: filepath.Join(base, "known_hosts"),
+			PassphraseFn:   peerPassFn,
 		}
 	}
+	if self.resolved && self.targetUser != "root" {
+		base := filepath.Join(dataDir, "self", "home", self.targetUser, ".ssh")
+		return sshpush.Options{
+			CertPath:       filepath.Join(base, "id_ed25519-cert.pub"),
+			KeyPath:        filepath.Join(base, "id_ed25519"),
+			KnownHostsPath: filepath.Join(base, "known_hosts"),
+			PassphraseFn:   peerPassFn,
+		}
+	}
+	rootSSH := filepath.Join(dataDir, "self", "etc", "ssh")
 	return sshpush.Options{
 		CertPath:       filepath.Join(rootSSH, "peer_ed25519-cert.pub"),
 		KeyPath:        filepath.Join(rootSSH, "peer_ed25519"),
@@ -173,10 +223,10 @@ func selfPushOptions(dataDir, _ string, peerPassFn func() ([]byte, error)) sshpu
 	}
 }
 
-func peerCertRemotePath(p *db.Peer) string {
-	return peerfiles.PathsFor(p.LayoutVersion, p.Mode, p.TargetUser, "").Cert
+func peerCertRemotePath(p *db.Peer, instanceKey string) string {
+	return peerfiles.PathsFor(p.LayoutVersion, p.Mode, p.TargetUser, instanceKey).Cert
 }
 
 func peerAuthorizedKeysRemotePath(p *db.Peer) string {
-	return peerfiles.PathsFor(p.LayoutVersion, db.ModeUser, p.TargetUser, "").AuthorizedKeys
+	return peerfiles.PathsFor(p.LayoutVersion, p.Mode, p.TargetUser, "").AuthorizedKeys
 }

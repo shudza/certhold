@@ -21,11 +21,52 @@ const legacySshClientBody = `Host *
 `
 
 func TestSentinelsAreVersioned(t *testing.T) {
-	if got := BeginSentinel(LayoutV1); got != "# BEGIN certhold v1" {
+	if got := BeginSentinel(LayoutV1, ""); got != "# BEGIN certhold v1" {
 		t.Errorf("BeginSentinel(v1) = %q, want %q", got, "# BEGIN certhold v1")
 	}
-	if got := EndSentinel(LayoutV1); got != "# END certhold v1" {
+	if got := EndSentinel(LayoutV1, ""); got != "# END certhold v1" {
 		t.Errorf("EndSentinel(v1) = %q, want %q", got, "# END certhold v1")
+	}
+}
+
+func TestSentinelsV2CarryKey(t *testing.T) {
+	const key = "0123456789abcdef"
+	if got, want := BeginSentinel(LayoutV2, key), "# BEGIN certhold "+key+" v2"; got != want {
+		t.Errorf("BeginSentinel(v2) = %q, want %q", got, want)
+	}
+	if got, want := EndSentinel(LayoutV2, key), "# END certhold "+key+" v2"; got != want {
+		t.Errorf("EndSentinel(v2) = %q, want %q", got, want)
+	}
+}
+
+func TestPathsForV2Root(t *testing.T) {
+	const key = "0123456789abcdef"
+	p := PathsFor(LayoutV2, "root", "", key)
+	if p.Cert != "/root/.ssh/id_ed25519_"+key+"-cert.pub" {
+		t.Errorf("v2 root Cert = %q", p.Cert)
+	}
+	if p.AuthorizedKeys != "/root/.ssh/authorized_keys" {
+		t.Errorf("v2 root AuthorizedKeys = %q", p.AuthorizedKeys)
+	}
+	if p.ConfigTarget != "/root/.ssh/config" {
+		t.Errorf("v2 root ConfigTarget = %q", p.ConfigTarget)
+	}
+	if p.KRL != "" {
+		t.Errorf("v2 must have no KRL, got %q", p.KRL)
+	}
+	if strings.Contains(p.AuthorizedKeys, "auth_principals") {
+		t.Errorf("v2 must not use auth_principals: %q", p.AuthorizedKeys)
+	}
+}
+
+func TestPathsForV2User(t *testing.T) {
+	const key = "0123456789abcdef"
+	p := PathsFor(LayoutV2, "user", "alice", key)
+	if p.Cert != "/home/alice/.ssh/id_ed25519_"+key+"-cert.pub" {
+		t.Errorf("v2 user Cert = %q", p.Cert)
+	}
+	if p.AuthorizedKeys != "/home/alice/.ssh/authorized_keys" {
+		t.Errorf("v2 user AuthorizedKeys = %q", p.AuthorizedKeys)
 	}
 }
 

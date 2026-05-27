@@ -15,6 +15,18 @@ import (
 	"github.com/shudza/certhold/internal/db"
 )
 
+func is16Hex(s string) bool {
+	if len(s) != 16 {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
 // setInitPassphrases injects the CA + manager passphrases via env so init's
 // default (passphrase-protected) path never blocks on a tty in tests.
 func setInitPassphrases(t *testing.T) {
@@ -71,11 +83,23 @@ func TestInit_RootMode_HappyPath(t *testing.T) {
 	if peers[0].Mode != db.ModeRoot {
 		t.Errorf("peer mode: got %q want %q", peers[0].Mode, db.ModeRoot)
 	}
+	if peers[0].LayoutVersion != 2 {
+		t.Errorf("manager peer layout: got %d want 2", peers[0].LayoutVersion)
+	}
 	if peers[0].Serial == 0 {
 		t.Errorf("peer serial is zero")
 	}
 	if !strings.HasPrefix(peers[0].Fingerprint, "SHA256:") {
 		t.Errorf("peer fingerprint format: %q", peers[0].Fingerprint)
+	}
+
+	// init backfills/sets a 16-hex instance key.
+	key, ok, err := database.GetMeta(context.Background(), db.MetaInstanceKey)
+	if err != nil || !ok {
+		t.Fatalf("GetMeta instance_key: ok=%v err=%v", ok, err)
+	}
+	if !is16Hex(key) {
+		t.Errorf("instance_key %q is not 16 lowercase hex chars", key)
 	}
 
 	allowed, err := database.GetPeerAllowedGroups(context.Background(), "manager-test")
@@ -86,28 +110,29 @@ func TestInit_RootMode_HappyPath(t *testing.T) {
 		t.Errorf("allowed groups: got %v want [manager]", allowed)
 	}
 
+	// v2 root self files live under self/root/.ssh/ with namespaced identity.
 	selfDir := filepath.Join(dataDir, "self")
+	base := filepath.Join(selfDir, "root", ".ssh")
 	for _, rel := range []string{
-		"etc/ssh/peer_ed25519",
-		"etc/ssh/peer_ed25519-cert.pub",
-		"etc/ssh/ca.pub",
-		"etc/ssh/krl",
-		"etc/ssh/auth_principals/root",
-		"etc/ssh/ca_known_hosts",
-		"etc/ssh/sshd_config_block.conf",
-		"etc/ssh/ssh_config_block.conf",
+		"id_ed25519_" + key,
+		"id_ed25519_" + key + "-cert.pub",
+		"authorized_keys",
+		"config",
 	} {
-		if _, err := os.Stat(filepath.Join(selfDir, rel)); err != nil {
+		if _, err := os.Stat(filepath.Join(base, rel)); err != nil {
 			t.Errorf("missing self file %s: %v", rel, err)
 		}
 	}
-
-	caKH, err := os.ReadFile(filepath.Join(selfDir, "etc/ssh/ca_known_hosts"))
-	if err != nil {
-		t.Fatalf("read ca_known_hosts: %v", err)
+	// No legacy host-level self files under v2.
+	if _, err := os.Stat(filepath.Join(selfDir, "etc", "ssh", "peer_ed25519")); err == nil {
+		t.Errorf("v2 init must not write legacy self files under etc/ssh")
 	}
-	if !strings.HasPrefix(string(caKH), "@cert-authority * ssh-ed25519 ") {
-		t.Errorf("ca_known_hosts: %q", caKH)
+	cfg, err := os.ReadFile(filepath.Join(base, "config"))
+	if err != nil {
+		t.Fatalf("read self config: %v", err)
+	}
+	if !strings.Contains(string(cfg), "# BEGIN certhold "+key+" v2") {
+		t.Errorf("self config missing keyed v2 sentinel: %q", cfg)
 	}
 
 	got := out.String()
@@ -186,13 +211,16 @@ func TestInit_UserMode_HappyPath(t *testing.T) {
 	if p.Mode != db.ModeUser || p.TargetUser != "alice" {
 		t.Errorf("got mode=%q tu=%q, want user/alice", p.Mode, p.TargetUser)
 	}
+	key, ok, err := database.GetMeta(context.Background(), db.MetaInstanceKey)
+	if err != nil || !ok {
+		t.Fatalf("GetMeta instance_key: ok=%v err=%v", ok, err)
+	}
 	base := filepath.Join(dataDir, "self", "home", "alice", ".ssh")
 	for name, mode := range map[string]os.FileMode{
-		"id_ed25519":          0600,
-		"id_ed25519-cert.pub": 0644,
-		"authorized_keys":     0644,
-		"known_hosts":         0644,
-		"config":              0644,
+		"id_ed25519_" + key:               0600,
+		"id_ed25519_" + key + "-cert.pub": 0644,
+		"authorized_keys":                 0644,
+		"config":                          0644,
 	} {
 		st, err := os.Stat(filepath.Join(base, name))
 		if err != nil {
@@ -245,11 +273,15 @@ func TestInit_UserMode_DefaultsToCurrentUser(t *testing.T) {
 		t.Errorf("got mode=%q tu=%q, want user/%s", p.Mode, p.TargetUser, want)
 	}
 
+	key, ok, err := database.GetMeta(context.Background(), db.MetaInstanceKey)
+	if err != nil || !ok {
+		t.Fatalf("GetMeta instance_key: ok=%v err=%v", ok, err)
+	}
 	homeRel := "home/" + want
 	if want == "root" {
 		homeRel = "root"
 	}
-	wantSSH := filepath.Join(dataDir, "self", homeRel, ".ssh", "id_ed25519")
+	wantSSH := filepath.Join(dataDir, "self", homeRel, ".ssh", "id_ed25519_"+key)
 	if _, err := os.Stat(wantSSH); err != nil {
 		t.Errorf("expected self file at %s: %v", wantSSH, err)
 	}
@@ -317,5 +349,48 @@ func TestInit_Idempotency(t *testing.T) {
 	}
 	if err := run(); err == nil {
 		t.Fatalf("second init should fail")
+	}
+}
+
+func instanceKeyFromDB(t *testing.T, dbPath string) string {
+	t.Helper()
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer d.Close()
+	k, ok, err := d.GetMeta(context.Background(), db.MetaInstanceKey)
+	if err != nil || !ok {
+		t.Fatalf("GetMeta: ok=%v err=%v", ok, err)
+	}
+	return k
+}
+
+func runInitRoot(t *testing.T, dataDir, dbPath, hostname string) {
+	t.Helper()
+	cmd := cli.NewRootCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", hostname, "--mode", "root", "--listen-ip", "127.0.0.1", "--no-prompt"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("init: %v\n%s", err, out.String())
+	}
+}
+
+func TestInit_TwoInstances_DistinctKeys(t *testing.T) {
+	setInitPassphrases(t)
+	d1 := t.TempDir()
+	d2 := t.TempDir()
+	runInitRoot(t, d1, filepath.Join(d1, "state.db"), "m1")
+	runInitRoot(t, d2, filepath.Join(d2, "state.db"), "m2")
+
+	k1 := instanceKeyFromDB(t, filepath.Join(d1, "state.db"))
+	k2 := instanceKeyFromDB(t, filepath.Join(d2, "state.db"))
+	if !is16Hex(k1) || !is16Hex(k2) {
+		t.Fatalf("keys not 16-hex: %q %q", k1, k2)
+	}
+	if k1 == k2 {
+		t.Errorf("two inits produced the same instance key %q", k1)
 	}
 }
