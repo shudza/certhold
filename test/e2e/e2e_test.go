@@ -198,7 +198,7 @@ func waitForSSHD(ctx context.Context, t *testing.T, services ...string) {
 func enrollOneLiner(ctx context.Context, t *testing.T, name, address, groups string) string {
 	t.Helper()
 	out := certhold(ctx, t, "enroll", name,
-		"--address", address, "--mode", "user", "--user", targetUser,
+		"--address", address, "--user", targetUser,
 		"--groups", groups)
 	line := strings.TrimSpace(out)
 	if !strings.Contains(line, "curl") || !strings.Contains(line, "| bash") {
@@ -280,12 +280,12 @@ func TestE2E(t *testing.T) {
 	var instanceKey string
 
 	t.Run("01_init_and_serve", func(t *testing.T) {
-		// init writes the CA + manager self files and persists base_url. Mode
-		// user/user deploy means the manager's own identity lives under
+		// init writes the CA + manager self files and persists base_url.
+		// --user deploy means the manager's own identity lives under
 		// self/home/deploy/.ssh/ with v2-namespaced filenames. Passphrases are
 		// supplied via CERTHOLD_CA_PASSPHRASE / CERTHOLD_PEER_PASSPHRASE on the
 		// manager service, so --no-prompt does not block on a tty.
-		certhold(ctx, t, "init", "--mode", "user", "--user", targetUser,
+		certhold(ctx, t, "init", "--user", targetUser,
 			"--listen-ip", "0.0.0.0", "--no-prompt")
 
 		// Start serve in the background inside the manager container. It listens
