@@ -63,11 +63,12 @@ func (e *testEnv) seedUserTarball(t *testing.T, name, targetUser string, groups 
 		t.Fatalf("SignCert: %v", err)
 	}
 	tb, err := peerfiles.BuildUser(peerfiles.UserPeerFiles{
-		TargetUser: targetUser,
-		PrivKey:    priv,
-		CertPub:    certBytes,
-		CAPub:      e.ca.PublicKeyAuthorizedKey(),
-		Principals: groups,
+		TargetUser:  targetUser,
+		PrivKey:     priv,
+		CertPub:     certBytes,
+		CAPub:       e.ca.PublicKeyAuthorizedKey(),
+		Principals:  groups,
+		InstanceKey: testInstanceKey,
 	})
 	if err != nil {
 		t.Fatalf("peerfiles.BuildUser: %v", err)
@@ -230,9 +231,9 @@ func TestEnrollStreamsSeededTarball(t *testing.T) {
 	// The streamed bytes must still be a valid user-mode install tarball.
 	entries := extractTarball(t, body)
 	for _, name := range []string{
-		"id_ed25519",
-		"id_ed25519-cert.pub",
-		"authorized_keys",
+		"id_ed25519_" + testInstanceKey,
+		"id_ed25519_" + testInstanceKey + "-cert.pub",
+		"ca_authorized_keys",
 		"config",
 	} {
 		if _, ok := entries[name]; !ok {
@@ -381,7 +382,13 @@ func TestEnrollUserMode_Tarball(t *testing.T) {
 	}
 	body, _ := io.ReadAll(resp.Body)
 	entries := extractTarball(t, body)
-	wantNames := []string{"id_ed25519", "id_ed25519-cert.pub", "authorized_keys", "known_hosts", "config"}
+	wantNames := []string{
+		"id_ed25519_" + testInstanceKey,
+		"id_ed25519_" + testInstanceKey + "-cert.pub",
+		"ca_authorized_keys",
+		"known_hosts",
+		"config",
+	}
 	if len(entries) != 5 {
 		t.Errorf("user-mode tarball entries = %d, want 5: %v", len(entries), entries)
 	}
@@ -390,14 +397,18 @@ func TestEnrollUserMode_Tarball(t *testing.T) {
 			t.Errorf("missing entry %q", n)
 		}
 	}
+	// v2 must NOT ship a whole authorized_keys file (install appends the line).
+	if _, ok := entries["authorized_keys"]; ok {
+		t.Errorf("user-mode tarball must not ship a whole authorized_keys file")
+	}
 	for n := range entries {
 		if strings.HasPrefix(n, "etc/") || strings.HasPrefix(n, "/") {
 			t.Errorf("user-mode entry has root path %q", n)
 		}
 	}
-	ak := string(entries["authorized_keys"])
+	ak := string(entries["ca_authorized_keys"])
 	if !strings.HasPrefix(ak, `cert-authority,principals="manager,infra,databases" `) {
-		t.Errorf("authorized_keys wrong: %q", ak)
+		t.Errorf("ca_authorized_keys wrong: %q", ak)
 	}
 	peer, err := env.db.GetPeer(ctx, "vmU")
 	if err != nil {

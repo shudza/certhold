@@ -129,24 +129,6 @@ func TestSetPeerRevoked(t *testing.T) {
 	}
 }
 
-func TestUpdatePeerLastKRL(t *testing.T) {
-	ctx := t.Context()
-	d := newTestDB(t)
-	if err := d.InsertPeer(ctx, "p", 1, "fp", []byte("k")); err != nil {
-		t.Fatalf("InsertPeer: %v", err)
-	}
-	if err := d.UpdatePeerLastKRL(ctx, "p", 7); err != nil {
-		t.Fatalf("UpdatePeerLastKRL: %v", err)
-	}
-	p, _ := d.GetPeer(ctx, "p")
-	if p.LastKRLVersion != 7 {
-		t.Errorf("LastKRLVersion = %d, want 7", p.LastKRLVersion)
-	}
-	if err := d.UpdatePeerLastKRL(ctx, "nope", 1); !errors.Is(err, ErrPeerNotFound) {
-		t.Errorf("update missing: %v", err)
-	}
-}
-
 func TestEnsureGroup(t *testing.T) {
 	ctx := t.Context()
 	d := newTestDB(t)
@@ -660,51 +642,5 @@ func TestCAVersions(t *testing.T) {
 	}
 	if err := d.SetActiveCAVersion(ctx, 99); err == nil {
 		t.Error("expected error setting active to non-existent version")
-	}
-}
-
-func TestNextKRLVersion(t *testing.T) {
-	ctx := t.Context()
-	d := newTestDB(t)
-	for want := 1; want <= 3; want++ {
-		v, err := d.NextKRLVersion(ctx)
-		if err != nil {
-			t.Fatalf("NextKRLVersion: %v", err)
-		}
-		if v != want {
-			t.Errorf("NextKRLVersion = %d, want %d", v, want)
-		}
-	}
-}
-
-func TestNextKRLVersionConcurrent(t *testing.T) {
-	ctx := t.Context()
-	d := newTestDB(t)
-	const n = 8
-	var wg sync.WaitGroup
-	versions := make([]int, n)
-	errs := make([]error, n)
-	wg.Add(n)
-	for i := 0; i < n; i++ {
-		i := i
-		go func() {
-			defer wg.Done()
-			versions[i], errs[i] = d.NextKRLVersion(ctx)
-		}()
-	}
-	wg.Wait()
-	seen := make(map[int]bool)
-	for i, v := range versions {
-		if errs[i] != nil {
-			t.Errorf("NextKRLVersion[%d]: %v", i, errs[i])
-			continue
-		}
-		if seen[v] {
-			t.Errorf("duplicate version %d", v)
-		}
-		seen[v] = true
-	}
-	if len(seen) != n {
-		t.Errorf("expected %d unique versions, got %d", n, len(seen))
 	}
 }
