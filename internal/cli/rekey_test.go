@@ -119,8 +119,8 @@ func setupRekeyEnv(t *testing.T, failOn map[string]error) (dataDir, dbPath, host
 			t.Fatalf("GeneratePeerKey %s: %v", name, err)
 		}
 		fp := ssh.FingerprintSHA256(sshPub)
-		if err := d.InsertPeerWithMode(ctx, name, 100, fp, pubAuth, db.ModeUser, "root", 2); err != nil {
-			t.Fatalf("InsertPeerWithMode %s: %v", name, err)
+		if err := d.InsertPeer(ctx, name, 100, fp, pubAuth, "root"); err != nil {
+			t.Fatalf("InsertPeer %s: %v", name, err)
 		}
 		if err := d.EnsureGroup(ctx, "infra"); err != nil {
 			t.Fatalf("EnsureGroup infra: %v", err)
@@ -450,7 +450,7 @@ func TestRekeyLogicErrorAborts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
-	if err := d0.InsertPeer(context.Background(), "corrupt", 999, "fp-garbage", []byte("not a valid authorized key")); err != nil {
+	if err := d0.InsertPeer(context.Background(), "corrupt", 999, "fp-garbage", []byte("not a valid authorized key"), ""); err != nil {
 		t.Fatalf("InsertPeer corrupt: %v", err)
 	}
 	d0.Close()
@@ -730,8 +730,8 @@ func TestRekeyUserModePeer_RewritesAuthorizedKeys_NoReload(t *testing.T) {
 	ctx := context.Background()
 	key, _, _ := d.GetMeta(ctx, db.MetaInstanceKey)
 	_, pubAuth, _, _ := ca.GeneratePeerKey()
-	if err := d.InsertPeerWithMode(ctx, "vmU", 100, "fp-u", pubAuth, db.ModeUser, "alice", 2); err != nil {
-		t.Fatalf("InsertPeerWithMode: %v", err)
+	if err := d.InsertPeer(ctx, "vmU", 100, "fp-u", pubAuth, "alice"); err != nil {
+		t.Fatalf("InsertPeer: %v", err)
 	}
 	_ = d.EnsureGroup(ctx, "infra")
 	_ = d.SetPeerGroups(ctx, "vmU", []string{"infra"})
@@ -879,8 +879,8 @@ func TestRekeyRootUserPeer_RewritesAuthorizedKeys_NoReload(t *testing.T) {
 	ctx := context.Background()
 	key, _, _ := d.GetMeta(ctx, db.MetaInstanceKey)
 	_, pubAuth, _, _ := ca.GeneratePeerKey()
-	if err := d.InsertPeerWithMode(ctx, "vmV2", 100, "fp-v2", pubAuth, db.ModeUser, "root", 2); err != nil {
-		t.Fatalf("InsertPeerWithMode: %v", err)
+	if err := d.InsertPeer(ctx, "vmV2", 100, "fp-v2", pubAuth, "root"); err != nil {
+		t.Fatalf("InsertPeer: %v", err)
 	}
 	_ = d.EnsureGroup(ctx, "infra")
 	_ = d.SetPeerGroups(ctx, "vmV2", []string{"infra"})

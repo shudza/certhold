@@ -125,10 +125,10 @@ func newEnrollCmd() *cobra.Command {
 			}
 
 			if err := d.WithTx(ctx, func(tx *db.Tx) error {
-				if err := tx.InsertTokenWithMode(ctx, tok, name, strings.Join(groups, ","), db.ModeUser, targetUser, tarball); err != nil {
+				if err := tx.InsertToken(ctx, tok, name, strings.Join(groups, ","), targetUser, tarball); err != nil {
 					return err
 				}
-				if err := tx.InsertPeerWithMode(ctx, name, serial, fingerprint, pubAuth, db.ModeUser, targetUser, peerfiles.CurrentLayout); err != nil {
+				if err := tx.InsertPeer(ctx, name, serial, fingerprint, pubAuth, targetUser); err != nil {
 					return fmt.Errorf("insert peer: %w", err)
 				}
 				if address != "" {

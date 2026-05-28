@@ -19,10 +19,10 @@ func seedListDB(t *testing.T) string {
 	}
 	defer d.Close()
 	ctx := t.Context()
-	if err := d.InsertPeer(ctx, "alpha", 1, "fp-a", []byte("ka")); err != nil {
+	if err := d.InsertPeer(ctx, "alpha", 1, "fp-a", []byte("ka"), ""); err != nil {
 		t.Fatalf("InsertPeer alpha: %v", err)
 	}
-	if err := d.InsertPeer(ctx, "beta", 2, "fp-b", []byte("kb")); err != nil {
+	if err := d.InsertPeer(ctx, "beta", 2, "fp-b", []byte("kb"), ""); err != nil {
 		t.Fatalf("InsertPeer beta: %v", err)
 	}
 	if err := d.SetPeerGroups(ctx, "alpha", []string{"infra", "db"}); err != nil {

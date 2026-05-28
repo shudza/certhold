@@ -80,14 +80,8 @@ func TestInit_RootUser_HappyPath(t *testing.T) {
 	if peers[0].Name != "manager-test" {
 		t.Errorf("peer name: got %q want %q", peers[0].Name, "manager-test")
 	}
-	if peers[0].Mode != db.ModeUser {
-		t.Errorf("peer mode: got %q want %q", peers[0].Mode, db.ModeUser)
-	}
 	if peers[0].TargetUser != "root" {
 		t.Errorf("peer target user: got %q want root", peers[0].TargetUser)
-	}
-	if peers[0].LayoutVersion != 2 {
-		t.Errorf("manager peer layout: got %d want 2", peers[0].LayoutVersion)
 	}
 	if peers[0].Serial == 0 {
 		t.Errorf("peer serial is zero")
@@ -211,8 +205,8 @@ func TestInit_UserMode_HappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetPeer: %v", err)
 	}
-	if p.Mode != db.ModeUser || p.TargetUser != "alice" {
-		t.Errorf("got mode=%q tu=%q, want user/alice", p.Mode, p.TargetUser)
+	if p.TargetUser != "alice" {
+		t.Errorf("got tu=%q, want alice", p.TargetUser)
 	}
 	key, ok, err := database.GetMeta(context.Background(), db.MetaInstanceKey)
 	if err != nil || !ok {
@@ -272,8 +266,8 @@ func TestInit_UserMode_DefaultsToCurrentUser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetPeer: %v", err)
 	}
-	if p.Mode != db.ModeUser || p.TargetUser != want {
-		t.Errorf("got mode=%q tu=%q, want user/%s", p.Mode, p.TargetUser, want)
+	if p.TargetUser != want {
+		t.Errorf("got tu=%q, want %s", p.TargetUser, want)
 	}
 
 	key, ok, err := database.GetMeta(context.Background(), db.MetaInstanceKey)

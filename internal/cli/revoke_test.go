@@ -69,8 +69,8 @@ func TestRevokeTriggersRekey_NoKRL(t *testing.T) {
 	key, _, _ := d.GetMeta(ctx, db.MetaInstanceKey)
 	for _, name := range []string{"alpha", "beta"} {
 		_, pubAuth, _, _ := ca.GeneratePeerKey()
-		if err := d.InsertPeerWithMode(ctx, name, 100, "fp-"+name, pubAuth, db.ModeUser, "root", 2); err != nil {
-			t.Fatalf("InsertPeerWithMode %s: %v", name, err)
+		if err := d.InsertPeer(ctx, name, 100, "fp-"+name, pubAuth, "root"); err != nil {
+			t.Fatalf("InsertPeer %s: %v", name, err)
 		}
 		_ = d.EnsureGroup(ctx, "infra")
 		_ = d.SetPeerGroups(ctx, name, []string{"infra"})
@@ -171,8 +171,8 @@ func TestRevokeStragglerStillCompletes(t *testing.T) {
 	// alpha is revoked; beta is the unreachable straggler; gamma is reachable.
 	for _, name := range []string{"alpha", "beta", "gamma"} {
 		_, pubAuth, _, _ := ca.GeneratePeerKey()
-		if err := d.InsertPeerWithMode(ctx, name, 100, "fp-"+name, pubAuth, db.ModeUser, "root", 2); err != nil {
-			t.Fatalf("InsertPeerWithMode %s: %v", name, err)
+		if err := d.InsertPeer(ctx, name, 100, "fp-"+name, pubAuth, "root"); err != nil {
+			t.Fatalf("InsertPeer %s: %v", name, err)
 		}
 		_ = d.EnsureGroup(ctx, "infra")
 		_ = d.SetPeerGroups(ctx, name, []string{"infra"})

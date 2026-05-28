@@ -80,12 +80,12 @@ const testInstanceKey = "0123456789abcdef"
 
 // seedPeerRow inserts the layout-v2 user-mode peer row the byte-server expects
 // so SetPeerTargetUser and GetPeer work. The token row carrying groups/tarball
-// is seeded separately by each test via InsertTokenWithMode.
+// is seeded separately by each test via InsertToken.
 func (e *testEnv) seedPeerRow(t *testing.T, name, targetUser string) {
 	t.Helper()
 	ctx := context.Background()
-	if err := e.db.InsertPeerWithMode(ctx, name, 1, "fp-"+name, []byte("authk-"+name), db.ModeUser, targetUser, peerfiles.LayoutV2); err != nil {
-		t.Fatalf("InsertPeerWithMode: %v", err)
+	if err := e.db.InsertPeer(ctx, name, 1, "fp-"+name, []byte("authk-"+name), targetUser); err != nil {
+		t.Fatalf("InsertPeer: %v", err)
 	}
 }
 
@@ -138,8 +138,8 @@ func TestEnrollBackfillsAddressFromRemoteAddr(t *testing.T) {
 	const tok = "tok-backfill"
 	tb := env.seedUserTarball(t, "vmBF", "alice", []string{"infra"})
 	env.seedPeerRow(t, "vmBF", "alice")
-	if err := env.db.InsertTokenWithMode(ctx, tok, "vmBF", "infra", db.ModeUser, "alice", tb); err != nil {
-		t.Fatalf("InsertTokenWithMode: %v", err)
+	if err := env.db.InsertToken(ctx, tok, "vmBF", "infra", "alice", tb); err != nil {
+		t.Fatalf("InsertToken: %v", err)
 	}
 
 	resp, err := http.Get(srv.URL + "/enroll/" + tok + "?user=alice")
@@ -173,8 +173,8 @@ func TestEnrollDoesNotOverwriteExplicitAddress(t *testing.T) {
 	if err := env.db.SetPeerAddress(ctx, "vmEA", "vm.internal.example"); err != nil {
 		t.Fatalf("SetPeerAddress: %v", err)
 	}
-	if err := env.db.InsertTokenWithMode(ctx, tok, "vmEA", "infra", db.ModeUser, "alice", tb); err != nil {
-		t.Fatalf("InsertTokenWithMode: %v", err)
+	if err := env.db.InsertToken(ctx, tok, "vmEA", "infra", "alice", tb); err != nil {
+		t.Fatalf("InsertToken: %v", err)
 	}
 
 	resp, err := http.Get(srv.URL + "/enroll/" + tok + "?user=alice")
@@ -203,8 +203,8 @@ func TestEnrollStreamsSeededTarball(t *testing.T) {
 	const tok = "test-token-vm1"
 	wantBytes := env.seedUserTarball(t, "vm1", "alice", []string{"infra", "databases"})
 	env.seedPeerRow(t, "vm1", "alice")
-	if err := env.db.InsertTokenWithMode(ctx, tok, "vm1", "infra,databases", db.ModeUser, "alice", wantBytes); err != nil {
-		t.Fatalf("InsertTokenWithMode: %v", err)
+	if err := env.db.InsertToken(ctx, tok, "vm1", "infra,databases", "alice", wantBytes); err != nil {
+		t.Fatalf("InsertToken: %v", err)
 	}
 
 	resp, err := http.Get(env.srv.URL + "/enroll/" + tok + "?user=alice")
@@ -260,8 +260,8 @@ func TestEnrollTokenAlreadyConsumed(t *testing.T) {
 	const tok = "tok-consume-twice"
 	tb := env.seedUserTarball(t, "vm2", "alice", []string{"infra"})
 	env.seedPeerRow(t, "vm2", "alice")
-	if err := env.db.InsertTokenWithMode(ctx, tok, "vm2", "infra", db.ModeUser, "alice", tb); err != nil {
-		t.Fatalf("InsertTokenWithMode: %v", err)
+	if err := env.db.InsertToken(ctx, tok, "vm2", "infra", "alice", tb); err != nil {
+		t.Fatalf("InsertToken: %v", err)
 	}
 
 	resp1, err := http.Get(env.srv.URL + "/enroll/" + tok + "?user=alice")
@@ -338,8 +338,8 @@ func TestEnrollScriptConsumedToken(t *testing.T) {
 	const tok = "tok-script-consumed"
 	tb := env.seedUserTarball(t, "vmSC", "alice", []string{"infra"})
 	env.seedPeerRow(t, "vmSC", "alice")
-	if err := env.db.InsertTokenWithMode(ctx, tok, "vmSC", "infra", db.ModeUser, "alice", tb); err != nil {
-		t.Fatalf("InsertTokenWithMode: %v", err)
+	if err := env.db.InsertToken(ctx, tok, "vmSC", "infra", "alice", tb); err != nil {
+		t.Fatalf("InsertToken: %v", err)
 	}
 	resp1, err := http.Get(env.srv.URL + "/enroll/" + tok + "?user=alice")
 	if err != nil {
@@ -368,8 +368,8 @@ func TestEnrollUserMode_Tarball(t *testing.T) {
 	const tok = "tok-user-vm"
 	tb := env.seedUserTarball(t, "vmU", "alice", []string{"infra", "databases"})
 	env.seedPeerRow(t, "vmU", "alice")
-	if err := env.db.InsertTokenWithMode(ctx, tok, "vmU", "infra,databases", db.ModeUser, "alice", tb); err != nil {
-		t.Fatalf("InsertTokenWithMode: %v", err)
+	if err := env.db.InsertToken(ctx, tok, "vmU", "infra,databases", "alice", tb); err != nil {
+		t.Fatalf("InsertToken: %v", err)
 	}
 	resp, err := http.Get(env.srv.URL + "/enroll/" + tok + "?user=alice")
 	if err != nil {
@@ -414,8 +414,8 @@ func TestEnrollUserMode_Tarball(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetPeer: %v", err)
 	}
-	if peer.Mode != db.ModeUser || peer.TargetUser != "alice" {
-		t.Errorf("peer.Mode=%q peer.TargetUser=%q", peer.Mode, peer.TargetUser)
+	if peer.TargetUser != "alice" {
+		t.Errorf("peer.TargetUser=%q, want alice", peer.TargetUser)
 	}
 }
 
@@ -425,8 +425,8 @@ func TestEnrollUserMode_NoPresetValidQuery(t *testing.T) {
 	const tok = "tok-up-noprese"
 	tb := env.seedUserTarball(t, "vmNP", "alice", []string{"infra"})
 	env.seedPeerRow(t, "vmNP", "")
-	if err := env.db.InsertTokenWithMode(ctx, tok, "vmNP", "infra", db.ModeUser, "", tb); err != nil {
-		t.Fatalf("InsertTokenWithMode: %v", err)
+	if err := env.db.InsertToken(ctx, tok, "vmNP", "infra", "", tb); err != nil {
+		t.Fatalf("InsertToken: %v", err)
 	}
 	resp, err := http.Get(env.srv.URL + "/enroll/" + tok + "?user=alice")
 	if err != nil {
@@ -460,8 +460,8 @@ func TestEnrollUserMode_NoPresetMissingQuery(t *testing.T) {
 	const tok = "tok-up-noquery"
 	tb := env.seedUserTarball(t, "vmNQ", "bob", []string{"infra"})
 	env.seedPeerRow(t, "vmNQ", "")
-	if err := env.db.InsertTokenWithMode(ctx, tok, "vmNQ", "infra", db.ModeUser, "", tb); err != nil {
-		t.Fatalf("InsertTokenWithMode: %v", err)
+	if err := env.db.InsertToken(ctx, tok, "vmNQ", "infra", "", tb); err != nil {
+		t.Fatalf("InsertToken: %v", err)
 	}
 	resp, err := http.Get(env.srv.URL + "/enroll/" + tok)
 	if err != nil {
@@ -496,8 +496,8 @@ func TestEnrollUserMode_InvalidQuery(t *testing.T) {
 	const tok = "tok-up-invalid"
 	tb := env.seedUserTarball(t, "vmIQ", "alice", []string{"infra"})
 	env.seedPeerRow(t, "vmIQ", "")
-	if err := env.db.InsertTokenWithMode(ctx, tok, "vmIQ", "infra", db.ModeUser, "", tb); err != nil {
-		t.Fatalf("InsertTokenWithMode: %v", err)
+	if err := env.db.InsertToken(ctx, tok, "vmIQ", "infra", "", tb); err != nil {
+		t.Fatalf("InsertToken: %v", err)
 	}
 	resp, err := http.Get(env.srv.URL + "/enroll/" + tok + "?user=Has%20Space")
 	if err != nil {
@@ -524,8 +524,8 @@ func TestEnrollUserMode_PresetMatching(t *testing.T) {
 	const tok = "tok-up-match"
 	tb := env.seedUserTarball(t, "vmM", "bob", []string{"infra"})
 	env.seedPeerRow(t, "vmM", "bob")
-	if err := env.db.InsertTokenWithMode(ctx, tok, "vmM", "infra", db.ModeUser, "bob", tb); err != nil {
-		t.Fatalf("InsertTokenWithMode: %v", err)
+	if err := env.db.InsertToken(ctx, tok, "vmM", "infra", "bob", tb); err != nil {
+		t.Fatalf("InsertToken: %v", err)
 	}
 	resp, err := http.Get(env.srv.URL + "/enroll/" + tok + "?user=bob")
 	if err != nil {
@@ -551,8 +551,8 @@ func TestEnrollUserMode_PresetMismatch(t *testing.T) {
 	const tok = "tok-up-mismatch"
 	tb := env.seedUserTarball(t, "vmX", "bob", []string{"infra"})
 	env.seedPeerRow(t, "vmX", "bob")
-	if err := env.db.InsertTokenWithMode(ctx, tok, "vmX", "infra", db.ModeUser, "bob", tb); err != nil {
-		t.Fatalf("InsertTokenWithMode: %v", err)
+	if err := env.db.InsertToken(ctx, tok, "vmX", "infra", "bob", tb); err != nil {
+		t.Fatalf("InsertToken: %v", err)
 	}
 	resp, err := http.Get(env.srv.URL + "/enroll/" + tok + "?user=eve")
 	if err != nil {
@@ -590,8 +590,8 @@ func TestEnrollRootUser_TargetsHome(t *testing.T) {
 	const tok = "tok-root-user"
 	tb := env.seedUserTarball(t, "vmRoot", "root", []string{"infra"})
 	env.seedPeerRow(t, "vmRoot", "root")
-	if err := env.db.InsertTokenWithMode(ctx, tok, "vmRoot", "infra", db.ModeUser, "root", tb); err != nil {
-		t.Fatalf("InsertTokenWithMode: %v", err)
+	if err := env.db.InsertToken(ctx, tok, "vmRoot", "infra", "root", tb); err != nil {
+		t.Fatalf("InsertToken: %v", err)
 	}
 
 	respScript, err := http.Get(env.srv.URL + "/enroll/" + tok + ".sh")
@@ -644,8 +644,8 @@ func TestEnrollNullTarball500(t *testing.T) {
 	const tok = "tok-null-tarball"
 	// Pre-upgrade token: a row with no stored tarball (NULL blob).
 	env.seedPeerRow(t, "vmNull", "alice")
-	if err := env.db.InsertTokenWithMode(ctx, tok, "vmNull", "infra", db.ModeUser, "alice", nil); err != nil {
-		t.Fatalf("InsertTokenWithMode: %v", err)
+	if err := env.db.InsertToken(ctx, tok, "vmNull", "infra", "alice", nil); err != nil {
+		t.Fatalf("InsertToken: %v", err)
 	}
 	resp, err := http.Get(env.srv.URL + "/enroll/" + tok + "?user=alice")
 	if err != nil {
@@ -690,8 +690,8 @@ func TestEnrollV2User_Script(t *testing.T) {
 	ctx := context.Background()
 	const tok = "tok-v2-user"
 	env.seedPeerRow(t, "vmV2U", "alice")
-	if err := env.db.InsertTokenWithMode(ctx, tok, "vmV2U", "infra", db.ModeUser, "alice", []byte("tb")); err != nil {
-		t.Fatalf("InsertTokenWithMode: %v", err)
+	if err := env.db.InsertToken(ctx, tok, "vmV2U", "infra", "alice", []byte("tb")); err != nil {
+		t.Fatalf("InsertToken: %v", err)
 	}
 	resp, err := http.Get(env.srv.URL + "/enroll/" + tok + ".sh")
 	if err != nil {

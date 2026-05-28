@@ -177,7 +177,7 @@ func newInitCmd() *cobra.Command {
 
 			fingerprint := ssh.FingerprintSHA256(sshPub)
 
-			if err := database.InsertPeerWithMode(ctx, hostname, serial, fingerprint, pubAuth, db.ModeUser, targetUser, peerfiles.CurrentLayout); err != nil {
+			if err := database.InsertPeer(ctx, hostname, serial, fingerprint, pubAuth, targetUser); err != nil {
 				return fmt.Errorf("insert peer: %w", err)
 			}
 			if err := database.EnsureGroup(ctx, "manager"); err != nil {

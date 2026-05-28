@@ -177,11 +177,8 @@ func runGroupAction(cmd *cobra.Command, group string, allow bool) error {
 }
 
 func pushUser(p *db.Peer) string {
-	if p.Mode == db.ModeUser {
-		if p.TargetUser != "" {
-			return p.TargetUser
-		}
-		return "root"
+	if p.TargetUser != "" {
+		return p.TargetUser
 	}
 	return "root"
 }
