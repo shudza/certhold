@@ -97,9 +97,12 @@ func setupUpdateEnv(t *testing.T, peerName string, initialGroups []string, revok
 	defer d.Close()
 	ctx := context.Background()
 
+	if _, err := EnsureInstanceKey(ctx, d); err != nil {
+		t.Fatalf("EnsureInstanceKey: %v", err)
+	}
 	fingerprint := ssh.FingerprintSHA256(sshPub)
-	if err := d.InsertPeer(ctx, peerName, serial, fingerprint, pubAuth); err != nil {
-		t.Fatalf("InsertPeer: %v", err)
+	if err := d.InsertPeerWithMode(ctx, peerName, serial, fingerprint, pubAuth, db.ModeUser, "root", 2); err != nil {
+		t.Fatalf("InsertPeerWithMode: %v", err)
 	}
 	for _, g := range initialGroups {
 		if err := d.EnsureGroup(ctx, g); err != nil {
@@ -212,7 +215,7 @@ func TestUpdateDialsTargetUserForUserModePeer(t *testing.T) {
 	}
 }
 
-func TestUpdateDialsRootForRootModePeer(t *testing.T) {
+func TestUpdateDialsRootForRootTargetPeer(t *testing.T) {
 	dataDir, dbPath, _ := setupUpdateEnv(t, "peer1", []string{"oldA"}, false)
 	var gotUser string
 	withMockPusherCapturingUser(t, &gotUser)
@@ -220,7 +223,7 @@ func TestUpdateDialsRootForRootModePeer(t *testing.T) {
 		t.Fatalf("update: err=%v stderr=%s", err, stderr)
 	}
 	if gotUser != "root" {
-		t.Errorf("dialed user = %q, want root (root-mode peer)", gotUser)
+		t.Errorf("dialed user = %q, want root (target_user=root peer)", gotUser)
 	}
 }
 
@@ -310,16 +313,18 @@ func TestUpdateSuccess(t *testing.T) {
 		t.Errorf("groups = %v, want [newA newB]", groups)
 	}
 
+	key := instanceKeyFromDBPkg(t, dbPath)
 	mp.mu.Lock()
 	defer mp.mu.Unlock()
-	if len(mp.calls) != 3 {
-		t.Fatalf("calls = %d, want 3: %+v", len(mp.calls), mp.calls)
+	// v2 peer: a single namespaced cert write, then verify — no sshd reload.
+	if len(mp.calls) != 2 {
+		t.Fatalf("calls = %d, want 2: %+v", len(mp.calls), mp.calls)
 	}
 	if mp.calls[0].op != "write" {
 		t.Errorf("call[0] = %q, want write", mp.calls[0].op)
 	}
-	if mp.calls[0].path != "/etc/ssh/peer_ed25519-cert.pub" {
-		t.Errorf("call[0].path = %q", mp.calls[0].path)
+	if mp.calls[0].path != "/root/.ssh/id_ed25519_"+key+"-cert.pub" {
+		t.Errorf("call[0].path = %q, want /root/.ssh/id_ed25519_%s-cert.pub", mp.calls[0].path, key)
 	}
 	if mp.calls[0].mode != 0644 {
 		t.Errorf("call[0].mode = %o, want 0644", mp.calls[0].mode)
@@ -327,11 +332,13 @@ func TestUpdateSuccess(t *testing.T) {
 	if len(mp.calls[0].content) == 0 {
 		t.Errorf("call[0].content is empty")
 	}
-	if mp.calls[1].op != "reload" {
-		t.Errorf("call[1] = %q, want reload", mp.calls[1].op)
+	for _, c := range mp.calls {
+		if c.op == "reload" {
+			t.Errorf("v2 update must NOT reload sshd; calls=%+v", mp.calls)
+		}
 	}
-	if mp.calls[2].op != "verify" {
-		t.Errorf("call[2] = %q, want verify", mp.calls[2].op)
+	if mp.calls[1].op != "verify" {
+		t.Errorf("call[1] = %q, want verify", mp.calls[1].op)
 	}
 	if !mp.closed {
 		t.Errorf("pusher was not closed")
@@ -354,7 +361,7 @@ func TestUpdateRevokedPeer(t *testing.T) {
 	}
 }
 
-func setupUpdateUserPeer(t *testing.T, peerName, targetUser string) (dataDir, dbPath string) {
+func setupUpdateUserPeer(t *testing.T, peerName, targetUser string) (dataDir, dbPath, key string) {
 	t.Helper()
 	dataDir = t.TempDir()
 	caObj, err := ca.Generate(filepath.Join(dataDir, "ca"))
@@ -372,14 +379,19 @@ func setupUpdateUserPeer(t *testing.T, peerName, targetUser string) (dataDir, db
 		t.Fatalf("db.Open: %v", err)
 	}
 	defer d.Close()
-	if err := d.InsertPeerWithMode(context.Background(), peerName, 1, ssh.FingerprintSHA256(sshPub), pubAuth, db.ModeUser, targetUser, 1); err != nil {
+	ctx := context.Background()
+	key, err = EnsureInstanceKey(ctx, d)
+	if err != nil {
+		t.Fatalf("EnsureInstanceKey: %v", err)
+	}
+	if err := d.InsertPeerWithMode(ctx, peerName, 1, ssh.FingerprintSHA256(sshPub), pubAuth, db.ModeUser, targetUser, 2); err != nil {
 		t.Fatalf("InsertPeerWithMode: %v", err)
 	}
-	return dataDir, dbPath
+	return dataDir, dbPath, key
 }
 
 func TestUpdateUserMode_NoReload(t *testing.T) {
-	dataDir, dbPath := setupUpdateUserPeer(t, "vmU", "alice")
+	dataDir, dbPath, key := setupUpdateUserPeer(t, "vmU", "alice")
 	mp := withMockPusher(t)
 	stdout, stderr, err := runUpdate(t, dataDir, dbPath, "vmU", "--groups", "infra")
 	if err != nil {
@@ -387,7 +399,7 @@ func TestUpdateUserMode_NoReload(t *testing.T) {
 	}
 	mp.mu.Lock()
 	defer mp.mu.Unlock()
-	wantPath := "/home/alice/.ssh/id_ed25519-cert.pub"
+	wantPath := "/home/alice/.ssh/id_ed25519_" + key + "-cert.pub"
 	gotPath := ""
 	reloaded := false
 	for _, c := range mp.calls {
@@ -434,7 +446,7 @@ func setupUpdateV2Peer(t *testing.T, peerName, mode, targetUser string) (dataDir
 }
 
 func TestUpdateV2Root_NamespacedCert_NoReload(t *testing.T) {
-	dataDir, dbPath, key := setupUpdateV2Peer(t, "vmV2", db.ModeRoot, "")
+	dataDir, dbPath, key := setupUpdateV2Peer(t, "vmV2", db.ModeUser, "root")
 	mp := withMockPusher(t)
 	if _, _, err := runUpdate(t, dataDir, dbPath, "vmV2", "--groups", "infra"); err != nil {
 		t.Fatalf("update v2 root: %v", err)
@@ -461,16 +473,17 @@ func TestUpdateV2Root_NamespacedCert_NoReload(t *testing.T) {
 }
 
 func TestUpdateUserMode_RootUserHomeIsSlashRoot(t *testing.T) {
-	dataDir, dbPath := setupUpdateUserPeer(t, "vmR", "root")
+	dataDir, dbPath, key := setupUpdateUserPeer(t, "vmR", "root")
 	mp := withMockPusher(t)
 	if _, _, err := runUpdate(t, dataDir, dbPath, "vmR", "--groups", "infra"); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 	mp.mu.Lock()
 	defer mp.mu.Unlock()
+	wantPath := "/root/.ssh/id_ed25519_" + key + "-cert.pub"
 	for _, c := range mp.calls {
-		if c.op == "write" && c.path != "/root/.ssh/id_ed25519-cert.pub" {
-			t.Errorf("root user-mode write path = %q, want /root/.ssh/id_ed25519-cert.pub", c.path)
+		if c.op == "write" && c.path != wantPath {
+			t.Errorf("root user-mode write path = %q, want %q", c.path, wantPath)
 		}
 	}
 }
@@ -502,8 +515,11 @@ func setupUpdateEncryptedCAEnv(t *testing.T, peerName string, initialGroups []st
 	}
 	defer d.Close()
 	ctx := context.Background()
-	if err := d.InsertPeer(ctx, peerName, serial, ssh.FingerprintSHA256(sshPub), pubAuth); err != nil {
-		t.Fatalf("InsertPeer: %v", err)
+	if _, err := EnsureInstanceKey(ctx, d); err != nil {
+		t.Fatalf("EnsureInstanceKey: %v", err)
+	}
+	if err := d.InsertPeerWithMode(ctx, peerName, serial, ssh.FingerprintSHA256(sshPub), pubAuth, db.ModeUser, "root", 2); err != nil {
+		t.Fatalf("InsertPeerWithMode: %v", err)
 	}
 	for _, g := range initialGroups {
 		if err := d.EnsureGroup(ctx, g); err != nil {

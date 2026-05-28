@@ -57,7 +57,7 @@ func TestListPeersDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute: %v\noutput:\n%s", err, got)
 	}
-	for _, want := range []string{"NAME", "GROUPS", "ALLOWED", "REVOKED", "LAST_KRL", "alpha", "beta"} {
+	for _, want := range []string{"NAME", "GROUPS", "ALLOWED", "REVOKED", "alpha", "beta"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in output:\n%s", want, got)
 		}
@@ -82,11 +82,11 @@ func TestListPeersDefault(t *testing.T) {
 		t.Errorf("alpha should come before beta:\n%s", got)
 	}
 	betaFields := strings.Fields(lines[idxBeta])
-	if len(betaFields) < 4 || betaFields[len(betaFields)-2] != "Y" {
+	if len(betaFields) < 3 || betaFields[len(betaFields)-1] != "Y" {
 		t.Errorf("beta REVOKED column not Y: %q", lines[idxBeta])
 	}
 	alphaFields := strings.Fields(lines[idxAlpha])
-	if len(alphaFields) < 4 || alphaFields[len(alphaFields)-2] != "N" {
+	if len(alphaFields) < 4 || alphaFields[len(alphaFields)-1] != "N" {
 		t.Errorf("alpha REVOKED column not N: %q", lines[idxAlpha])
 	}
 }

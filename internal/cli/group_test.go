@@ -16,12 +16,6 @@ import (
 	"github.com/shudza/certhold/internal/sshpush"
 )
 
-const (
-	expectedSelfCertRel       = "self/etc/ssh/peer_ed25519-cert.pub"
-	expectedSelfKeyRel        = "self/etc/ssh/peer_ed25519"
-	expectedSelfKnownHostsRel = "self/etc/ssh/ca_known_hosts"
-)
-
 type fakePushCall struct {
 	op      string
 	path    string
@@ -87,9 +81,27 @@ func (f *fakePusher) Calls() []fakePushCall {
 	return out
 }
 
-func installFakePusher(t *testing.T) *fakePusher {
+// caLineFor returns a cert-authority authorized_keys line for the given
+// principals carrying the CA pubkey at dataDir/ca, matching what
+// peerfiles.BuildUser installs and what group's RewritePrincipals reads back.
+// It reads ca.pub (no passphrase needed) so it works against encrypted CAs.
+func caLineFor(t *testing.T, dataDir string, principals ...string) []byte {
 	t.Helper()
-	fp := &fakePusher{}
+	caPub, err := ca.LoadPublicKey(filepath.Join(dataDir, "ca"))
+	if err != nil {
+		t.Fatalf("ca.LoadPublicKey: %v", err)
+	}
+	caTrim := strings.TrimRight(string(caPub), "\n")
+	return []byte(`cert-authority,principals="` + strings.Join(principals, ",") + `" ` + caTrim + "\n")
+}
+
+// installFakePusher installs a fake group dialer whose ReadFile serves the given
+// existing authorized_keys at the v2 user path /home/alice/.ssh/authorized_keys.
+func installFakePusher(t *testing.T, dataDir string, existing []byte) *fakePusher {
+	t.Helper()
+	fp := &fakePusher{readData: map[string][]byte{
+		"/home/alice/.ssh/authorized_keys": existing,
+	}}
 	prev := groupDial
 	groupDial = func(ctx context.Context, host string, opts sshpush.Options) (sshpush.Pusher, error) {
 		return fp, nil
@@ -110,9 +122,11 @@ func installFakePusherCapturingOpts(t *testing.T, capturedOpts *sshpush.Options)
 	return fp
 }
 
-func installFakePusherCapturingHost(t *testing.T, gotHost *string) *fakePusher {
+func installFakePusherCapturingHost(t *testing.T, dataDir string, gotHost *string) *fakePusher {
 	t.Helper()
-	fp := &fakePusher{}
+	fp := &fakePusher{readData: map[string][]byte{
+		"/home/alice/.ssh/authorized_keys": caLineFor(t, dataDir, "manager", "a"),
+	}}
 	prev := groupDial
 	groupDial = func(ctx context.Context, host string, opts sshpush.Options) (sshpush.Pusher, error) {
 		*gotHost = host
@@ -123,7 +137,7 @@ func installFakePusherCapturingHost(t *testing.T, gotHost *string) *fakePusher {
 }
 
 func TestGroupDialsAddressWhenNoHostFlag(t *testing.T) {
-	dbPath := seedGroupDB(t, []string{"a"})
+	dataDir, dbPath := seedGroupDB(t, []string{"a"})
 	d, err := db.Open(dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
@@ -134,8 +148,8 @@ func TestGroupDialsAddressWhenNoHostFlag(t *testing.T) {
 	d.Close()
 
 	var gotHost string
-	installFakePusherCapturingHost(t, &gotHost)
-	if out, err := runGroupCmd(t, dbPath, "allow", "c", "--on", "peer1"); err != nil {
+	installFakePusherCapturingHost(t, dataDir, &gotHost)
+	if out, err := runGroupCmd(t, dataDir, dbPath, "allow", "c", "--on", "peer1"); err != nil {
 		t.Fatalf("allow: err=%v out=%s", err, out)
 	}
 	if gotHost != "10.0.0.9" {
@@ -144,7 +158,7 @@ func TestGroupDialsAddressWhenNoHostFlag(t *testing.T) {
 }
 
 func TestGroupHostFlagBeatsAddress(t *testing.T) {
-	dbPath := seedGroupDB(t, []string{"a"})
+	dataDir, dbPath := seedGroupDB(t, []string{"a"})
 	d, err := db.Open(dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
@@ -155,8 +169,8 @@ func TestGroupHostFlagBeatsAddress(t *testing.T) {
 	d.Close()
 
 	var gotHost string
-	installFakePusherCapturingHost(t, &gotHost)
-	if out, err := runGroupCmd(t, dbPath, "allow", "c", "--on", "peer1", "--host", "explicit.host"); err != nil {
+	installFakePusherCapturingHost(t, dataDir, &gotHost)
+	if out, err := runGroupCmd(t, dataDir, dbPath, "allow", "c", "--on", "peer1", "--host", "explicit.host"); err != nil {
 		t.Fatalf("allow: err=%v out=%s", err, out)
 	}
 	if gotHost != "explicit.host" {
@@ -165,10 +179,10 @@ func TestGroupHostFlagBeatsAddress(t *testing.T) {
 }
 
 func TestGroupDialsNameWhenNoAddress(t *testing.T) {
-	dbPath := seedGroupDB(t, []string{"a"})
+	dataDir, dbPath := seedGroupDB(t, []string{"a"})
 	var gotHost string
-	installFakePusherCapturingHost(t, &gotHost)
-	if out, err := runGroupCmd(t, dbPath, "allow", "c", "--on", "peer1"); err != nil {
+	installFakePusherCapturingHost(t, dataDir, &gotHost)
+	if out, err := runGroupCmd(t, dataDir, dbPath, "allow", "c", "--on", "peer1"); err != nil {
 		t.Fatalf("allow: err=%v out=%s", err, out)
 	}
 	if gotHost != "peer1" {
@@ -176,17 +190,23 @@ func TestGroupDialsNameWhenNoAddress(t *testing.T) {
 	}
 }
 
-func seedGroupDB(t *testing.T, allowed []string) string {
+// seedGroupDB sets up a data-dir with a CA and a single layout-v2 user-mode peer
+// "peer1" (target_user=alice) carrying the given allowed groups.
+func seedGroupDB(t *testing.T, allowed []string) (dataDir, dbPath string) {
 	t.Helper()
-	dbPath := filepath.Join(t.TempDir(), "state.db")
+	dataDir = t.TempDir()
+	if _, err := ca.Generate(filepath.Join(dataDir, "ca")); err != nil {
+		t.Fatalf("ca.Generate: %v", err)
+	}
+	dbPath = filepath.Join(dataDir, "state.db")
 	d, err := db.Open(dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
 	defer d.Close()
 	ctx := context.Background()
-	if err := d.InsertPeer(ctx, "peer1", 1, "fp", []byte("k")); err != nil {
-		t.Fatalf("InsertPeer: %v", err)
+	if err := d.InsertPeerWithMode(ctx, "peer1", 1, "fp", []byte("k"), db.ModeUser, "alice", 2); err != nil {
+		t.Fatalf("InsertPeerWithMode: %v", err)
 	}
 	for _, g := range allowed {
 		if err := d.EnsureGroup(ctx, g); err != nil {
@@ -196,16 +216,16 @@ func seedGroupDB(t *testing.T, allowed []string) string {
 	if err := d.SetPeerAllowedGroups(ctx, "peer1", allowed); err != nil {
 		t.Fatalf("SetPeerAllowedGroups: %v", err)
 	}
-	return dbPath
+	return dataDir, dbPath
 }
 
-func runGroupCmd(t *testing.T, dbPath string, args ...string) (string, error) {
+func runGroupCmd(t *testing.T, dataDir, dbPath string, args ...string) (string, error) {
 	t.Helper()
 	root := NewRootCmd()
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetErr(&out)
-	full := append([]string{"--db", dbPath, "--data-dir", t.TempDir(), "group"}, args...)
+	full := append([]string{"--db", dbPath, "--data-dir", dataDir, "group"}, args...)
 	root.SetArgs(full)
 	err := root.ExecuteContext(context.Background())
 	return out.String(), err
@@ -225,11 +245,28 @@ func getAllowed(t *testing.T, dbPath string) []string {
 	return got
 }
 
-func TestGroupAllowAddsAndPushes(t *testing.T) {
-	dbPath := seedGroupDB(t, []string{"a", "b"})
-	fp := installFakePusher(t)
+// writeContaining returns the content of the single write call (failing if there
+// is not exactly one).
+func writeContent(t *testing.T, calls []fakePushCall) []byte {
+	t.Helper()
+	var w *fakePushCall
+	for i := range calls {
+		if calls[i].op == "write" {
+			w = &calls[i]
+			break
+		}
+	}
+	if w == nil {
+		t.Fatalf("no write call in %+v", calls)
+	}
+	return w.content
+}
 
-	out, err := runGroupCmd(t, dbPath, "allow", "c", "--on", "peer1")
+func TestGroupAllowAddsAndPushes(t *testing.T) {
+	dataDir, dbPath := seedGroupDB(t, []string{"a", "b"})
+	fp := installFakePusher(t, dataDir, caLineFor(t, dataDir, "manager", "a", "b"))
+
+	out, err := runGroupCmd(t, dataDir, dbPath, "allow", "c", "--on", "peer1")
 	if err != nil {
 		t.Fatalf("allow: err=%v out=%s", err, out)
 	}
@@ -241,31 +278,36 @@ func TestGroupAllowAddsAndPushes(t *testing.T) {
 	}
 
 	calls := fp.Calls()
-	if len(calls) != 3 {
-		t.Fatalf("expected 3 calls (write, reload, verify), got %d: %+v", len(calls), calls)
+	// Expect read, write, verify — NO reload.
+	var ops []string
+	for _, c := range calls {
+		ops = append(ops, c.op)
 	}
-	if calls[0].op != "write" || calls[0].path != "/etc/ssh/auth_principals/root" {
-		t.Errorf("call[0] = %+v, want write to /etc/ssh/auth_principals/root", calls[0])
+	if !reflect.DeepEqual(ops, []string{"read", "write", "verify"}) {
+		t.Fatalf("ops = %v, want [read write verify]: %+v", ops, calls)
 	}
-	if string(calls[0].content) != "manager\na\nb\nc\n" {
-		t.Errorf("content = %q, want %q", string(calls[0].content), "manager\na\nb\nc\n")
+	var writeCall *fakePushCall
+	for i := range calls {
+		if calls[i].op == "write" {
+			writeCall = &calls[i]
+		}
 	}
-	if calls[0].mode != fs.FileMode(0644) {
-		t.Errorf("mode = %o, want 0644", calls[0].mode)
+	if writeCall.path != "/home/alice/.ssh/authorized_keys" {
+		t.Errorf("write path = %q, want /home/alice/.ssh/authorized_keys", writeCall.path)
 	}
-	if calls[1].op != "reload" {
-		t.Errorf("call[1] op = %s, want reload", calls[1].op)
+	if !strings.Contains(string(writeCall.content), `cert-authority,principals="manager,a,b,c" `) {
+		t.Errorf("content = %q, want principals manager,a,b,c", writeCall.content)
 	}
-	if calls[2].op != "verify" {
-		t.Errorf("call[2] op = %s, want verify", calls[2].op)
+	if writeCall.mode != fs.FileMode(0644) {
+		t.Errorf("mode = %o, want 0644", writeCall.mode)
 	}
 }
 
 func TestGroupDisallowRemovesAndPushes(t *testing.T) {
-	dbPath := seedGroupDB(t, []string{"a", "b", "c"})
-	fp := installFakePusher(t)
+	dataDir, dbPath := seedGroupDB(t, []string{"a", "b", "c"})
+	fp := installFakePusher(t, dataDir, caLineFor(t, dataDir, "manager", "a", "b", "c"))
 
-	out, err := runGroupCmd(t, dbPath, "disallow", "a", "--on", "peer1")
+	out, err := runGroupCmd(t, dataDir, dbPath, "disallow", "a", "--on", "peer1")
 	if err != nil {
 		t.Fatalf("disallow: err=%v out=%s", err, out)
 	}
@@ -276,20 +318,16 @@ func TestGroupDisallowRemovesAndPushes(t *testing.T) {
 		t.Errorf("allowed = %v, want %v", got, want)
 	}
 
-	calls := fp.Calls()
-	if len(calls) != 3 {
-		t.Fatalf("expected 3 calls, got %d", len(calls))
-	}
-	if string(calls[0].content) != "manager\nb\nc\n" {
-		t.Errorf("content = %q, want %q", string(calls[0].content), "manager\nb\nc\n")
+	if !strings.Contains(string(writeContent(t, fp.Calls())), `cert-authority,principals="manager,b,c" `) {
+		t.Errorf("content = %q, want principals manager,b,c", writeContent(t, fp.Calls()))
 	}
 }
 
 func TestGroupAllowIdempotent(t *testing.T) {
-	dbPath := seedGroupDB(t, []string{"a", "b", "c"})
-	fp := installFakePusher(t)
+	dataDir, dbPath := seedGroupDB(t, []string{"a", "b", "c"})
+	fp := installFakePusher(t, dataDir, caLineFor(t, dataDir, "manager", "a", "b", "c"))
 
-	out, err := runGroupCmd(t, dbPath, "allow", "c", "--on", "peer1")
+	out, err := runGroupCmd(t, dataDir, dbPath, "allow", "c", "--on", "peer1")
 	if err != nil {
 		t.Fatalf("allow: err=%v out=%s", err, out)
 	}
@@ -305,10 +343,10 @@ func TestGroupAllowIdempotent(t *testing.T) {
 }
 
 func TestGroupDisallowMissingIsNoop(t *testing.T) {
-	dbPath := seedGroupDB(t, []string{"a", "b"})
-	fp := installFakePusher(t)
+	dataDir, dbPath := seedGroupDB(t, []string{"a", "b"})
+	fp := installFakePusher(t, dataDir, caLineFor(t, dataDir, "manager", "a", "b"))
 
-	out, err := runGroupCmd(t, dbPath, "disallow", "z", "--on", "peer1")
+	out, err := runGroupCmd(t, dataDir, dbPath, "disallow", "z", "--on", "peer1")
 	if err != nil {
 		t.Fatalf("disallow: err=%v out=%s", err, out)
 	}
@@ -324,53 +362,75 @@ func TestGroupDisallowMissingIsNoop(t *testing.T) {
 }
 
 func TestGroupContentAlwaysStartsWithManager(t *testing.T) {
-	dbPath := seedGroupDB(t, nil)
-	fp := installFakePusher(t)
+	dataDir, dbPath := seedGroupDB(t, nil)
+	fp := installFakePusher(t, dataDir, caLineFor(t, dataDir, "manager"))
 
-	if _, err := runGroupCmd(t, dbPath, "allow", "x", "--on", "peer1"); err != nil {
+	if _, err := runGroupCmd(t, dataDir, dbPath, "allow", "x", "--on", "peer1"); err != nil {
 		t.Fatalf("allow: %v", err)
 	}
-	calls := fp.Calls()
-	if len(calls) == 0 {
-		t.Fatal("no push calls")
-	}
-	if string(calls[0].content) != "manager\nx\n" {
-		t.Errorf("content = %q, want %q", string(calls[0].content), "manager\nx\n")
+	content := writeContent(t, fp.Calls())
+	if !strings.HasPrefix(string(content), `cert-authority,principals="manager,x" `) {
+		t.Errorf("content = %q, want principals starting manager,x", content)
 	}
 }
 
 func TestGroupAllowMissingPeer(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "state.db")
+	dataDir := t.TempDir()
+	dbPath := filepath.Join(dataDir, "state.db")
 	d, err := db.Open(dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
 	d.Close()
-	installFakePusher(t)
+	installFakePusher(t, dataDir, nil)
 
-	if _, err := runGroupCmd(t, dbPath, "allow", "g", "--on", "missing"); err == nil {
+	if _, err := runGroupCmd(t, dataDir, dbPath, "allow", "g", "--on", "missing"); err == nil {
 		t.Fatal("expected error for missing peer")
 	}
 }
 
 func TestGroupSSHOptionsPathsMatchInitLayout(t *testing.T) {
-	dbPath := seedGroupDB(t, nil)
-	var captured sshpush.Options
-	installFakePusherCapturingOpts(t, &captured)
-
+	t.Setenv("CERTHOLD_CA_PASSPHRASE", "test-ca-pw")
+	t.Setenv("CERTHOLD_PEER_PASSPHRASE", "test-peer-pw")
 	dataDir := t.TempDir()
-	root := NewRootCmd()
-	var out bytes.Buffer
-	root.SetOut(&out)
-	root.SetErr(&out)
-	root.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "group", "allow", "g", "--on", "peer1"})
-	if err := root.ExecuteContext(context.Background()); err != nil {
-		t.Fatalf("allow: err=%v out=%s", err, out.String())
+	dbPath := filepath.Join(dataDir, "state.db")
+
+	// init writes a v2 manager self identity under self/root/.ssh.
+	hostname := "mgr"
+	initCmd := NewRootCmd()
+	var initOut bytes.Buffer
+	initCmd.SetOut(&initOut)
+	initCmd.SetErr(&initOut)
+	initCmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", hostname, "--user", "root", "--listen-ip", "127.0.0.1", "--no-prompt"})
+	if err := initCmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("init: %v\n%s", err, initOut.String())
+	}
+	origHostname := osHostname
+	osHostname = func() (string, error) { return hostname, nil }
+	t.Cleanup(func() { osHostname = origHostname })
+
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	if err := d.InsertPeerWithMode(context.Background(), "peer1", 1, "fp", []byte("k"), db.ModeUser, "alice", 2); err != nil {
+		t.Fatalf("InsertPeerWithMode: %v", err)
+	}
+	key, _, _ := d.GetMeta(context.Background(), db.MetaInstanceKey)
+	d.Close()
+
+	var captured sshpush.Options
+	fp := installFakePusherCapturingOpts(t, &captured)
+	fp.readData = map[string][]byte{"/home/alice/.ssh/authorized_keys": caLineFor(t, dataDir, "manager")}
+
+	if out, err := runGroupCmd(t, dataDir, dbPath, "allow", "g", "--on", "peer1"); err != nil {
+		t.Fatalf("allow: err=%v out=%s", err, out)
 	}
 
-	wantCert := filepath.Join(dataDir, expectedSelfCertRel)
-	wantKey := filepath.Join(dataDir, expectedSelfKeyRel)
-	wantKH := filepath.Join(dataDir, expectedSelfKnownHostsRel)
+	base := filepath.Join(dataDir, "self", "root", ".ssh")
+	wantCert := filepath.Join(base, "id_ed25519_"+key+"-cert.pub")
+	wantKey := filepath.Join(base, "id_ed25519_"+key)
+	wantKH := filepath.Join(base, "known_hosts")
 
 	if captured.CertPath != wantCert {
 		t.Errorf("CertPath = %q, want %q", captured.CertPath, wantCert)
@@ -395,7 +455,7 @@ func setupGroupUserModeDB(t *testing.T, peerName, targetUser string, allowed []s
 		t.Fatalf("db.Open: %v", err)
 	}
 	defer d.Close()
-	if err := d.InsertPeerWithMode(context.Background(), peerName, 1, "fp", []byte("k"), db.ModeUser, targetUser, 1); err != nil {
+	if err := d.InsertPeerWithMode(context.Background(), peerName, 1, "fp", []byte("k"), db.ModeUser, targetUser, 2); err != nil {
 		t.Fatalf("InsertPeerWithMode: %v", err)
 	}
 	for _, g := range allowed {
@@ -424,7 +484,6 @@ func runGroupUserModeCmd(t *testing.T, dataDir, dbPath string, args ...string) (
 func TestGroupAllow_UserMode_RewritesAuthorizedKeys_NoReload(t *testing.T) {
 	dataDir, dbPath := setupGroupUserModeDB(t, "vmU", "alice", []string{"infra"})
 
-	// Build the existing remote authorized_keys against the CA at dataDir/ca.
 	caObj, err := ca.Load(filepath.Join(dataDir, "ca"))
 	if err != nil {
 		t.Fatalf("ca.Load: %v", err)
@@ -494,7 +553,7 @@ func TestGroupAllow_UserMode_EncryptedCA_NoCAPassphrase(t *testing.T) {
 		t.Fatalf("db.Open: %v", err)
 	}
 	ctx := context.Background()
-	if err := d.InsertPeerWithMode(ctx, "vmU", 1, "fp", []byte("k"), db.ModeUser, "alice", 1); err != nil {
+	if err := d.InsertPeerWithMode(ctx, "vmU", 1, "fp", []byte("k"), db.ModeUser, "alice", 2); err != nil {
 		t.Fatalf("InsertPeerWithMode: %v", err)
 	}
 	if err := d.EnsureGroup(ctx, "infra"); err != nil {
@@ -532,10 +591,10 @@ func TestGroupAllow_UserMode_EncryptedCA_NoCAPassphrase(t *testing.T) {
 	}
 }
 
-// TestGroupAllow_V2Root_RewritesAuthorizedKeys_NoReload asserts a v2 root peer
-// takes the user-mode RewritePrincipals branch on /root/.ssh/authorized_keys and
-// does NOT touch auth_principals/root or reload sshd.
-func TestGroupAllow_V2Root_RewritesAuthorizedKeys_NoReload(t *testing.T) {
+// TestGroupAllow_RootUser_RewritesAuthorizedKeys_NoReload asserts a
+// root-targeting (target_user=root) peer takes the RewritePrincipals branch on
+// /root/.ssh/authorized_keys and does NOT touch auth_principals/root or reload.
+func TestGroupAllow_RootUser_RewritesAuthorizedKeys_NoReload(t *testing.T) {
 	dataDir := t.TempDir()
 	caObj, err := ca.Generate(filepath.Join(dataDir, "ca"))
 	if err != nil {
@@ -547,13 +606,13 @@ func TestGroupAllow_V2Root_RewritesAuthorizedKeys_NoReload(t *testing.T) {
 		t.Fatalf("db.Open: %v", err)
 	}
 	ctx := context.Background()
-	if err := d.InsertPeerWithMode(ctx, "vmV2R", 1, "fp", []byte("k"), db.ModeRoot, "", 2); err != nil {
+	if err := d.InsertPeerWithMode(ctx, "vmRoot", 1, "fp", []byte("k"), db.ModeUser, "root", 2); err != nil {
 		t.Fatalf("InsertPeerWithMode: %v", err)
 	}
 	if err := d.EnsureGroup(ctx, "infra"); err != nil {
 		t.Fatalf("EnsureGroup: %v", err)
 	}
-	if err := d.SetPeerAllowedGroups(ctx, "vmV2R", []string{"infra"}); err != nil {
+	if err := d.SetPeerAllowedGroups(ctx, "vmRoot", []string{"infra"}); err != nil {
 		t.Fatalf("SetPeerAllowedGroups: %v", err)
 	}
 	d.Close()
@@ -569,7 +628,7 @@ func TestGroupAllow_V2Root_RewritesAuthorizedKeys_NoReload(t *testing.T) {
 	}
 	t.Cleanup(func() { groupDial = prev })
 
-	out, err := runGroupUserModeCmd(t, dataDir, dbPath, "allow", "db", "--on", "vmV2R")
+	out, err := runGroupUserModeCmd(t, dataDir, dbPath, "allow", "db", "--on", "vmRoot")
 	if err != nil {
 		t.Fatalf("allow: err=%v out=%s", err, out)
 	}
@@ -595,9 +654,9 @@ func TestGroupAllow_V2Root_RewritesAuthorizedKeys_NoReload(t *testing.T) {
 }
 
 func TestGroupAllowRequiresOnFlag(t *testing.T) {
-	dbPath := seedGroupDB(t, nil)
-	installFakePusher(t)
-	if _, err := runGroupCmd(t, dbPath, "allow", "g"); err == nil {
+	dataDir, dbPath := seedGroupDB(t, nil)
+	installFakePusher(t, dataDir, nil)
+	if _, err := runGroupCmd(t, dataDir, dbPath, "allow", "g"); err == nil {
 		t.Fatal("expected error when --on is missing")
 	}
 }

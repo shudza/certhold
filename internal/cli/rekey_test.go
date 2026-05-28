@@ -102,7 +102,7 @@ func setupRekeyEnv(t *testing.T, failOn map[string]error) (dataDir, dbPath, host
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 	cmd.SetErr(&buf)
-	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", hostname, "--mode", "root"})
+	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", hostname, "--user", "root"})
 	if err := cmd.ExecuteContext(context.Background()); err != nil {
 		t.Fatalf("init: %v\n%s", err, buf.String())
 	}
@@ -119,14 +119,17 @@ func setupRekeyEnv(t *testing.T, failOn map[string]error) (dataDir, dbPath, host
 			t.Fatalf("GeneratePeerKey %s: %v", name, err)
 		}
 		fp := ssh.FingerprintSHA256(sshPub)
-		if err := d.InsertPeer(ctx, name, 100, fp, pubAuth); err != nil {
-			t.Fatalf("InsertPeer %s: %v", name, err)
+		if err := d.InsertPeerWithMode(ctx, name, 100, fp, pubAuth, db.ModeUser, "root", 2); err != nil {
+			t.Fatalf("InsertPeerWithMode %s: %v", name, err)
 		}
 		if err := d.EnsureGroup(ctx, "infra"); err != nil {
 			t.Fatalf("EnsureGroup infra: %v", err)
 		}
 		if err := d.SetPeerGroups(ctx, name, []string{"infra"}); err != nil {
 			t.Fatalf("SetPeerGroups %s: %v", name, err)
+		}
+		if err := d.SetPeerAllowedGroups(ctx, name, []string{"infra"}); err != nil {
+			t.Fatalf("SetPeerAllowedGroups %s: %v", name, err)
 		}
 	}
 
@@ -199,6 +202,7 @@ func TestRekeyHappyPath(t *testing.T) {
 		perHost[c.host] = append(perHost[c.host], opEvent{c.host, c.op, c.path})
 	}
 
+	key := instanceKeyFromDBPkg(t, dbPath)
 	for _, h := range []string{"alpha", "beta"} {
 		evs, ok := perHost[h]
 		if !ok {
@@ -206,9 +210,9 @@ func TestRekeyHappyPath(t *testing.T) {
 			continue
 		}
 		want := []opEvent{
-			{h, "write", "/etc/ssh/ca.pub"},
-			{h, "write", "/etc/ssh/peer_ed25519-cert.pub"},
-			{h, "reload", ""},
+			{h, "read", "/root/.ssh/authorized_keys"},
+			{h, "write", "/root/.ssh/authorized_keys"},
+			{h, "write", "/root/.ssh/id_ed25519_" + key + "-cert.pub"},
 			{h, "verify", ""},
 		}
 		if len(evs) != len(want) {
@@ -235,16 +239,15 @@ func TestRekeyHappyPath(t *testing.T) {
 	}
 
 	for _, c := range calls {
-		if c.op == "write" && c.path == "/etc/ssh/ca.pub" {
-			if !bytes.Equal(c.content, newCAPub) {
-				t.Errorf("ca.pub pushed to %s does not match new ca.pub", c.host)
+		if c.op == "write" && c.path == "/root/.ssh/authorized_keys" {
+			if !bytes.Contains(c.content, bytes.TrimRight(newCAPub, "\n")) {
+				t.Errorf("authorized_keys pushed to %s does not carry the new CA pubkey", c.host)
 			}
 		}
 	}
 
 	// v2 manager self files: no ca.pub; the new CA's trust lives in the v2
 	// authorized_keys cert-authority line, and the cert is namespaced.
-	key := instanceKeyFromDBPkg(t, dbPath)
 	selfBase := filepath.Join(dataDir, "self", "root", ".ssh")
 	selfAK, err := os.ReadFile(filepath.Join(selfBase, "authorized_keys"))
 	if err != nil {
@@ -285,7 +288,7 @@ func TestRekeyHappyPath(t *testing.T) {
 	}
 
 	for _, c := range calls {
-		if c.op == "write" && c.path == "/etc/ssh/peer_ed25519-cert.pub" {
+		if c.op == "write" && c.path == "/root/.ssh/id_ed25519_"+key+"-cert.pub" {
 			pk, _, _, _, err := ssh.ParseAuthorizedKey(c.content)
 			if err != nil {
 				t.Errorf("parse cert for %s: %v", c.host, err)
@@ -715,7 +718,7 @@ func TestRekeyUserModePeer_RewritesAuthorizedKeys_NoReload(t *testing.T) {
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 	cmd.SetErr(&buf)
-	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", hostname, "--mode", "root"})
+	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", hostname, "--user", "root"})
 	if err := cmd.ExecuteContext(context.Background()); err != nil {
 		t.Fatalf("init: %v\n%s", err, buf.String())
 	}
@@ -725,8 +728,9 @@ func TestRekeyUserModePeer_RewritesAuthorizedKeys_NoReload(t *testing.T) {
 		t.Fatalf("db.Open: %v", err)
 	}
 	ctx := context.Background()
+	key, _, _ := d.GetMeta(ctx, db.MetaInstanceKey)
 	_, pubAuth, _, _ := ca.GeneratePeerKey()
-	if err := d.InsertPeerWithMode(ctx, "vmU", 100, "fp-u", pubAuth, db.ModeUser, "alice", 1); err != nil {
+	if err := d.InsertPeerWithMode(ctx, "vmU", 100, "fp-u", pubAuth, db.ModeUser, "alice", 2); err != nil {
 		t.Fatalf("InsertPeerWithMode: %v", err)
 	}
 	_ = d.EnsureGroup(ctx, "infra")
@@ -755,7 +759,7 @@ func TestRekeyUserModePeer_RewritesAuthorizedKeys_NoReload(t *testing.T) {
 	gotCert := false
 	gotReload := false
 	wantAKPath := "/home/alice/.ssh/authorized_keys"
-	wantCertPath := "/home/alice/.ssh/id_ed25519-cert.pub"
+	wantCertPath := "/home/alice/.ssh/id_ed25519_" + key + "-cert.pub"
 	for _, c := range calls {
 		if c.host != "vmU" {
 			continue
@@ -846,10 +850,10 @@ func equalStr(a, b []string) bool {
 	return true
 }
 
-// TestRekeyV2RootPeer_RewritesAuthorizedKeys_NoReload exercises CA rekey against
-// a v2 root peer: its namespaced cert and the swapped cert-authority line are
-// pushed to /root/.ssh, with no sshd reload.
-func TestRekeyV2RootPeer_RewritesAuthorizedKeys_NoReload(t *testing.T) {
+// TestRekeyRootUserPeer_RewritesAuthorizedKeys_NoReload exercises CA rekey
+// against a root-targeting (target_user=root) v2 peer: its namespaced cert and
+// the swapped cert-authority line are pushed to /root/.ssh, with no sshd reload.
+func TestRekeyRootUserPeer_RewritesAuthorizedKeys_NoReload(t *testing.T) {
 	t.Setenv("CERTHOLD_CA_PASSPHRASE", "test-ca-pw")
 	t.Setenv("CERTHOLD_PEER_PASSPHRASE", "test-peer-pw")
 	dir := t.TempDir()
@@ -863,7 +867,7 @@ func TestRekeyV2RootPeer_RewritesAuthorizedKeys_NoReload(t *testing.T) {
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 	cmd.SetErr(&buf)
-	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", hostname, "--mode", "root"})
+	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", hostname, "--user", "root"})
 	if err := cmd.ExecuteContext(context.Background()); err != nil {
 		t.Fatalf("init: %v\n%s", err, buf.String())
 	}
@@ -875,7 +879,7 @@ func TestRekeyV2RootPeer_RewritesAuthorizedKeys_NoReload(t *testing.T) {
 	ctx := context.Background()
 	key, _, _ := d.GetMeta(ctx, db.MetaInstanceKey)
 	_, pubAuth, _, _ := ca.GeneratePeerKey()
-	if err := d.InsertPeerWithMode(ctx, "vmV2", 100, "fp-v2", pubAuth, db.ModeRoot, "", 2); err != nil {
+	if err := d.InsertPeerWithMode(ctx, "vmV2", 100, "fp-v2", pubAuth, db.ModeUser, "root", 2); err != nil {
 		t.Fatalf("InsertPeerWithMode: %v", err)
 	}
 	_ = d.EnsureGroup(ctx, "infra")

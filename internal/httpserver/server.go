@@ -60,7 +60,7 @@ func scriptHandler(database *db.DB) func(http.ResponseWriter, *http.Request, str
 			writeErr(w, http.StatusBadRequest, "missing token")
 			return
 		}
-		peerName, _, mode, targetUser, consumed, err := database.LookupToken(r.Context(), token)
+		_, _, _, _, consumed, err := database.LookupToken(r.Context(), token)
 		if err != nil {
 			if errors.Is(err, db.ErrTokenNotFound) {
 				writeErr(w, http.StatusNotFound, "token not found")
@@ -74,12 +74,6 @@ func scriptHandler(database *db.DB) func(http.ResponseWriter, *http.Request, str
 			return
 		}
 
-		// Derive the layout from the peer row (no token-schema change). Newly
-		// enrolled peers are v2; pre-existing rows stay v1.
-		layout := peerfiles.LayoutV1
-		if peer, perr := database.GetPeer(r.Context(), peerName); perr == nil {
-			layout = peer.LayoutVersion
-		}
 		instanceKey, _, _ := database.GetMeta(r.Context(), db.MetaInstanceKey)
 
 		scheme := "http"
@@ -90,40 +84,7 @@ func scriptHandler(database *db.DB) func(http.ResponseWriter, *http.Request, str
 			scheme = p
 		}
 		baseURL := fmt.Sprintf("%s://%s", scheme, r.Host)
-		var body string
-		if layout >= peerfiles.LayoutV2 {
-			body = v2Script(baseURL, token, instanceKey, mode, targetUser)
-		} else if mode == db.ModeUser {
-			body = fmt.Sprintf(`#!/usr/bin/env bash
-set -e
-TARGET_USER="$(id -un)"
-USER_HOME="$HOME"
-[ -n "$USER_HOME" ] || { echo "no \$HOME" >&2; exit 1; }
-mkdir -p "$USER_HOME/.ssh"
-chmod 700 "$USER_HOME/.ssh"
-curl -kfsSL %s/enroll/%s?user=$TARGET_USER | tar -xzC "$USER_HOME/.ssh"
-chmod 600 "$USER_HOME/.ssh/id_ed25519"
-KEY="$USER_HOME/.ssh/id_ed25519"
-%s`, baseURL, token, peerPassphraseBlock)
-		} else {
-			body = fmt.Sprintf(`#!/usr/bin/env bash
-set -e
-
-curl -kfsSL %s/enroll/%s | tar -xzC /
-
-KEY=/etc/ssh/peer_ed25519
-%s
-sed -i -E '/^# BEGIN certhold( v[0-9]+)?$/,/^# END certhold( v[0-9]+)?$/d' /etc/ssh/sshd_config
-cat >> /etc/ssh/sshd_config <<'SSHD_EOF'
-%sSSHD_EOF
-
-sed -i -E '/^# BEGIN certhold( v[0-9]+)?$/,/^# END certhold( v[0-9]+)?$/d' /etc/ssh/ssh_config
-cat >> /etc/ssh/ssh_config <<'SSH_EOF'
-%sSSH_EOF
-
-systemctl reload sshd
-`, baseURL, token, peerPassphraseBlock, peerfiles.SshdBlock(peerfiles.LayoutV1), peerfiles.SshClientBlock(peerfiles.LayoutV1))
-		}
+		body := v2Script(baseURL, token, instanceKey)
 		w.Header().Set("Content-Type", "application/x-shellscript; charset=utf-8")
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
 		w.WriteHeader(http.StatusOK)
@@ -131,35 +92,28 @@ systemctl reload sshd
 	}
 }
 
-// v2Script builds the layout-v2 install script. It targets the user's (or
-// root's) ~/.ssh, untars the namespaced identity files into a staging dir,
-// installs them, appends this instance's cert-authority line idempotently
-// (grep-guarded by the CA pubkey), and splices the keyed client-config block
-// with a per-instance, version-agnostic sed so multiple certhold instances
-// coexist. For root tokens it additionally strips any legacy host-level
-// certhold block from /etc/ssh/{sshd_config,ssh_config} and reloads sshd once;
-// it carries NO TrustedUserCAKeys/AuthorizedPrincipalsFile/RevokedKeys/
+// v2Script builds the install script. It targets the invoking user's ~/.ssh
+// ($HOME + id -un, so running as root targets /root/.ssh), untars the
+// namespaced identity files into a staging dir, installs them, appends this
+// instance's cert-authority line idempotently (grep-guarded by the CA pubkey),
+// and splices the keyed client-config block with a per-instance,
+// version-agnostic sed so multiple certhold instances coexist. It never reloads
+// sshd and carries NO TrustedUserCAKeys/AuthorizedPrincipalsFile/RevokedKeys/
 // HostCertificate directives.
-func v2Script(baseURL, token, instanceKey, mode, targetUser string) string {
+func v2Script(baseURL, token, instanceKey string) string {
 	block := peerfiles.V2SshClientBlock(instanceKey)
 	keyFile := peerfiles.V2KeyFileName(instanceKey)
 
 	var sb strings.Builder
 	sb.WriteString("#!/usr/bin/env bash\nset -e\n")
-	if mode == db.ModeUser {
-		fmt.Fprintf(&sb, "TARGET_USER=\"$(id -un)\"\nUSER_HOME=\"$HOME\"\n")
-		fmt.Fprintf(&sb, "[ -n \"$USER_HOME\" ] || { echo \"no \\$HOME\" >&2; exit 1; }\n")
-		curl := fmt.Sprintf("curl -kfsSL %s/enroll/%s?user=$TARGET_USER", baseURL, token)
-		writeV2Body(&sb, curl, keyFile, block, instanceKey, false)
-	} else {
-		fmt.Fprintf(&sb, "USER_HOME=/root\n")
-		curl := fmt.Sprintf("curl -kfsSL %s/enroll/%s", baseURL, token)
-		writeV2Body(&sb, curl, keyFile, block, instanceKey, true)
-	}
+	fmt.Fprintf(&sb, "TARGET_USER=\"$(id -un)\"\nUSER_HOME=\"$HOME\"\n")
+	fmt.Fprintf(&sb, "[ -n \"$USER_HOME\" ] || { echo \"no \\$HOME\" >&2; exit 1; }\n")
+	curl := fmt.Sprintf("curl -kfsSL %s/enroll/%s?user=$TARGET_USER", baseURL, token)
+	writeV2Body(&sb, curl, keyFile, block, instanceKey)
 	return sb.String()
 }
 
-func writeV2Body(sb *strings.Builder, curl, keyFile, block, instanceKey string, rootMigration bool) {
+func writeV2Body(sb *strings.Builder, curl, keyFile, block, instanceKey string) {
 	fmt.Fprintf(sb, "mkdir -p \"$USER_HOME/.ssh\"\n")
 	fmt.Fprintf(sb, "chmod 700 \"$USER_HOME/.ssh\"\n")
 	fmt.Fprintf(sb, "STAGE=\"$(mktemp -d \"$USER_HOME/.ssh/.certhold.XXXXXX\")\"\n")
@@ -184,15 +138,6 @@ func writeV2Body(sb *strings.Builder, curl, keyFile, block, instanceKey string, 
 	fmt.Fprintf(sb, "cat >> \"$USER_HOME/.ssh/config\" <<'CHCFG_EOF'\n%sCHCFG_EOF\n", block)
 
 	fmt.Fprintf(sb, "rm -rf \"$STAGE\"\n")
-
-	if rootMigration {
-		// Strip any legacy/v1 host-level certhold block (keyless sentinels, so
-		// at most one) from the global sshd/ssh configs, then reload once. v2
-		// trust lives entirely in /root/.ssh, so no host-level directives remain.
-		sb.WriteString("sed -i -E '/^# BEGIN certhold( v[0-9]+)?$/,/^# END certhold( v[0-9]+)?$/d' /etc/ssh/sshd_config\n")
-		sb.WriteString("sed -i -E '/^# BEGIN certhold( v[0-9]+)?$/,/^# END certhold( v[0-9]+)?$/d' /etc/ssh/ssh_config\n")
-		sb.WriteString("systemctl reload sshd\n")
-	}
 }
 
 func enrollHandler(database *db.DB) http.HandlerFunc {
@@ -210,7 +155,9 @@ func enrollHandler(database *db.DB) http.HandlerFunc {
 		// Pre-check the token row to enforce ?user= against any admin-preset
 		// target_user BEFORE ConsumeToken burns it. Small TOCTOU window vs
 		// concurrent consume is acceptable: token is the secret; admin can re-issue.
-		_, _, preMode, preTargetUser, preConsumed, err := database.LookupToken(ctx, token)
+		// queryUser may be "root" (a --user root enrollment), which validUsername
+		// accepts and which targets /root/.ssh.
+		_, _, _, preTargetUser, preConsumed, err := database.LookupToken(ctx, token)
 		if err != nil {
 			if errors.Is(err, db.ErrTokenNotFound) {
 				writeErr(w, http.StatusNotFound, "token not found")
@@ -219,7 +166,7 @@ func enrollHandler(database *db.DB) http.HandlerFunc {
 			writeErr(w, http.StatusInternalServerError, "lookup token failed")
 			return
 		}
-		if !preConsumed && preMode == db.ModeUser {
+		if !preConsumed {
 			if queryUser == "" {
 				writeErr(w, http.StatusBadRequest, "user required")
 				return
@@ -234,7 +181,7 @@ func enrollHandler(database *db.DB) http.HandlerFunc {
 			}
 		}
 
-		peerName, _, mode, _, tarball, err := database.ConsumeToken(ctx, token)
+		peerName, _, _, _, tarball, err := database.ConsumeToken(ctx, token)
 		if err != nil {
 			switch {
 			case errors.Is(err, db.ErrTokenNotFound):
@@ -247,11 +194,9 @@ func enrollHandler(database *db.DB) http.HandlerFunc {
 			return
 		}
 
-		if mode == db.ModeUser {
-			if err := database.SetPeerTargetUser(ctx, peerName, queryUser); err != nil {
-				writeErr(w, http.StatusInternalServerError, "record target user failed")
-				return
-			}
+		if err := database.SetPeerTargetUser(ctx, peerName, queryUser); err != nil {
+			writeErr(w, http.StatusInternalServerError, "record target user failed")
+			return
 		}
 
 		// Backfill the peer's dial address from the install-time source IP, but

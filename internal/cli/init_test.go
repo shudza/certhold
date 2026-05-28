@@ -35,7 +35,7 @@ func setInitPassphrases(t *testing.T) {
 	t.Setenv("CERTHOLD_PEER_PASSPHRASE", "test-peer-pw")
 }
 
-func TestInit_RootMode_HappyPath(t *testing.T) {
+func TestInit_RootUser_HappyPath(t *testing.T) {
 	setInitPassphrases(t)
 	dataDir := t.TempDir()
 	dbPath := filepath.Join(dataDir, "state.db")
@@ -44,7 +44,7 @@ func TestInit_RootMode_HappyPath(t *testing.T) {
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
-	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", "manager-test", "--mode", "root", "--listen-ip", "127.0.0.1", "--no-prompt"})
+	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", "manager-test", "--user", "root", "--listen-ip", "127.0.0.1", "--no-prompt"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute: %v\nout:\n%s", err, out.String())
 	}
@@ -80,8 +80,11 @@ func TestInit_RootMode_HappyPath(t *testing.T) {
 	if peers[0].Name != "manager-test" {
 		t.Errorf("peer name: got %q want %q", peers[0].Name, "manager-test")
 	}
-	if peers[0].Mode != db.ModeRoot {
-		t.Errorf("peer mode: got %q want %q", peers[0].Mode, db.ModeRoot)
+	if peers[0].Mode != db.ModeUser {
+		t.Errorf("peer mode: got %q want %q", peers[0].Mode, db.ModeUser)
+	}
+	if peers[0].TargetUser != "root" {
+		t.Errorf("peer target user: got %q want root", peers[0].TargetUser)
 	}
 	if peers[0].LayoutVersion != 2 {
 		t.Errorf("manager peer layout: got %d want 2", peers[0].LayoutVersion)
@@ -152,7 +155,7 @@ func TestInit_NoPassphrase_WritesPlaintext(t *testing.T) {
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
 	cmd.SetIn(strings.NewReader("yes\n"))
-	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", "m", "--mode", "root", "--listen-ip", "127.0.0.1", "--no-prompt", "--no-passphrase"})
+	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", "m", "--user", "root", "--listen-ip", "127.0.0.1", "--no-prompt", "--no-passphrase"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute: %v\nout:\n%s", err, out.String())
 	}
@@ -179,7 +182,7 @@ func TestInit_NoPassphrase_RequiresYes(t *testing.T) {
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
 	cmd.SetIn(strings.NewReader("no\n"))
-	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", "m", "--mode", "root", "--listen-ip", "127.0.0.1", "--no-prompt", "--no-passphrase"})
+	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", "m", "--user", "root", "--listen-ip", "127.0.0.1", "--no-prompt", "--no-passphrase"})
 	if err := cmd.Execute(); err == nil {
 		t.Fatal("expected error when --no-passphrase not confirmed")
 	}
@@ -296,7 +299,7 @@ func TestInit_PersistsBaseURL(t *testing.T) {
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
-	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--mode", "root", "--listen-ip", "10.0.0.5", "--port", "9000", "--no-prompt"})
+	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--user", "root", "--listen-ip", "10.0.0.5", "--port", "9000", "--no-prompt"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute: %v\nout:\n%s", err, out.String())
 	}
@@ -321,7 +324,7 @@ func TestInit_InvalidListenIP(t *testing.T) {
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
-	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--mode", "root", "--listen-ip", "not-an-ip", "--no-prompt"})
+	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--user", "root", "--listen-ip", "not-an-ip", "--no-prompt"})
 	if err := cmd.Execute(); err == nil {
 		t.Fatal("expected error")
 	}
@@ -340,7 +343,7 @@ func TestInit_Idempotency(t *testing.T) {
 		var out bytes.Buffer
 		cmd.SetOut(&out)
 		cmd.SetErr(&out)
-		cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", "manager-test", "--mode", "root", "--listen-ip", "127.0.0.1", "--no-prompt"})
+		cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", "manager-test", "--user", "root", "--listen-ip", "127.0.0.1", "--no-prompt"})
 		return cmd.Execute()
 	}
 
@@ -372,7 +375,7 @@ func runInitRoot(t *testing.T, dataDir, dbPath, hostname string) {
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
-	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", hostname, "--mode", "root", "--listen-ip", "127.0.0.1", "--no-prompt"})
+	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", hostname, "--user", "root", "--listen-ip", "127.0.0.1", "--no-prompt"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("init: %v\n%s", err, out.String())
 	}

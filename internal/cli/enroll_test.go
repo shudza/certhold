@@ -249,9 +249,11 @@ func TestEnrollExplicitUserAlice(t *testing.T) {
 	}
 }
 
-func TestEnrollModeRoot(t *testing.T) {
+// TestEnrollRootUser verifies a --user root enrollment stores target_user=root
+// (root is reached by targeting the root user, not a removed root mode).
+func TestEnrollRootUser(t *testing.T) {
 	dbPath := setupDB(t)
-	stdout, stderr, err := runEnroll(t, dbPath, "rootvm", "--groups", "infra", "--mode", "root")
+	stdout, stderr, err := runEnroll(t, dbPath, "rootvm", "--groups", "infra", "--user", "root")
 	if err != nil {
 		t.Fatalf("enroll: err=%v stderr=%s", err, stderr)
 	}
@@ -265,17 +267,17 @@ func TestEnrollModeRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ConsumeToken: %v", err)
 	}
-	if mode != db.ModeRoot {
-		t.Errorf("mode = %q, want %q", mode, db.ModeRoot)
+	if mode != db.ModeUser {
+		t.Errorf("mode = %q, want %q", mode, db.ModeUser)
 	}
-	if tu != "" {
-		t.Errorf("target_user = %q, want empty for root mode", tu)
+	if tu != "root" {
+		t.Errorf("target_user = %q, want root", tu)
 	}
 }
 
-func TestEnrollModeUserExplicitUser(t *testing.T) {
+func TestEnrollExplicitUser(t *testing.T) {
 	dbPath := setupDB(t)
-	stdout, stderr, err := runEnroll(t, dbPath, "uvm", "--groups", "infra", "--mode", "user", "--user", "alice")
+	stdout, stderr, err := runEnroll(t, dbPath, "uvm", "--groups", "infra", "--user", "alice")
 	if err != nil {
 		t.Fatalf("enroll: err=%v stderr=%s", err, stderr)
 	}
@@ -294,10 +296,12 @@ func TestEnrollModeUserExplicitUser(t *testing.T) {
 	}
 }
 
-func TestEnrollInvalidMode(t *testing.T) {
+// TestEnrollModeFlagRemoved asserts the removed --mode flag is now rejected as
+// an unknown flag.
+func TestEnrollModeFlagRemoved(t *testing.T) {
 	dbPath := setupDB(t)
-	if _, _, err := runEnroll(t, dbPath, "vmx", "--groups", "a", "--mode", "weird"); err == nil {
-		t.Fatal("expected error for invalid --mode")
+	if _, _, err := runEnroll(t, dbPath, "vmx", "--groups", "a", "--mode", "user"); err == nil {
+		t.Fatal("expected error for removed --mode flag")
 	}
 }
 
@@ -451,12 +455,12 @@ func instanceKeyOf(t *testing.T, dbPath string) string {
 	return k
 }
 
-// TestEnrollBuildsRootTarball: newly enrolled root peers are layout v2 — the
-// tarball is the namespaced user-style set targeting /root (no /etc/ssh files,
-// no auth_principals/root).
+// TestEnrollBuildsRootTarball: a --user root enrollment yields the layout-v2
+// namespaced user-style set targeting /root (no /etc/ssh files, no
+// auth_principals/root).
 func TestEnrollBuildsRootTarball(t *testing.T) {
 	dbPath := setupDB(t)
-	stdout, stderr, err := runEnroll(t, dbPath, "rootvm", "--groups", "infra,databases", "--mode", "root")
+	stdout, stderr, err := runEnroll(t, dbPath, "rootvm", "--groups", "infra,databases", "--user", "root")
 	if err != nil {
 		t.Fatalf("enroll: err=%v stderr=%s", err, stderr)
 	}
@@ -511,7 +515,7 @@ func TestEnrollBuildsRootTarball(t *testing.T) {
 
 func TestEnrollBuildsUserTarball(t *testing.T) {
 	dbPath := setupDB(t)
-	stdout, stderr, err := runEnroll(t, dbPath, "uvm", "--groups", "infra", "--mode", "user", "--user", "alice")
+	stdout, stderr, err := runEnroll(t, dbPath, "uvm", "--groups", "infra", "--user", "alice")
 	if err != nil {
 		t.Fatalf("enroll: err=%v stderr=%s", err, stderr)
 	}
@@ -571,7 +575,7 @@ func TestEnrollEncryptedCAViaEnv(t *testing.T) {
 	var out, errBuf bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&errBuf)
-	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "enroll", "encvm", "--groups", "infra", "--mode", "root"})
+	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "enroll", "encvm", "--groups", "infra"})
 	if err := cmd.ExecuteContext(context.Background()); err != nil {
 		t.Fatalf("enroll with encrypted CA: err=%v stderr=%s", err, errBuf.String())
 	}
@@ -604,7 +608,7 @@ func TestEnrollWrongCAPassphraseFails(t *testing.T) {
 	var out, errBuf bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&errBuf)
-	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "enroll", "badvm", "--groups", "infra", "--mode", "root"})
+	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "enroll", "badvm", "--groups", "infra"})
 	if err := cmd.ExecuteContext(context.Background()); err == nil {
 		t.Fatal("enroll with wrong CA passphrase: want error, got nil")
 	}
