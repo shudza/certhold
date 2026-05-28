@@ -264,8 +264,9 @@ certhold rekey [--hostname <name>] [--rotate-passphrase]
 
 Rotates the CA: generates a new CA, reissues every non-revoked peer's cert,
 pushes the new trust material to each, rotates certhold itself last, then
-archives the old CA. See [rekey](maintenance-and-operations.md#rekey) for the
-algorithm and its fail-fast recovery semantics.
+archives the old CA. Unreachable peers are skipped and reported as stragglers
+rather than aborting the rotation. See [rekey](maintenance-and-operations.md#rekey)
+for the algorithm and straggler recovery.
 
 | Flag | Default | Meaning |
 |---|---|---|
