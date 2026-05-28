@@ -109,6 +109,7 @@ func runRekeyCore(ctx context.Context, deps rekeyDeps, exclude map[string]bool) 
 	pushOpts.User = pushUser(self)
 
 	var updated []string
+	var failed []straggler
 	for _, p := range others {
 		groups, err := deps.DB.GetPeerGroups(ctx, p.Name)
 		if err != nil {
@@ -134,7 +135,8 @@ func runRekeyCore(ctx context.Context, deps rekeyDeps, exclude map[string]bool) 
 			return abortRekey(deps.Err, fmt.Errorf("get allowed groups for %s: %w", p.Name, err), updated)
 		}
 		if err := pushPeerRekey(ctx, deps.Dial, &peerForPush, oldCAPub, newCAPub, instanceKey, certBytes, allowed, pushOpts); err != nil {
-			return abortRekey(deps.Err, fmt.Errorf("push %s: %w", p.Name, err), updated)
+			failed = append(failed, straggler{name: p.Name, err: err})
+			continue
 		}
 		if err := deps.DB.UpdatePeerCertSerial(ctx, p.Name, serial); err != nil {
 			return abortRekey(deps.Err, fmt.Errorf("update cert_serial %s: %w", p.Name, err), updated)
@@ -198,7 +200,31 @@ func runRekeyCore(ctx context.Context, deps rekeyDeps, exclude map[string]bool) 
 	}
 
 	fmt.Fprintf(deps.Out, "Rekey complete: %d peers rotated, CA version %d active, old CA archived at %s\n", len(updated), newVer, oldCADir)
+	reportStragglers(deps.Err, failed, oldCADir)
 	return nil
+}
+
+// straggler is a peer the rekey could not reach: its push/dial failed, so it
+// keeps trusting the previous CA and its DB cert_serial was left untouched.
+type straggler struct {
+	name string
+	err  error
+}
+
+// reportStragglers prints a prominent warning naming each unreached peer and the
+// archived old CA dir to use for recovery. Partial success deliberately returns
+// nil from runRekeyCore (so a single down host does not fail rekey/revoke in
+// automation); this stderr warning plus the summary line are the only signal.
+func reportStragglers(errOut io.Writer, failed []straggler, oldCADir string) {
+	if len(failed) == 0 {
+		return
+	}
+	fmt.Fprintf(errOut, "\nWARNING: rekey could not reach %d peer(s); they STILL TRUST THE PREVIOUS CA and were NOT rotated:\n", len(failed))
+	for _, s := range failed {
+		fmt.Fprintf(errOut, "  - %s: %v\n", s.name, s.err)
+	}
+	fmt.Fprintf(errOut, "These peers will reject this manager's new-CA cert until rotated. Recover with the archived old CA at %s:\n", oldCADir)
+	fmt.Fprintf(errOut, "  mint a manager cert from %s/ca to reach each straggler, push the new CA trust + new cert, then re-run rekey.\n", oldCADir)
 }
 
 // promptNewCAPassphrase obtains a fresh CA passphrase (with confirmation) for

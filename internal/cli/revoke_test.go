@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -459,6 +460,98 @@ func TestRevokeV2Root_TriggersRekey_NoKRL(t *testing.T) {
 	}
 	if sawKRL {
 		t.Errorf("v2-root revoke must NOT push a KRL")
+	}
+}
+
+// TestRevokeV2_StragglerStillCompletes verifies the revoke->runRekeyCore path
+// inherits T04 resilience: revoking a v2 peer while another peer is unreachable
+// still completes the CA rekey for the reachable peers, returns nil, and reports
+// the straggler the same way `rekey` does.
+func TestRevokeV2_StragglerStillCompletes(t *testing.T) {
+	t.Setenv("CERTHOLD_CA_PASSPHRASE", "test-ca-pw")
+	t.Setenv("CERTHOLD_PEER_PASSPHRASE", "test-peer-pw")
+	dir := t.TempDir()
+	dataDir := filepath.Join(dir, "data")
+	dbPath := filepath.Join(dir, "state.db")
+	hostname := "mgr"
+	if err := os.MkdirAll(dataDir, 0700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	cmd := NewRootCmd()
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", hostname, "--mode", "root"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("init: %v\n%s", err, buf.String())
+	}
+
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	ctx := context.Background()
+	// alpha is revoked; beta is the unreachable straggler; gamma is reachable.
+	for _, name := range []string{"alpha", "beta", "gamma"} {
+		_, pubAuth, _, _ := ca.GeneratePeerKey()
+		if err := d.InsertPeerWithMode(ctx, name, 100, "fp-"+name, pubAuth, db.ModeRoot, "", 2); err != nil {
+			t.Fatalf("InsertPeerWithMode %s: %v", name, err)
+		}
+		_ = d.EnsureGroup(ctx, "infra")
+		_ = d.SetPeerGroups(ctx, name, []string{"infra"})
+		_ = d.SetPeerAllowedGroups(ctx, name, []string{"infra"})
+	}
+	prevBeta, _ := d.GetPeer(ctx, "beta")
+	prevGamma, _ := d.GetPeer(ctx, "gamma")
+	d.Close()
+
+	rec := &rekeyRecorder{failOn: map[string]error{"dial:beta": errors.New("connection refused")}}
+	origRekeyDial := rekeyDial
+	rekeyDial = func(ctx context.Context, host string, opts sshpush.Options) (sshpush.Pusher, error) {
+		rec.mu.Lock()
+		e, ok := rec.failOn["dial:"+host]
+		rec.mu.Unlock()
+		if ok {
+			return nil, e
+		}
+		return &rekeyMockPusher{host: host, rec: rec}, nil
+	}
+	defer func() { rekeyDial = origRekeyDial }()
+
+	cmd2 := NewRootCmd()
+	var out, errBuf bytes.Buffer
+	cmd2.SetOut(&out)
+	cmd2.SetErr(&errBuf)
+	cmd2.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "revoke", "alpha", "--hostname", hostname})
+	if err := cmd2.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("revoke must return nil with one straggler; got err=%v stderr=%s stdout=%s", err, errBuf.String(), out.String())
+	}
+
+	stderr := errBuf.String()
+	if !strings.Contains(stderr, "beta") || !strings.Contains(stderr, "STILL TRUST THE PREVIOUS CA") {
+		t.Errorf("expected straggler warning naming beta in revoke stderr, got: %s", stderr)
+	}
+
+	d2, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer d2.Close()
+	if ver, err := d2.ActiveCAVersion(ctx); err != nil || ver != 1 {
+		t.Errorf("active ca version = %d (err=%v), want 1; CA swap must complete on revoke straggler", ver, err)
+	}
+	beta, _ := d2.GetPeer(ctx, "beta")
+	if beta.Serial != prevBeta.Serial {
+		t.Errorf("straggler beta cert_serial bumped (%d -> %d) despite unreachable push", prevBeta.Serial, beta.Serial)
+	}
+	gamma, _ := d2.GetPeer(ctx, "gamma")
+	if gamma.Serial == prevGamma.Serial {
+		t.Error("reachable gamma should have been rotated during revoke")
+	}
+	a, _ := d2.GetPeer(ctx, "alpha")
+	if !a.Revoked {
+		t.Error("alpha not marked revoked")
 	}
 }
 

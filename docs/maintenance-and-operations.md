@@ -56,11 +56,12 @@ plaintext key never prompts. See [security.md](security.md).
 
 Multi-peer operations iterate peers in a plain loop. **There is no automatic
 retry queue and no background reconciler.** A peer that is offline during a push
-is handled per-command (logged and skipped by `revoke`; fatal for `rekey`), and
-the way to catch it up is to **re-run the command manually**. Re-runs are
-idempotent — the database tracks per-peer KRL state — but nothing retries on its
-own. This is an accepted soft-consistency tradeoff: until an offline peer
-receives an update it keeps acting on its old state.
+is skipped and reported as a *straggler* (both `revoke`'s KRL fan-out and `rekey`
+continue past an unreachable peer), and the way to catch it up is to **re-run the
+command manually**. Re-runs are idempotent — the database tracks per-peer KRL
+state and per-peer cert serials — but nothing retries on its own. This is an
+accepted soft-consistency tradeoff: until an offline peer receives an update it
+keeps acting on its old state.
 
 ## Revocation
 
@@ -107,7 +108,8 @@ now-retired CA, so it stops being accepted as the new CA propagates.
 **Because v2 root mode is user-mode trust, revoking a v2 root peer is also a
 partial CA rekey** — there is no KRL for v2 root. This is heavier than a v1 root
 KRL push (it rolls the whole per-instance fleet) and, like all rekeys, is
-**fail-fast** (see below). For a v2 peer the rekey rewrites only *this* instance's
+**resilient to unreachable peers** (see below): an offline peer becomes a
+reported straggler instead of aborting the revoke. For a v2 peer the rekey rewrites only *this* instance's
 `cert-authority` line in each peer's `authorized_keys` (matched by the old CA
 pubkey) and pushes the namespaced cert — other instances' lines are preserved.
 
@@ -148,34 +150,66 @@ reuses this same engine with the revoked peer excluded.)
 3. For each non-revoked peer except certhold: sign a new cert with the new CA and
    push it (root mode: new `ca.pub` + cert + reload; user mode: rewrite the
    `authorized_keys` `cert-authority` line with the new CA + push the new cert, no
-   reload).
+   reload). A peer that cannot be reached is skipped and recorded as a straggler
+   (see below) rather than aborting the rotation.
 4. **Rotate certhold itself last**, writing its own new CA pub + self cert
    locally. Doing self last is what stops certhold from locking itself out
    mid-rotation — every peer still trusts the old-CA manager cert during the loop.
 5. Atomically swap the CA directory (old CA archived to `ca.old.<timestamp>`, the
    new CA moved into place) and record a new active CA version.
 
-The directory swap and version bump happen **after** every peer and self are
-already on the new CA; until then the old CA is authoritative.
+The directory swap and version bump happen **after** every reachable peer and
+self are already on the new CA; until then the old CA is authoritative.
 
-### Failure: fail-fast, not resumable
+### Unreachable peers: resilient, with reported stragglers
 
-Rekey is **fail-fast**. The first peer that fails to push aborts the whole
-operation immediately — there is **no rollback** of peers already rotated and
-**no skip/retry**. It prints the list of peers already moved to the new CA.
+Rekey is **resilient to unreachable peers**. A peer whose push or dial fails
+(host down, write/reload/verify failure) is **skipped and recorded as a
+straggler**; the rotation continues. After the loop, certhold rotates **itself**
+and **completes the CA swap and version bump** even if some peers were skipped, so
+the reachable fleet plus the manager all converge on the new CA. The straggler's
+DB `cert_serial` is **left untouched** (it still reflects the old cert it is
+actually carrying), so a re-run knows it is out of date.
 
-A mid-loop abort leaves a **split fleet**: the already-pushed peers trust the new
-CA, while certhold and the rest still hold the old CA — so those rotated peers
-will reject certhold's (old-CA) manager cert on the next connection. This is a
-genuinely degraded state requiring manual recovery.
+Rekey distinguishes this from a **logic/data error** — a group-lookup failure, an
+unparseable `authorized_key` row, or a `SignCert` failure. Those indicate a real
+bug or corrupt state, not a down host, so they still **abort** the whole rotation
+(CA not swapped, the staged `ca.next` left on disk) and print the list of peers
+already rotated for manual recovery.
 
-It is **not automatically resumable.** The staged new CA (`ca.next`) is left on
-disk on purpose (for forensics / manual recovery) and blocks the next `rekey`
-until removed; removing it and re-running generates a *third* CA rather than
-reusing the staged one. Recovery is manual, using the logged list of
-already-rotated peers — either finish the rotation by hand (push the staged CA +
-matching certs to the remaining peers and self, then swap and bump the version)
-or roll the rotated peers back to the old CA.
+**Exit contract.** A rekey/revoke that finishes for the reachable fleet but
+leaves stragglers **exits 0** (returns success), so a single down host does not
+break automation. Stragglers are surfaced only through a prominent **stderr
+warning** and the summary line — script around stderr or the per-peer DB serials,
+not the exit code. A logic/data-error abort exits non-zero as before.
+
+#### The straggler hazard (read carefully)
+
+A peer that is unreachable *during* a rekey keeps trusting only the **old** CA
+(its `cert-authority` line / `ca.pub` is not updated) and keeps its old cert,
+while the manager's own cert is rotated to the **new** CA and the old CA is
+archived. After the swap, the manager presents a *new*-CA cert that the straggler
+does **not** trust → **the manager can no longer SSH into the straggler with cert
+auth.** The straggler is not silently lost: rekey prints a multi-line warning to
+stderr naming each unreached peer, stating they **still trust the previous CA and
+were NOT rotated**, and naming the archived old CA directory to recover with.
+
+#### Recovery via the archived old CA
+
+The pre-rotation CA is archived to `<data-dir>/ca.old.<timestamp>` (the swap
+renames the live `ca` dir there before moving `ca.next` into place; the name is in
+the warning). To rotate a straggler once it is reachable again:
+
+1. Mint a temporary manager cert from the **archived** CA key
+   (`ca.old.<timestamp>/ca`) — the straggler still trusts that CA, so this cert
+   can reach it.
+2. SSH in with that cert and push the **new** CA trust (rewrite the
+   `cert-authority` line / `ca.pub`) plus the peer's new cert.
+3. Re-run `rekey` (or `update` for that one peer) so the manager re-signs and
+   re-pushes; its DB `cert_serial` then catches up.
+
+Re-running `rekey` from scratch is also valid but rolls a *fresh* CA across the
+whole fleet again; targeted recovery via the archived CA is cheaper.
 
 ### Passphrase across rotation
 

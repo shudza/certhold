@@ -436,11 +436,21 @@ func TestRekeyRotatePassphrase_NewUnlocksOldFails(t *testing.T) {
 	}
 }
 
-func TestRekeyFailureAborts(t *testing.T) {
-	dataDir, dbPath, hostname, rec, cleanup := setupRekeyEnv(t, map[string]error{
-		"write:beta:/etc/ssh/ca.pub": errors.New("boom"),
-	})
+// TestRekeyLogicErrorAborts proves the push-failure-vs-logic-error distinction:
+// a data error (an unparseable authorized_key row) is a corrupt-state bug, not a
+// down host, so it still aborts the whole rotation with the CA left unswapped.
+func TestRekeyLogicErrorAborts(t *testing.T) {
+	dataDir, dbPath, hostname, rec, cleanup := setupRekeyEnv(t, nil)
 	defer cleanup()
+
+	d0, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	if err := d0.InsertPeer(context.Background(), "corrupt", 999, "fp-garbage", []byte("not a valid authorized key")); err != nil {
+		t.Fatalf("InsertPeer corrupt: %v", err)
+	}
+	d0.Close()
 
 	caDir := filepath.Join(dataDir, "ca")
 	oldCAPub, err := os.ReadFile(filepath.Join(caDir, "ca.pub"))
@@ -460,7 +470,7 @@ func TestRekeyFailureAborts(t *testing.T) {
 
 	_, stderr, err := runRekeyCmd(t, dataDir, dbPath, hostname)
 	if err == nil {
-		t.Fatal("expected error from rekey")
+		t.Fatal("expected error from rekey on a logic/data error")
 	}
 	if !strings.Contains(stderr, "aborted") {
 		t.Errorf("expected 'aborted' in stderr, got: %s", stderr)
@@ -471,7 +481,7 @@ func TestRekeyFailureAborts(t *testing.T) {
 		t.Fatalf("read ca.pub after: %v", err)
 	}
 	if !bytes.Equal(caPubAfter, oldCAPub) {
-		t.Error("CA was rotated despite failure; expected old CA to remain in place")
+		t.Error("CA was rotated despite a logic error; expected old CA to remain in place")
 	}
 
 	selfCertAfter, err := os.ReadFile(filepath.Join(selfBase, "id_ed25519_"+key+"-cert.pub"))
@@ -498,12 +508,197 @@ func TestRekeyFailureAborts(t *testing.T) {
 		t.Errorf("expected ErrNoActiveCA after failed rekey, got: %v", err)
 	}
 
+	if dirHasPrefix(t, dataDir, "ca.old.") {
+		t.Error("logic-error abort must not archive the CA (no ca.old.* dir expected)")
+	}
+
 	calls := rec.snapshot()
 	for _, c := range calls {
 		if c.host == hostname {
 			t.Errorf("certhold's own peer should never receive remote pushes: %+v", c)
 		}
 	}
+}
+
+// TestRekeyResilientToUnreachablePeer covers the core T04 contract: a dial
+// failure for ONE peer must not abort the rotation. The reachable peer + self
+// are rotated, the CA swap still happens (ca.old.* exists, active version
+// bumped), the straggler's cert_serial is NOT bumped, a warning names it, and
+// rekey still returns success (nil) so a single down host does not fail in
+// automation.
+func TestRekeyResilientToUnreachablePeer(t *testing.T) {
+	dataDir, dbPath, hostname, rec, cleanup := setupRekeyEnv(t, map[string]error{
+		"dial:beta": errors.New("connection refused"),
+	})
+	defer cleanup()
+
+	caDir := filepath.Join(dataDir, "ca")
+	oldCAPub, err := os.ReadFile(filepath.Join(caDir, "ca.pub"))
+	if err != nil {
+		t.Fatalf("read old ca.pub: %v", err)
+	}
+
+	d0, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	prevSerials := map[string]uint64{}
+	for _, name := range []string{"alpha", "beta", hostname} {
+		p, err := d0.GetPeer(context.Background(), name)
+		if err != nil {
+			t.Fatalf("GetPeer %s: %v", name, err)
+		}
+		prevSerials[name] = p.Serial
+	}
+	d0.Close()
+
+	stdout, stderr, err := runRekeyCmd(t, dataDir, dbPath, hostname)
+	if err != nil {
+		t.Fatalf("rekey must return nil on partial success (one down host); got err=%v\nstderr:%s", err, stderr)
+	}
+
+	calls := rec.snapshot()
+	sawAlphaWrite := false
+	for _, c := range calls {
+		if c.host == "alpha" && c.op == "write" {
+			sawAlphaWrite = true
+		}
+		if c.host == "beta" {
+			t.Errorf("unreachable beta must not receive any pushes: %+v", c)
+		}
+	}
+	if !sawAlphaWrite {
+		t.Error("reachable peer alpha should still be rotated")
+	}
+
+	newCAPub, err := os.ReadFile(filepath.Join(caDir, "ca.pub"))
+	if err != nil {
+		t.Fatalf("read new ca.pub: %v", err)
+	}
+	if bytes.Equal(newCAPub, oldCAPub) {
+		t.Error("CA must still be swapped despite the straggler")
+	}
+	if !dirHasPrefix(t, dataDir, "ca.old.") {
+		t.Error("expected ca.old.<timestamp> directory after resilient rekey")
+	}
+
+	d2, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer d2.Close()
+	ver, err := d2.ActiveCAVersion(context.Background())
+	if err != nil {
+		t.Fatalf("ActiveCAVersion: %v", err)
+	}
+	if ver != 1 {
+		t.Errorf("active ca version = %d, want 1 (swap must complete)", ver)
+	}
+
+	beta, err := d2.GetPeer(context.Background(), "beta")
+	if err != nil {
+		t.Fatalf("GetPeer beta: %v", err)
+	}
+	if beta.Serial != prevSerials["beta"] {
+		t.Errorf("straggler beta cert_serial was bumped (%d -> %d); it never received the new cert", prevSerials["beta"], beta.Serial)
+	}
+	for _, name := range []string{"alpha", hostname} {
+		p, err := d2.GetPeer(context.Background(), name)
+		if err != nil {
+			t.Fatalf("GetPeer %s: %v", name, err)
+		}
+		if p.Serial == prevSerials[name] {
+			t.Errorf("reachable %s serial unchanged: %d", name, p.Serial)
+		}
+	}
+
+	if !strings.Contains(stderr, "beta") || !strings.Contains(stderr, "STILL TRUST THE PREVIOUS CA") {
+		t.Errorf("expected straggler warning naming beta + old-CA hazard in stderr, got: %s", stderr)
+	}
+	entries, _ := os.ReadDir(dataDir)
+	oldDir := ""
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "ca.old.") {
+			oldDir = e.Name()
+		}
+	}
+	if oldDir != "" && !strings.Contains(stderr, oldDir) {
+		t.Errorf("straggler warning should name the archived old CA dir %q for recovery; got: %s", oldDir, stderr)
+	}
+	if stdout == "" {
+		t.Error("expected summary output")
+	}
+}
+
+// TestRekeyTwoUnreachablePeers verifies that when MULTIPLE peers are down both
+// are listed in the warning and neither has its cert_serial bumped, while self
+// still rotates and the CA swap still completes.
+func TestRekeyTwoUnreachablePeers(t *testing.T) {
+	dataDir, dbPath, hostname, _, cleanup := setupRekeyEnv(t, map[string]error{
+		"dial:alpha": errors.New("connection refused"),
+		"dial:beta":  errors.New("no route to host"),
+	})
+	defer cleanup()
+
+	d0, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	prevSerials := map[string]uint64{}
+	for _, name := range []string{"alpha", "beta", hostname} {
+		p, _ := d0.GetPeer(context.Background(), name)
+		prevSerials[name] = p.Serial
+	}
+	d0.Close()
+
+	_, stderr, err := runRekeyCmd(t, dataDir, dbPath, hostname)
+	if err != nil {
+		t.Fatalf("rekey must return nil even with two down hosts; got err=%v\nstderr:%s", err, stderr)
+	}
+
+	if !strings.Contains(stderr, "alpha") || !strings.Contains(stderr, "beta") {
+		t.Errorf("both stragglers (alpha, beta) must be listed in the warning; got: %s", stderr)
+	}
+	if !strings.Contains(stderr, "2 peer(s)") {
+		t.Errorf("warning should report 2 unreached peers; got: %s", stderr)
+	}
+
+	if !dirHasPrefix(t, dataDir, "ca.old.") {
+		t.Error("CA swap must still complete with two stragglers")
+	}
+
+	d2, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer d2.Close()
+	if ver, err := d2.ActiveCAVersion(context.Background()); err != nil || ver != 1 {
+		t.Errorf("active ca version = %d (err=%v), want 1", ver, err)
+	}
+	for _, name := range []string{"alpha", "beta"} {
+		p, _ := d2.GetPeer(context.Background(), name)
+		if p.Serial != prevSerials[name] {
+			t.Errorf("straggler %s cert_serial was bumped; it never received the new cert", name)
+		}
+	}
+	self, _ := d2.GetPeer(context.Background(), hostname)
+	if self.Serial == prevSerials[hostname] {
+		t.Error("self (manager) must still rotate even when all peers are unreachable")
+	}
+}
+
+func dirHasPrefix(t *testing.T, dir, prefix string) bool {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir %s: %v", dir, err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestRekeyUserModePeer_RewritesAuthorizedKeys_NoReload(t *testing.T) {
