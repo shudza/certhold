@@ -14,7 +14,9 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /out/certhold ./cmd/certhold
 
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates openssh-client
+# curl: used by the harness's HTTPS readiness probe (busybox ships only wget).
+# openssh-client (ssh-keyscan): seeds the manager's outbound known_hosts.
+RUN apk add --no-cache ca-certificates openssh-client curl
 COPY --from=builder /out/certhold /usr/local/bin/certhold
 
 # The test harness runs `certhold init` then `certhold serve` via

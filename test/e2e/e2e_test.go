@@ -154,12 +154,14 @@ func waitForManagerHTTPS(ctx context.Context, t *testing.T) {
 	t.Helper()
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
-		// curl -k tolerates the self-signed cert; any HTTP response (even 404)
-		// proves the TLS listener is up. We hit a bogus path and accept any exit
-		// 0 from curl with -f removed so an HTTP error status still counts.
+		// curl -k tolerates the self-signed cert. A zero exit means curl got an
+		// HTTP response (any status, even 404 on this bogus path), proving the
+		// TLS listener is bound. No -f (404 must still count) and no `|| true`
+		// (it would mask the exit code we rely on); stderr is merged into out by
+		// composeExec but ignored here since we gate on the exit code, not output.
 		res := composeExec(ctx, t, "", "manager",
-			"curl -ksS -o /dev/null -w '%{http_code}' https://manager:8443/enroll/__probe__ || true")
-		if strings.TrimSpace(res.out) != "" && strings.TrimSpace(res.out) != "000" {
+			"curl -ks -o /dev/null https://manager:8443/enroll/__probe__")
+		if res.exitCode == 0 {
 			return
 		}
 		time.Sleep(time.Second)
