@@ -1,0 +1,17 @@
+# Keep the e2e manager build context (repo root) lean and deterministic. The
+# manager image only needs the Go sources + go.mod/go.sum to compile
+# ./cmd/certhold; everything below is irrelevant to that build.
+.git
+.github
+.claude
+bin/
+dist/
+*.test
+*.out
+*.db
+*.sqlite
+docs/
+README.md
+LICENSE
+# The e2e harness itself is run from the host, not built into the image.
+test/e2e/
