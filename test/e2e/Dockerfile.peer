@@ -10,12 +10,14 @@ RUN apk add --no-cache bash curl tar openssh openssh-client
 # adduser-created home is 0755 root-owned-parent which is fine; we tighten the
 # home dir itself to 700 to satisfy StrictModes regardless of distro defaults.
 #
-# The account is created with no password. cert-based pubkey auth does not need a
-# password, but a fully locked ("!" / "*") password field can make some sshd
-# builds refuse the account; alpine's adduser -D leaves the field "!" which
-# OpenSSH still permits for pubkey auth. We additionally set UsePAM no (alpine
-# default) and rely on PubkeyAuthentication (default yes).
+# The account is created with no password. OpenSSH WITHOUT PAM (alpine's default,
+# UsePAM no) refuses ALL authentication — including pubkey/cert — for an account
+# whose shadow password field is locked ("!", as left by `adduser -D`), logging
+# "User deploy not allowed because account is locked". `passwd -d` clears the
+# field to empty, which unlocks the account for cert auth while password login
+# stays disabled (PermitEmptyPasswords defaults to no).
 RUN adduser -D -s /bin/bash deploy \
+    && passwd -d deploy \
     && chmod 700 /home/deploy
 
 # Generate host keys for sshd. ssh-keygen -A creates the standard set
