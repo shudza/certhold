@@ -156,6 +156,54 @@ func TestEnrollSuccess(t *testing.T) {
 	}
 }
 
+func TestEnrollAddressStoredOnPeerRow(t *testing.T) {
+	dbPath := setupDB(t)
+	stdout, stderr, err := runEnroll(t, dbPath, "app1", "--groups", "infra", "--address", "10.0.0.5")
+	if err != nil {
+		t.Fatalf("enroll: err=%v stderr=%s", err, stderr)
+	}
+	if tok := extractToken(t, stdout, "https://certhold.home.lan"); tok == "" {
+		t.Fatal("empty token")
+	}
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer d.Close()
+	p, err := d.GetPeer(context.Background(), "app1")
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if p.Address != "10.0.0.5" {
+		t.Errorf("Address = %q, want 10.0.0.5", p.Address)
+	}
+	if got := p.DialHost(); got != "10.0.0.5" {
+		t.Errorf("DialHost = %q, want 10.0.0.5", got)
+	}
+}
+
+func TestEnrollNoAddressLeavesEmpty(t *testing.T) {
+	dbPath := setupDB(t)
+	if _, stderr, err := runEnroll(t, dbPath, "app2", "--groups", "infra"); err != nil {
+		t.Fatalf("enroll: err=%v stderr=%s", err, stderr)
+	}
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer d.Close()
+	p, err := d.GetPeer(context.Background(), "app2")
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if p.Address != "" {
+		t.Errorf("Address = %q, want empty (no --address)", p.Address)
+	}
+	if got := p.DialHost(); got != "app2" {
+		t.Errorf("DialHost = %q, want app2 (the name)", got)
+	}
+}
+
 func TestEnrollDefaultUserEmpty(t *testing.T) {
 	dbPath := setupDB(t)
 	stdout, stderr, err := runEnroll(t, dbPath, "vm1", "--groups", "infra")

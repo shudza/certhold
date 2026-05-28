@@ -28,7 +28,8 @@ CREATE TABLE peers (
   created_at         TIMESTAMP NOT NULL,
   last_krl_version   INTEGER NOT NULL DEFAULT 0,
   mode               TEXT NOT NULL DEFAULT 'root',
-  target_user        TEXT NOT NULL DEFAULT ''
+  target_user        TEXT NOT NULL DEFAULT '',
+  address            TEXT NOT NULL DEFAULT ''
 );
 ```
 
@@ -43,6 +44,7 @@ CREATE TABLE peers (
 | `last_krl_version` | Last KRL version successfully pushed to this (root-mode) peer; a value behind the global max means the peer is stale. |
 | `mode` | `user` or `root` — the peer's on-disk layout and revocation path. See [architecture.md](architecture.md#operating-modes). |
 | `target_user` | For user-mode peers, the OS user the files were installed under (empty in root mode); recorded at redeem time. |
+| `address` | Network address (host or IP) certhold dials to SSH to this peer. Set by `enroll --address`, else backfilled from the install-time source IP; empty means dial by `name`. Decouples a peer's identity (`name`) from how it is reached. |
 
 ### `groups`, `peer_groups`, `peer_allowed_groups`
 

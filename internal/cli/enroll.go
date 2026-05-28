@@ -50,6 +50,10 @@ func newEnrollCmd() *cobra.Command {
 			if mode == db.ModeRoot {
 				targetUser = ""
 			}
+			address, err := cmd.Flags().GetString("address")
+			if err != nil {
+				return err
+			}
 
 			groups, err := parseGroups(groupsCSV)
 			if err != nil {
@@ -145,6 +149,11 @@ func newEnrollCmd() *cobra.Command {
 				if err := tx.InsertPeerWithMode(ctx, name, serial, fingerprint, pubAuth, mode, targetUser, peerfiles.CurrentLayout); err != nil {
 					return fmt.Errorf("insert peer: %w", err)
 				}
+				if address != "" {
+					if err := tx.SetPeerAddress(ctx, name, address); err != nil {
+						return fmt.Errorf("set peer address: %w", err)
+					}
+				}
 				for _, g := range groups {
 					if err := tx.EnsureGroup(ctx, g); err != nil {
 						return err
@@ -171,6 +180,7 @@ func newEnrollCmd() *cobra.Command {
 	cmd.Flags().String("mode", db.ModeUser, "install mode: 'user' (default, files under ~user/.ssh) or 'root' (files under /etc/ssh)")
 	cmd.Flags().String("user", "", "Unix user owning the ~/.ssh files; when set, acts as a hard constraint at install time (only meaningful with --mode=user)")
 	cmd.Flags().String("hostname", "", "deprecated/unused under layout v2 (host trust is TOFU known_hosts)")
+	cmd.Flags().String("address", "", "network address (host or IP) certhold uses to SSH to this peer; defaults to the source IP seen at install, then the peer name")
 	_ = cmd.MarkFlagRequired("groups")
 
 	return cmd

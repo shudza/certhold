@@ -110,6 +110,72 @@ func installFakePusherCapturingOpts(t *testing.T, capturedOpts *sshpush.Options)
 	return fp
 }
 
+func installFakePusherCapturingHost(t *testing.T, gotHost *string) *fakePusher {
+	t.Helper()
+	fp := &fakePusher{}
+	prev := groupDial
+	groupDial = func(ctx context.Context, host string, opts sshpush.Options) (sshpush.Pusher, error) {
+		*gotHost = host
+		return fp, nil
+	}
+	t.Cleanup(func() { groupDial = prev })
+	return fp
+}
+
+func TestGroupDialsAddressWhenNoHostFlag(t *testing.T) {
+	dbPath := seedGroupDB(t, []string{"a"})
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	if err := d.SetPeerAddress(context.Background(), "peer1", "10.0.0.9"); err != nil {
+		t.Fatalf("SetPeerAddress: %v", err)
+	}
+	d.Close()
+
+	var gotHost string
+	installFakePusherCapturingHost(t, &gotHost)
+	if out, err := runGroupCmd(t, dbPath, "allow", "c", "--on", "peer1"); err != nil {
+		t.Fatalf("allow: err=%v out=%s", err, out)
+	}
+	if gotHost != "10.0.0.9" {
+		t.Errorf("dialed host = %q, want 10.0.0.9 (the peer address)", gotHost)
+	}
+}
+
+func TestGroupHostFlagBeatsAddress(t *testing.T) {
+	dbPath := seedGroupDB(t, []string{"a"})
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	if err := d.SetPeerAddress(context.Background(), "peer1", "10.0.0.9"); err != nil {
+		t.Fatalf("SetPeerAddress: %v", err)
+	}
+	d.Close()
+
+	var gotHost string
+	installFakePusherCapturingHost(t, &gotHost)
+	if out, err := runGroupCmd(t, dbPath, "allow", "c", "--on", "peer1", "--host", "explicit.host"); err != nil {
+		t.Fatalf("allow: err=%v out=%s", err, out)
+	}
+	if gotHost != "explicit.host" {
+		t.Errorf("dialed host = %q, want explicit.host (--host overrides address)", gotHost)
+	}
+}
+
+func TestGroupDialsNameWhenNoAddress(t *testing.T) {
+	dbPath := seedGroupDB(t, []string{"a"})
+	var gotHost string
+	installFakePusherCapturingHost(t, &gotHost)
+	if out, err := runGroupCmd(t, dbPath, "allow", "c", "--on", "peer1"); err != nil {
+		t.Fatalf("allow: err=%v out=%s", err, out)
+	}
+	if gotHost != "peer1" {
+		t.Errorf("dialed host = %q, want peer1 (the name, no address set)", gotHost)
+	}
+}
+
 func seedGroupDB(t *testing.T, allowed []string) string {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "state.db")

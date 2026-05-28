@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"regexp"
 	"strings"
@@ -251,6 +252,18 @@ func enrollHandler(database *db.DB) http.HandlerFunc {
 				writeErr(w, http.StatusInternalServerError, "record target user failed")
 				return
 			}
+		}
+
+		// Backfill the peer's dial address from the install-time source IP, but
+		// only if enroll --address didn't already set one (SetPeerAddressIfEmpty).
+		// X-Forwarded-For is deliberately NOT trusted (spoofable, and would record
+		// the proxy/NAT gateway): proxied deployments should pass enroll --address.
+		// A failure here is non-fatal — the address is a convenience and dialing
+		// falls back to the peer name.
+		if host, _, splitErr := net.SplitHostPort(r.RemoteAddr); splitErr == nil {
+			_ = database.SetPeerAddressIfEmpty(ctx, peerName, host)
+		} else if r.RemoteAddr != "" {
+			_ = database.SetPeerAddressIfEmpty(ctx, peerName, r.RemoteAddr)
 		}
 
 		if tarball == nil {

@@ -268,7 +268,7 @@ func pushPeerRekey(ctx context.Context, dial func(context.Context, string, sshpu
 	if p.Name == "" {
 		return errors.New("empty host")
 	}
-	cl, err := dial(ctx, p.Name, opts)
+	cl, err := dial(ctx, p.DialHost(), opts)
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}

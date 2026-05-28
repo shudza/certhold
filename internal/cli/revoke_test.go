@@ -196,6 +196,57 @@ func TestRevokeFlipsAndPushes(t *testing.T) {
 	}
 }
 
+// TestRevokeFanOutDialsDialHost verifies the v1-root KRL fan-out dials each
+// other peer's DialHost() (address when set, name otherwise) while still logging
+// and recording KRL state by name.
+func TestRevokeFanOutDialsDialHost(t *testing.T) {
+	dataDir, dbPath, rec, cleanup := setupRevokeEnv(t, nil)
+	defer cleanup()
+
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	// alpha gets an address; beta stays name-only. gamma is the revoked peer.
+	if err := d.SetPeerAddress(context.Background(), "alpha", "10.0.0.1"); err != nil {
+		t.Fatalf("SetPeerAddress alpha: %v", err)
+	}
+	d.Close()
+
+	stdout, stderr, err := runRevokeCmd(t, dataDir, dbPath, "gamma")
+	if err != nil {
+		t.Fatalf("revoke: err=%v stderr=%s stdout=%s", err, stderr, stdout)
+	}
+
+	dialed := map[string]bool{}
+	for _, c := range rec.calls_() {
+		dialed[c.host] = true
+	}
+	if !dialed["10.0.0.1"] {
+		t.Errorf("expected fan-out to dial alpha's address 10.0.0.1; dialed=%v", dialed)
+	}
+	if !dialed["beta"] {
+		t.Errorf("expected fan-out to dial beta by name (no address); dialed=%v", dialed)
+	}
+	if dialed["alpha"] {
+		t.Errorf("alpha should be dialed by address, not name; dialed=%v", dialed)
+	}
+
+	// last_krl_version is still keyed by name, not address.
+	d2, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer d2.Close()
+	a, err := d2.GetPeer(context.Background(), "alpha")
+	if err != nil {
+		t.Fatalf("GetPeer alpha: %v", err)
+	}
+	if a.LastKRLVersion != 1 {
+		t.Errorf("alpha LastKRLVersion = %d, want 1", a.LastKRLVersion)
+	}
+}
+
 func TestRevokeUnknownPeer(t *testing.T) {
 	dataDir, dbPath, rec, cleanup := setupRevokeEnv(t, nil)
 	defer cleanup()

@@ -141,6 +141,74 @@ func withMockPusher(t *testing.T) *mockPusher {
 	return mp
 }
 
+// withMockPusherCapturingHost installs a dial stub that records the host argument
+// so tests can assert the dial target (address vs name vs --host).
+func withMockPusherCapturingHost(t *testing.T, gotHost *string) *mockPusher {
+	t.Helper()
+	mp := &mockPusher{}
+	prev := dialFn
+	dialFn = func(ctx context.Context, host string, opts sshpush.Options) (sshpush.Pusher, error) {
+		*gotHost = host
+		return mp, nil
+	}
+	t.Cleanup(func() { dialFn = prev })
+	return mp
+}
+
+func TestUpdateDialsAddressWhenNoHostFlag(t *testing.T) {
+	dataDir, dbPath, _ := setupUpdateEnv(t, "peer1", []string{"oldA"}, false)
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	if err := d.SetPeerAddress(context.Background(), "peer1", "10.0.0.5"); err != nil {
+		t.Fatalf("SetPeerAddress: %v", err)
+	}
+	d.Close()
+
+	var gotHost string
+	withMockPusherCapturingHost(t, &gotHost)
+	if _, stderr, err := runUpdate(t, dataDir, dbPath, "peer1", "--groups", "newA"); err != nil {
+		t.Fatalf("update: err=%v stderr=%s", err, stderr)
+	}
+	if gotHost != "10.0.0.5" {
+		t.Errorf("dialed host = %q, want 10.0.0.5 (the peer address)", gotHost)
+	}
+}
+
+func TestUpdateHostFlagBeatsAddress(t *testing.T) {
+	dataDir, dbPath, _ := setupUpdateEnv(t, "peer1", []string{"oldA"}, false)
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	if err := d.SetPeerAddress(context.Background(), "peer1", "10.0.0.5"); err != nil {
+		t.Fatalf("SetPeerAddress: %v", err)
+	}
+	d.Close()
+
+	var gotHost string
+	withMockPusherCapturingHost(t, &gotHost)
+	if _, stderr, err := runUpdate(t, dataDir, dbPath, "peer1", "--groups", "newA", "--host", "explicit.host"); err != nil {
+		t.Fatalf("update: err=%v stderr=%s", err, stderr)
+	}
+	if gotHost != "explicit.host" {
+		t.Errorf("dialed host = %q, want explicit.host (--host overrides address)", gotHost)
+	}
+}
+
+func TestUpdateDialsNameWhenNoAddress(t *testing.T) {
+	dataDir, dbPath, _ := setupUpdateEnv(t, "peer1", []string{"oldA"}, false)
+	var gotHost string
+	withMockPusherCapturingHost(t, &gotHost)
+	if _, stderr, err := runUpdate(t, dataDir, dbPath, "peer1", "--groups", "newA"); err != nil {
+		t.Fatalf("update: err=%v stderr=%s", err, stderr)
+	}
+	if gotHost != "peer1" {
+		t.Errorf("dialed host = %q, want peer1 (the name, no address set)", gotHost)
+	}
+}
+
 func TestUpdateSuccess(t *testing.T) {
 	dataDir, dbPath, oldSerial := setupUpdateEnv(t, "peer1", []string{"oldA"}, false)
 	mp := withMockPusher(t)

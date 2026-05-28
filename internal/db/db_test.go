@@ -435,6 +435,94 @@ func TestSetPeerTargetUser(t *testing.T) {
 	}
 }
 
+func TestDialHost(t *testing.T) {
+	p := &Peer{Name: "app1"}
+	if got := p.DialHost(); got != "app1" {
+		t.Errorf("DialHost with empty address = %q, want app1 (the name)", got)
+	}
+	p.Address = "10.0.0.5"
+	if got := p.DialHost(); got != "10.0.0.5" {
+		t.Errorf("DialHost with address set = %q, want 10.0.0.5", got)
+	}
+}
+
+func TestSetPeerAddress(t *testing.T) {
+	ctx := t.Context()
+	d := newTestDB(t)
+	if err := d.InsertPeer(ctx, "app1", 1, "fp", []byte("k")); err != nil {
+		t.Fatalf("InsertPeer: %v", err)
+	}
+	if p, _ := d.GetPeer(ctx, "app1"); p.Address != "" {
+		t.Errorf("fresh peer Address = %q, want empty", p.Address)
+	}
+	if err := d.SetPeerAddress(ctx, "app1", "10.0.0.5"); err != nil {
+		t.Fatalf("SetPeerAddress: %v", err)
+	}
+	p, err := d.GetPeer(ctx, "app1")
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if p.Address != "10.0.0.5" {
+		t.Errorf("Address = %q, want 10.0.0.5", p.Address)
+	}
+	if got := p.DialHost(); got != "10.0.0.5" {
+		t.Errorf("DialHost = %q, want 10.0.0.5", got)
+	}
+	if err := d.SetPeerAddress(ctx, "missing", "x"); !errors.Is(err, ErrPeerNotFound) {
+		t.Errorf("SetPeerAddress missing: %v, want ErrPeerNotFound", err)
+	}
+}
+
+func TestSetPeerAddressIfEmpty(t *testing.T) {
+	ctx := t.Context()
+	d := newTestDB(t)
+	if err := d.InsertPeer(ctx, "app1", 1, "fp", []byte("k")); err != nil {
+		t.Fatalf("InsertPeer: %v", err)
+	}
+
+	// Sets the address when the peer currently has none.
+	if err := d.SetPeerAddressIfEmpty(ctx, "app1", "10.0.0.5"); err != nil {
+		t.Fatalf("SetPeerAddressIfEmpty (empty): %v", err)
+	}
+	if p, _ := d.GetPeer(ctx, "app1"); p.Address != "10.0.0.5" {
+		t.Errorf("Address = %q, want 10.0.0.5", p.Address)
+	}
+
+	// No-op when an address is already set (explicit enroll --address wins).
+	if err := d.SetPeerAddressIfEmpty(ctx, "app1", "192.168.1.9"); err != nil {
+		t.Fatalf("SetPeerAddressIfEmpty (already set): %v", err)
+	}
+	if p, _ := d.GetPeer(ctx, "app1"); p.Address != "10.0.0.5" {
+		t.Errorf("Address = %q, want 10.0.0.5 (must not overwrite an existing address)", p.Address)
+	}
+
+	// Matching 0 rows (no such peer) is not an error.
+	if err := d.SetPeerAddressIfEmpty(ctx, "missing", "1.2.3.4"); err != nil {
+		t.Errorf("SetPeerAddressIfEmpty on missing peer should be a no-op, got %v", err)
+	}
+}
+
+func TestTxSetPeerAddress(t *testing.T) {
+	ctx := t.Context()
+	d := newTestDB(t)
+	err := d.WithTx(ctx, func(tx *Tx) error {
+		if err := tx.InsertPeerWithMode(ctx, "app1", 1, "fp", []byte("k"), ModeRoot, "", 1); err != nil {
+			return err
+		}
+		return tx.SetPeerAddress(ctx, "app1", "10.0.0.5")
+	})
+	if err != nil {
+		t.Fatalf("WithTx: %v", err)
+	}
+	p, err := d.GetPeer(ctx, "app1")
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if p.Address != "10.0.0.5" {
+		t.Errorf("Address = %q, want 10.0.0.5", p.Address)
+	}
+}
+
 func TestInsertPeerWithMode(t *testing.T) {
 	ctx := t.Context()
 	d := newTestDB(t)

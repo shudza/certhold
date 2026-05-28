@@ -87,6 +87,18 @@ cert; the enrollment token is the real authentication.
   `enroll --user <name>` to **pin** it: the install request must then match, or
   the server rejects it (the token is preserved, so it can be retried).
 
+### Name vs. address
+
+A peer's `name` is its **identity** (the cert key-id, a principal, the database
+primary key); its `address` is **how certhold reaches it over SSH**. They are
+decoupled: every push path (`update`, `group`, `rekey`, `revoke`'s fan-out) dials
+the recorded address, falling back to the name when none is set. If a peer's name
+isn't a resolvable/reachable hostname, pass `enroll --address <host-or-ip>` to
+record the dial target up front. Otherwise the address is backfilled from the
+source IP seen when the peer fetches its tarball at install (`X-Forwarded-For` is
+not trusted, so behind a proxy or NAT use `enroll --address` explicitly).
+`update`/`group --host` still override the address for a single invocation.
+
 ### Enroll endpoints
 
 `certhold serve` exposes one route with two behaviors, keyed on a `.sh` suffix:
@@ -160,7 +172,7 @@ is given.
 
 ```
 certhold enroll <name> --groups <a,b,c> [--base-url URL] [--mode user|root]
-                [--user <name>] [--hostname <name>]
+                [--user <name>] [--address <host>] [--hostname <name>]
 ```
 
 Mints a one-time token, signs the peer cert (sign-at-mint), builds and stores the
@@ -174,6 +186,7 @@ a peer of that name already exists. No SSH push — the peer pulls its tarball f
 | `--base-url` | persisted / fallback | Enroll base URL for the one-liner. Precedence: flag > `$CERTHOLD_BASE_URL` > the `base_url` persisted by `init` > `https://certhold.home.lan`. |
 | `--mode` | `user` | Install mode for the peer's tarball. |
 | `--user` | — | Pin the install user (user mode only); a hard constraint at install time. |
+| `--address` | — | Network address (host or IP) certhold dials to reach this peer. Defaults to the source IP seen at install, then the peer name. See [Name vs. address](#name-vs-address). |
 | `--hostname` | OS hostname | Host label for the root-mode `@cert-authority` entry. |
 
 Unlocks the CA key (to sign); no manager-key prompt, since `enroll` does not push.
