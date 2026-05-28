@@ -35,11 +35,11 @@ with a matching principal.
 
 `manager` is exclusive to certhold's own self-cert — peer certs carry only the
 peer's name plus its groups, never `manager`. On the peer side, `manager` is
-always listed first in the inbound trust list (the `authorized_keys`
-`cert-authority` line in user mode, or `auth_principals/root` in root mode) and
-cannot be edited away by a group change. That standing access is what lets
-certhold SSH into any enrolled peer to push updates. The blast radius of this
-arrangement is discussed in [security.md](security.md).
+always listed first in the inbound trust list (the `principals="…"` value on the
+`authorized_keys` `cert-authority` line) and cannot be edited away by a group
+change. That standing access is what lets certhold SSH into any enrolled peer to
+push updates. The blast radius of this arrangement is discussed in
+[security.md](security.md).
 
 Every certhold-issued certificate also carries the five standard OpenSSH
 permission extensions (`permit-X11-forwarding`, `permit-agent-forwarding`,
@@ -90,11 +90,11 @@ The system is two parts: the **certhold** binary on one machine, and the
   at mint time, so the long-running `serve` process never holds the CA key.
 
 **Peers** are any Linux host running OpenSSH. A peer runs no certhold software;
-after onboarding it has a fixed set of files (under `~/.ssh/` in the default
-user mode, or `/etc/ssh/` in root mode — see
-[peer-file-layout.md](peer-file-layout.md)) and needs no further configuration.
-Its only ongoing relationship with certhold is inbound: certhold SSHes in as
-`manager` to push updates when group membership or trust state changes.
+after onboarding it has a fixed set of files under the target user's `~/.ssh/`
+(see [peer-file-layout.md](peer-file-layout.md)) and needs no further
+configuration. Its only ongoing relationship with certhold is inbound: certhold
+SSHes in as `manager` to push updates when group membership or trust state
+changes.
 
 ### Data directory
 
@@ -104,7 +104,7 @@ All manager state lives under one directory (`--data-dir`, default `~/.certhold`
 | --- | --- |
 | `ca/ca` | CA ed25519 private key, mode `0600` (passphrase-encrypted at rest by default) |
 | `ca/ca.pub` | CA public key — the trusted root distributed to peers |
-| `self/` | Certhold's own peer files, mirroring the peer layout for the chosen mode |
+| `self/` | Certhold's own peer files, mirroring the user-mode peer layout (`self/<home>/.ssh/`) |
 | `state.db` | SQLite database of peers, groups, and tokens (`--db`; defaults inside the data dir) |
 | `base_url` | Enroll base URL chosen at `init`, reused by `enroll` |
 
@@ -113,62 +113,63 @@ The CA key and the manager's own peer key are encrypted at rest by default; see
 [security.md](security.md). The SQLite schema is in
 [data-model.md](data-model.md).
 
-## Operating modes
+## The trust model (single, user-level)
 
-Each peer is installed in one of two **modes**, chosen at `enroll` (and at `init`
-for certhold's own files) with `--mode` and recorded on the peer's database row.
-The mode decides where files live, how inbound access is granted, and how
-revocation works. **User mode is the default;** opt into root mode with
-`--mode root`.
-
-| | User mode (default) | Root mode (`--mode root`) |
-|---|---|---|
-| File location | `~<user>/.ssh/` | `/etc/ssh/` |
-| Inbound access | one `cert-authority,principals="…"` line in `authorized_keys` | `TrustedUserCAKeys` + `AuthorizedPrincipalsFile` + `auth_principals/<user>` |
-| `sshd_config` | untouched | sentinel block spliced in |
-| `sshd` reload | never (read per-connection) | on every change |
-| Privilege to install | unprivileged user's own home | root |
-| Outbound host trust | TOFU via per-peer `known_hosts` | `@cert-authority` entry in `ca_known_hosts` |
-| Revocation | partial CA rekey (no native KRL) | native KRL push |
-
-Both modes are fully supported across every operation. The concrete file sets
-are in [peer-file-layout.md](peer-file-layout.md).
-
-### How user mode replaces root directives
-
-User mode does the same job as root mode — "trust this CA, but only honour a
-fixed set of principals" — without touching `sshd_config` or holding root. A
-single line in the target user's `~/.ssh/authorized_keys` carries what root mode
-splits across three `sshd_config` mechanisms:
+Certhold has **one** trust model. Every peer's inbound trust lives in a single
+`cert-authority` line in the target user's `~/.ssh/authorized_keys`:
 
 ```
 cert-authority,principals="manager,<groups…>" ssh-ed25519 AAAA…CA_PUBKEY…
 ```
 
-| Root-mode mechanism | What it does | User-mode equivalent |
-|---|---|---|
-| `TrustedUserCAKeys` | designates the trusted CA | the `cert-authority` option + the CA key on the line |
-| `AuthorizedPrincipalsFile` | points at a per-user principals list | the inline `principals="…"` option |
-| `auth_principals/<user>` | the actual allowed-principal list | the comma-separated value inside `principals="…"` |
+certhold never touches `sshd_config`, never signs host keys, and never reloads
+`sshd`. The target user is chosen at `enroll`/`init` with `--user` and recorded
+on the peer's row (the `target_user` column). The concrete file set is in
+[peer-file-layout.md](peer-file-layout.md).
 
-Because `sshd` reads `authorized_keys` per connection, a user-mode principal
-change takes effect immediately with no reload. Granting or revoking a group
-just rewrites the `principals="…"` value in place; `manager` is always kept
-first.
+A single line carries everything a trust decision needs:
 
-### What user mode gives up
+| Concern | How the line covers it |
+|---|---|
+| Which CA is trusted | the `cert-authority` option + the CA key on the line |
+| Which principals are allowed | the inline `principals="manager,<groups…>"` option |
+| Immediate effect, no reload | `sshd` reads `authorized_keys` per connection |
 
-Operating without root removes two `sshd_config`-only capabilities. Both gaps
-are by design:
+Granting or revoking a group just rewrites the `principals="…"` value in place;
+`manager` is always kept first.
 
-- **No host certificates.** Root mode signs the peer's host key and ships an
-  `@cert-authority` line so peers verify each other's *server* identity through
-  the CA. User mode cannot sign host keys, so its `known_hosts` starts empty and
-  outbound connections fall back to **trust-on-first-use**.
+### Managing root is `--user root`
+
+There is **no separate root mode**. To manage `root`, enroll with `--user root`
+and run the install one-liner **as root**: the files land in `/root/.ssh/` and
+the `cert-authority` line in `/root/.ssh/authorized_keys` grants root logins,
+which stock `sshd` honors (`PermitRootLogin prohibit-password` or stricter still
+allows pubkey/cert). Managing root is therefore the same flow as any user, run as
+root — no `sshd_config` splice, no host certificate, no reload.
+
+### Consequences of the user-level model
+
+Two capabilities that would require editing `sshd_config` are intentionally out
+of scope:
+
+- **No host certificates.** certhold does not sign peers' *host* keys, so each
+  peer's `known_hosts` starts empty and outbound connections bootstrap host trust
+  via **trust-on-first-use** (TOFU). The manager seeds its own outbound
+  `known_hosts` for pushes — see
+  [maintenance-and-operations.md](maintenance-and-operations.md#host-key-trust-on-the-push).
 - **No native KRL revocation.** `RevokedKeys` is a `sshd_config` directive, so it
-  is unavailable in user mode. Revocation is instead a CA rotation that reissues
-  to everyone except the revoked peer — see
+  is not used. Revocation is always a **partial CA rotation** that reissues to
+  everyone except the revoked peer — see
   [revocation](maintenance-and-operations.md#revocation).
+
+### Multiple instances on one peer
+
+Identity files and the inbound/outbound blocks are **namespaced by a per-instance
+key** (16 lowercase hex chars in `meta.instance_key`), so several certhold
+instances can manage the same peer without colliding. Each owns its own
+key-namespaced `cert-authority` line and `config` block; the install appends/
+rewrites only its own. See
+[peer-file-layout.md](peer-file-layout.md#config--the-keyed-client-block).
 
 ## Requirements & compatibility
 
@@ -178,42 +179,36 @@ Everything else it relies on landed earlier:
 
 | Feature | Since | Used by |
 |---|---|---|
-| Certificate authorities, `TrustedUserCAKeys`, `HostCertificate`, `AuthorizedPrincipalsFile` (incl. `%u`), `@cert-authority` | 5.4 (2010) | root mode |
-| `cert-authority` + `principals="…"` options in `authorized_keys` | 5.6 (2010) | user mode (its inbound trust line) |
-| Binary KRLs, `RevokedKeys`, `ssh-keygen -k` | 6.0 (2012) | root-mode revocation |
-| ed25519 keys and certificates | 6.5 (2014) | all modes — the binding constraint |
+| `cert-authority` + `principals="…"` options in `authorized_keys` | 5.6 (2010) | the inbound trust line (all peers, including root) |
+| ed25519 keys and certificates | 6.5 (2014) | all keys/certs — the binding constraint |
 
-Crucially, certhold does **not** need the newer `Include` directive or a
-`sshd_config.d/` drop-in directory (OpenSSH 8.2 / 2020). In root mode the install
-script appends certhold's directives directly into `/etc/ssh/sshd_config` and
-`/etc/ssh/ssh_config`, bracketed by `# BEGIN certhold` / `# END certhold`
-sentinel markers — that is what keeps the floor at 6.5 instead of 8.2. User mode
-edits no system config at all.
+certhold does **not** edit `sshd_config` at all, so it needs neither the
+`Include` directive nor a `sshd_config.d/` drop-in (OpenSSH 8.2 / 2020): trust is
+expressed entirely in the target user's `~/.ssh/authorized_keys`, which stock
+OpenSSH honors per connection with no reload.
 
 ### Host tools
 
 A peer needs an OpenSSH server and client plus the utilities the install script
 calls:
 
-| Tool | Used for | Mode |
-|---|---|---|
-| `bash`, `curl`, `tar` (+gzip) | run the install script, fetch and unpack the tarball | both |
-| `ssh-keygen` | optional peer-key passphrase encryption at install | both |
-| `id`, `mkdir`, `chmod` | resolve and lock down `~/.ssh` | user only |
-| `sed`, `cat`, `systemctl` | splice the sentinel blocks and reload `sshd` | root only |
+| Tool | Used for |
+|---|---|
+| `bash`, `curl`, `tar` (+gzip) | run the install script, fetch and unpack the tarball |
+| `id`, `mkdir`, `chmod`, `install` | resolve and lock down `~/.ssh`, place the files |
+| `sed`, `cat`, `grep`, `awk` | append the `cert-authority` line and splice the keyed `config` block idempotently |
+| `ssh-keygen` | optional peer-key passphrase encryption at install |
 
-Root mode assumes a **systemd** host — the reload is `systemctl reload sshd`,
-with no fallback. The manager itself additionally needs `ssh-keygen` on `PATH`
-(used to build KRLs when revoking a root-mode peer).
-
-The `serve` endpoint defaults to HTTPS with an auto-generated self-signed cert,
-so the install one-liner uses `curl -k`; the certificate's SHA-256 fingerprint
-is printed at startup for out-of-band pinning. The enrollment token is the real
-authentication.
+No `systemd` and no `sshd` reload are involved on a peer. The `serve` endpoint
+defaults to HTTPS with an auto-generated self-signed cert, so the install
+one-liner uses `curl -k`; the certificate's SHA-256 fingerprint is printed at
+startup for out-of-band pinning. The enrollment token is the real authentication.
 
 ### Distro coverage
 
 Any host shipping OpenSSH 6.5+ is covered — essentially every Linux distribution
 still receiving updates: RHEL/CentOS/Rocky/Alma 7+ (6.6.1), Debian 8+ (6.7),
-Ubuntu 14.04+ (6.6), Fedora 21+, and current Arch/openSUSE. The remaining
-practical constraint for root-mode peers is the systemd `sshd` reload.
+Ubuntu 14.04+ (6.6), Fedora 21+, and current Arch/openSUSE. Because certhold
+touches no system config and reloads nothing, there are no systemd or
+privilege requirements beyond write access to the target user's home (running the
+install as root for `--user root`).

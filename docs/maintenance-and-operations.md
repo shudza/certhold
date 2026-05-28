@@ -8,33 +8,37 @@ shared by every operation, then the two heaviest operations, **revocation** and
 ## The push model
 
 Certhold has no agent on the peer. Every state change — a reissued cert, an
-updated principals list, a fresh KRL, a rotated CA — is delivered by SSHing into
-the peer and writing files. The shape is the same for all commands:
+updated principals list, a rotated CA — is delivered by SSHing into the peer and
+writing files. The shape is the same for all commands:
 
 1. Mutate local state (DB and/or CA) first.
 2. SSH into the peer using **certhold's own peer cert and key** (the `manager`
-   identity minted at `init`). This is the only authentication certhold has to a
-   peer — no passwords, no per-peer credentials.
+   identity minted at `init`), as the peer's `target_user` (`root` for a
+   `--user root` peer). This is the only authentication certhold has to a peer —
+   no passwords, no per-peer credentials.
 3. Write each file via a **staging path then atomic rename**: the content is
    written to `<target>.staging` beside the target, then `mv -f` (a same-filesystem
    `rename`) moves it into place, so `sshd` never sees a half-written file. On
    error the staging file is removed.
-4. **Reload `sshd`** — root-mode peers only. User-mode peers need no reload
-   (`authorized_keys` and the referenced cert are read per connection).
+4. **No `sshd` reload.** Trust lives in the target user's `~/.ssh/authorized_keys`
+   and the referenced cert, both read by `sshd` per connection, so edits take
+   effect immediately.
 5. **Verify** the connection still works with a quick health check.
 
 ### Host-key trust on the push
 
-The push connection verifies the peer's host key strictly (not blind
-trust-on-first-use). The manager's trust file is seeded at `init` with a single
-CA line:
+The push connection verifies the peer's host key strictly via the manager's own
+`known_hosts` (`<data-dir>/self/<home>/.ssh/known_hosts`) — **not** blind
+trust-on-first-use. Because certhold does not sign host keys, that file starts
+**empty**, so the operator must seed the manager's host trust for the peers it
+pushes to, e.g.:
 
 ```
-@cert-authority * <ca.pub>
+ssh-keyscan <peer-address> >> <data-dir>/self/<home>/.ssh/known_hosts
 ```
 
-so the manager trusts any host presenting a host key signed by the certhold CA,
-rather than pinning one key per host.
+keyed by the address the manager dials (the `enroll --address` value, else the
+peer name). Without seeding, every push fails host-key verification.
 
 ### Encrypted manager key
 
@@ -44,102 +48,58 @@ plaintext key never prompts. See [security.md](security.md).
 
 ### How commands use it
 
-- **`update`** re-signs the peer's cert and pushes the new `*-cert.pub` (root
-  mode also reloads).
-- **`group allow`/`disallow`** rewrites the peer's inbound trust list — the
-  `auth_principals/root` file (root mode) or the `principals="…"` value in
-  `authorized_keys` (user mode) — and pushes it. This is the one command that
-  reads remote state (the existing `authorized_keys`) before writing.
+- **`update`** re-signs the peer's cert and pushes the new `*-cert.pub`.
+- **`group allow`/`disallow`** rewrites the `principals="…"` value on the peer's
+  `authorized_keys` `cert-authority` line and pushes it. This is the one command
+  that reads remote state (the existing `authorized_keys`) before writing.
 - **`revoke`** and **`rekey`** are multi-peer pushes, below.
 
 ### No retry queue
 
 Multi-peer operations iterate peers in a plain loop. **There is no automatic
 retry queue and no background reconciler.** A peer that is offline during a push
-is skipped and reported as a *straggler* (both `revoke`'s KRL fan-out and `rekey`
-continue past an unreachable peer), and the way to catch it up is to **re-run the
-command manually**. Re-runs are idempotent — the database tracks per-peer KRL
-state and per-peer cert serials — but nothing retries on its own. This is an
-accepted soft-consistency tradeoff: until an offline peer receives an update it
-keeps acting on its old state.
+is skipped and reported as a *straggler* (`revoke`/`rekey` continue past an
+unreachable peer), and the way to catch it up is to **re-run the command
+manually**. Re-runs are idempotent — the database tracks per-peer cert serials —
+but nothing retries on its own. This is an accepted soft-consistency tradeoff:
+until an offline peer receives an update it keeps acting on its old state.
 
 ## Revocation
 
 Revoking a peer makes certhold stop trusting that peer's certificate across the
 fleet. `certhold revoke <name>` first sets the peer's `revoked` flag (persistent,
 before any push, so the manager's view is correct even if a push fails), then
-takes one of **two paths depending on the revoked peer's mode**. The revoked peer
-itself is never contacted.
+forces a **partial CA rekey**. The revoked peer itself is never contacted.
 
-The path is selected by the revoked peer's **layout version** and mode: **only
-legacy v1 root peers** take the KRL path; **v1 user-mode and all v2 peers
-(including v2 root)** take the partial-CA-rekey path.
+There is no native KRL (`RevokedKeys` is a `sshd_config` directive certhold never
+uses): trust lives entirely in the `cert-authority` line in each peer's
+`authorized_keys`, with nowhere to push a revocation list. So revocation is
+**always** a partial CA rekey — it rotates the entire CA and reissues every other
+peer, **excluding** the revoked one. The revoked peer never receives a new cert,
+and its old cert was signed by the now-retired CA, so it stops being accepted as
+the new CA propagates.
 
-### Legacy v1 root-mode peers — KRL push
-
-v1 root-mode peers carry `RevokedKeys /etc/ssh/krl` from day one (the file ships
-empty). On revoke, certhold:
-
-1. Rebuilds the KRL from the **certificate serials** of **all** currently-revoked
-   peers (the KRL revokes serials, not keys; `ssh-keygen -k` produces a binary
-   KRL tied to the CA public key). An empty serial set yields a valid empty KRL.
-2. Allocates a new monotonic KRL version.
-3. Pushes the new `/etc/ssh/krl` to every non-revoked root-mode peer (write,
-   reload, verify), recording the delivered version per peer.
-
-This is cheap and targeted. Per-peer push failures are logged and skipped; a
-skipped peer keeps its old KRL version and **still accepts the revoked cert**
-until a later KRL push reaches it (re-running `revoke` is the catch-up — it is
-idempotent).
-
-Because revocation keys on the certificate serial, reissuing a cert (`update`,
-`rekey`) changes the serial; the KRL is always rebuilt from the live serials of
-revoked peers, so it stays correct.
-
-### v1 user-mode and all v2 peers — partial CA rekey
-
-These peers have no `RevokedKeys` directive and no KRL file — trust lives in the
-`cert-authority` line in `authorized_keys`, with nowhere to push a revocation
-list. So revoking such a peer instead performs a **partial CA rekey**: it rotates
-the entire CA and reissues every other peer, **excluding** the revoked one. The
-revoked peer never receives a new cert, and its old cert was signed by the
-now-retired CA, so it stops being accepted as the new CA propagates.
-
-**Because v2 root mode is user-mode trust, revoking a v2 root peer is also a
-partial CA rekey** — there is no KRL for v2 root. This is heavier than a v1 root
-KRL push (it rolls the whole per-instance fleet) and, like all rekeys, is
+This reuses the [rekey](#rekey) engine with the revoked peer excluded, so it is
 **resilient to unreachable peers** (see below): an offline peer becomes a
-reported straggler instead of aborting the revoke. For a v2 peer the rekey rewrites only *this* instance's
-`cert-authority` line in each peer's `authorized_keys` (matched by the old CA
-pubkey) and pushes the namespaced cert — other instances' lines are preserved.
-
-### Mixed fleets
-
-The two paths do not bridge:
-
-- A **v1 root-mode revoke** pushes a KRL and skips v1-user/v2 peers; they do not
-  learn of the revocation through it.
-- A **v1-user / v2 revoke** triggers a full CA rotation, which in a mixed fleet
-  also rolls v1 root-mode peers (they receive the new CA + cert through their
-  rekey branch).
-
-If a fleet is mixed and you need both populations to drop a revoked cert
-immediately, run `rekey`.
+reported straggler instead of aborting the revoke. For each peer the rekey
+rewrites only **this instance's** `cert-authority` line in `authorized_keys`
+(matched by the old CA pubkey) and pushes the namespaced cert — other instances'
+lines are preserved.
 
 ### Multi-instance peers
 
-A v2 peer can be managed by several certhold instances at once; each owns a
-separate, key-namespaced `cert-authority` line and `config` block (see
-[peer-file-layout.md](peer-file-layout.md#layout-v2--multi-instance)). Revoke /
-rekey from one instance touches only that instance's lines and certs, so the
-other instances keep managing the peer uninterrupted.
+A peer can be managed by several certhold instances at once; each owns a separate,
+key-namespaced `cert-authority` line and `config` block (see
+[peer-file-layout.md](peer-file-layout.md#config--the-keyed-client-block)).
+Revoke / rekey from one instance touches only that instance's lines and certs, so
+the other instances keep managing the peer uninterrupted.
 
 ## Rekey
 
 `certhold rekey` is the big-hammer rotation: a brand-new CA, a fresh cert for
 **every** non-revoked peer, with certhold's own files rotated last. Reach for it
-when the CA key may be compromised, or as periodic hygiene. (User-mode `revoke`
-reuses this same engine with the revoked peer excluded.)
+when the CA key may be compromised, or as periodic hygiene. (`revoke` reuses this
+same engine with the revoked peer excluded.)
 
 ### What it does
 
@@ -148,10 +108,10 @@ reuses this same engine with the revoked peer excluded.)
    already exists, rekey refuses to start — it is the guard against a
    half-finished previous run.
 3. For each non-revoked peer except certhold: sign a new cert with the new CA and
-   push it (root mode: new `ca.pub` + cert + reload; user mode: rewrite the
-   `authorized_keys` `cert-authority` line with the new CA + push the new cert, no
-   reload). A peer that cannot be reached is skipped and recorded as a straggler
-   (see below) rather than aborting the rotation.
+   push it — rewrite this instance's `authorized_keys` `cert-authority` line with
+   the new CA pubkey and push the new namespaced cert (no `sshd` reload). A peer
+   that cannot be reached is skipped and recorded as a straggler (see below)
+   rather than aborting the rotation.
 4. **Rotate certhold itself last**, writing its own new CA pub + self cert
    locally. Doing self last is what stops certhold from locking itself out
    mid-rotation — every peer still trusts the old-CA manager cert during the loop.

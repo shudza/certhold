@@ -26,8 +26,6 @@ CREATE TABLE peers (
   authorized_key     BLOB NOT NULL,
   revoked            INTEGER NOT NULL DEFAULT 0,
   created_at         TIMESTAMP NOT NULL,
-  last_krl_version   INTEGER NOT NULL DEFAULT 0,
-  mode               TEXT NOT NULL DEFAULT 'root',
   target_user        TEXT NOT NULL DEFAULT '',
   address            TEXT NOT NULL DEFAULT ''
 );
@@ -41,10 +39,14 @@ CREATE TABLE peers (
 | `authorized_key` | The peer's public key in `authorized_keys` wire form, persisted so certs can be re-signed without contacting the peer. |
 | `revoked` | Revocation flag, set before any push during `revoke`. |
 | `created_at` | Enrollment timestamp (UTC). |
-| `last_krl_version` | Last KRL version successfully pushed to this (root-mode) peer; a value behind the global max means the peer is stale. |
-| `mode` | `user` or `root` — the peer's on-disk layout and revocation path. See [architecture.md](architecture.md#operating-modes). |
-| `target_user` | For user-mode peers, the OS user the files were installed under (empty in root mode); recorded at redeem time. |
+| `target_user` | The OS user the files were installed under (the `--user` value; `root` for a `--user root` peer). Recorded at redeem time, and the user certhold dials when pushing. |
 | `address` | Network address (host or IP) certhold dials to SSH to this peer. Set by `enroll --address`, else backfilled from the install-time source IP; empty means dial by `name`. Decouples a peer's identity (`name`) from how it is reached. |
+
+> **Removed columns (migration history).** Earlier schemas carried `mode`,
+> `layout_version`, and `last_krl_version`, plus a `krl_version` table. The
+> collapse onto the single user-mode trust model dropped all of them; the
+> migration rebuilds `peers`/`tokens` to physically remove the columns and drops
+> `krl_version`. See [schema migration](#schema-migration).
 
 ### `groups`, `peer_groups`, `peer_allowed_groups`
 
@@ -72,7 +74,8 @@ referenced. The two join tables encode a real, independent distinction:
 - **`peer_groups`** — the groups a peer belongs to. Drives the principals on
   **its own certificate**.
 - **`peer_allowed_groups`** — the groups a peer accepts inbound connections from.
-  Drives **who may log into it** (its `auth_principals` / `authorized_keys` line).
+  Drives **who may log into it** (the `principals="…"` value on its
+  `authorized_keys` `cert-authority` line).
 
 `enroll` initializes both to the requested `--groups`, so a fresh peer starts
 symmetric (and same-group peers can reach each other immediately). They diverge
@@ -92,7 +95,6 @@ CREATE TABLE tokens (
   tarball     BLOB,
   consumed    INTEGER NOT NULL DEFAULT 0,
   created_at  TIMESTAMP NOT NULL,
-  mode        TEXT NOT NULL DEFAULT 'root',
   target_user TEXT NOT NULL DEFAULT ''
 );
 ```
@@ -105,12 +107,12 @@ CREATE TABLE tokens (
 | `tarball` | The pre-built, **sign-at-mint** install bundle (the cert is signed when the token is created). Cleared to `NULL` when the token is consumed, so the signed bundle does not linger. |
 | `consumed` | Single-use flag. |
 | `created_at` | Mint timestamp (UTC). |
-| `mode`, `target_user` | Copied onto the peer row on redeem; `target_user` may be set from the install request in user mode. |
+| `target_user` | Copied onto the peer row on redeem. If `enroll --user` pinned it, the install request must match; otherwise it is set from the install-time `?user=` value (the user that ran the one-liner). |
 
 Consuming a token is atomic: in one transaction it checks the row is still
 unconsumed, marks it consumed, and nulls the tarball.
 
-### `ca` and `krl_version`
+### `ca`
 
 ```sql
 CREATE TABLE ca (
@@ -118,20 +120,23 @@ CREATE TABLE ca (
   active     INTEGER NOT NULL DEFAULT 0,
   created_at TIMESTAMP NOT NULL
 );
-
-CREATE TABLE krl_version (
-  version      INTEGER PRIMARY KEY,
-  generated_at TIMESTAMP NOT NULL
-);
 ```
 
 - **`ca`** is a monotonic version log; exactly one row is `active`. `init` seeds
   version 1; each [rekey](maintenance-and-operations.md#rekey) inserts the next
   version and flips active. It tracks **only** version metadata — the private key
   itself lives on disk under `<data-dir>/ca/`, never in the database.
-- **`krl_version`** is a monotonic counter; each KRL generation records a new
-  version. It pairs with `peers.last_krl_version` to track which peers have the
-  latest KRL. See [revocation](maintenance-and-operations.md#revocation).
 
-A small `meta` table holds the schema version for migration bookkeeping; it is
-not a general configuration store.
+A small `meta` table holds the schema version (and the per-instance key) for
+bookkeeping; it is not a general configuration store.
+
+## Schema migration
+
+Migrations run automatically on open. They first bring any database (fresh or
+old) up to a shape with all historical columns present (additive
+`ALTER TABLE … ADD COLUMN` with existence checks), then **rebuild** `peers` and
+`tokens` to physically drop the vestigial `mode` / `layout_version` /
+`last_krl_version` columns and `DROP` the dead `krl_version` table left behind by
+the removal of root mode and KRL revocation. The rebuild preserves foreign keys
+(`peer_groups` / `peer_allowed_groups`) and is idempotent — once the dead columns
+are gone it no-ops. The result is the clean single-user-mode schema shown above.

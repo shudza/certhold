@@ -1,7 +1,8 @@
-# e2e topology: a certhold manager and two alpine peers on a single user-defined
-# bridge network. Service names double as DNS names on that network, so the
-# manager reaches peers as `peer1`/`peer2` and peers reach the manager as
-# `manager`. v2 USER mode; target user `deploy`.
+# e2e topology: a certhold manager and three alpine peers on a single
+# user-defined bridge network. Service names double as DNS names on that network,
+# so the manager reaches peers as `peer1`/`peer2`/`peer3` and peers reach the
+# manager as `manager`. peer1/peer2 use target user `deploy`; peer3 is the
+# root-via-`--user root` scenario (files in /root/.ssh).
 #
 # Build contexts are the repo root (../..) so the manager image can compile the
 # certhold binary from source; the Dockerfiles live under test/e2e.
@@ -40,6 +41,18 @@ services:
       context: ../..
       dockerfile: test/e2e/Dockerfile.peer
     hostname: peer2
+    environment:
+      CERTHOLD_NO_PASSPHRASE: "1"
+    networks:
+      - chnet
+
+  # peer3 is enrolled with --user root and the install one-liner runs AS root,
+  # so its certhold files land in /root/.ssh. Same image/env as the deploy peers.
+  peer3:
+    build:
+      context: ../..
+      dockerfile: test/e2e/Dockerfile.peer
+    hostname: peer3
     environment:
       CERTHOLD_NO_PASSPHRASE: "1"
     networks:

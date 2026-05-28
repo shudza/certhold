@@ -20,6 +20,17 @@ RUN adduser -D -s /bin/bash deploy \
     && passwd -d deploy \
     && chmod 700 /home/deploy
 
+# The root-via-`--user root` scenario installs into /root/.ssh and logs in as
+# root over a cert. Alpine ships root password-LOCKED (`root:!:` in /etc/shadow).
+# OpenSSH WITHOUT PAM (alpine's default, UsePAM no) refuses ALL auth — including
+# valid certs — for a locked account ("User root not allowed because account is
+# locked"), the same condition that broke `deploy` above. `passwd -d root` clears
+# the field to empty, unlocking cert auth while password login stays disabled
+# (PermitEmptyPasswords defaults to no). Alpine's default
+# `PermitRootLogin prohibit-password` already permits pubkey/cert root login and
+# we do not override sshd_config, so no PermitRootLogin change is needed.
+RUN passwd -d root
+
 # Generate host keys for sshd. ssh-keygen -A creates the standard set
 # (ed25519/rsa/ecdsa) under /etc/ssh.
 RUN ssh-keygen -A

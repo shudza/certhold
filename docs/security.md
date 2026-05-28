@@ -56,11 +56,11 @@ certs are never encrypted:
 | Key | On-disk path | Env-var passphrase |
 |---|---|---|
 | CA private key | `<data-dir>/ca/ca` | `CERTHOLD_CA_PASSPHRASE` |
-| Manager peer key (user mode) | `<data-dir>/self/<home>/.ssh/id_ed25519` | `CERTHOLD_PEER_PASSPHRASE` |
-| Manager peer key (root mode) | `<data-dir>/self/etc/ssh/peer_ed25519` | `CERTHOLD_PEER_PASSPHRASE` |
+| Manager peer key | `<data-dir>/self/<home>/.ssh/id_ed25519_<key>` | `CERTHOLD_PEER_PASSPHRASE` |
 
 `<home>` mirrors the peer layout — `root` for the `root` user, otherwise
-`home/<user>`. `init` prompts once and uses the same passphrase for both keys;
+`home/<user>`; `<key>` is the per-instance key. `init` prompts once and uses the
+same passphrase for both keys;
 `--separate-passphrases` sets a distinct one per key. The passphrase is read
 no-echo, with the env var checked first so automation never blocks; no flag ever
 takes a passphrase value, and unlocked passphrase bytes are wiped at command exit.
@@ -81,16 +81,14 @@ push prompts **at most once per key**, never once per peer.
 | `enroll` | unlock (sign cert) | — |
 | `update` | unlock (re-sign) | unlock (push) |
 | `group allow` / `disallow` | — | unlock (push) |
-| `revoke` (root mode) | unlock (build KRL) | unlock (push KRL) |
-| `revoke` (user mode) | unlock old + set new (it is a CA rekey) | unlock (push) |
+| `revoke` | unlock old + set new (it is a partial CA rekey) | unlock (push) |
 | `rekey` | unlock old + set new | unlock (push) |
 | `serve`, `list` | never | never |
 
 `init`'s cells say *set* because the keys are being created (passphrase
-established), not decrypted. A user-mode `revoke` is a partial CA rekey, so its
-key usage matches `rekey`, not the root-mode `revoke` row. `rekey` reuses the old
-CA passphrase for the new key by default; `--rotate-passphrase` prompts for a
-fresh one (CA key only) — see
+established), not decrypted. `revoke` is a partial CA rekey, so its key usage
+matches `rekey`. `rekey` reuses the old CA passphrase for the new key by default;
+`--rotate-passphrase` prompts for a fresh one (CA key only) — see
 [rekey](maintenance-and-operations.md#passphrase-across-rotation).
 
 ### Per-peer passphrases (install-side)
@@ -98,7 +96,7 @@ fresh one (CA key only) — see
 Separately, the **peer's own** outbound key can be encrypted at install time —
 a purely peer-local secret the **manager never sees, stores, or prompts for**.
 When the install one-liner runs, the script offers to encrypt that peer's key
-(`~/.ssh/id_ed25519` in user mode, `/etc/ssh/peer_ed25519` in root mode):
+(`~/.ssh/id_ed25519_<key>` in the target user's home):
 
 - Type a passphrase at the prompt → the key is encrypted before being left on
   disk (read no-echo from `/dev/tty`).

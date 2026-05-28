@@ -52,28 +52,33 @@ go test -tags e2e -v -count=1 -timeout 20m ./test/e2e/...
 
 ## Topology
 
-Three services on one user-defined bridge network (service names double as DNS
+Four services on one user-defined bridge network (service names double as DNS
 names); compose project name `certhold-e2e`:
 
 ```
-            chnet (bridge)
-   ┌──────────┬──────────┬──────────┐
-   │ manager  │  peer1   │  peer2   │
-   │ certhold │  sshd    │  sshd    │
-   │ serve    │  (web01) │  (db01)  │
-   └──────────┴──────────┴──────────┘
+                     chnet (bridge)
+   ┌──────────┬──────────┬──────────┬───────────┐
+   │ manager  │  peer1   │  peer2   │   peer3    │
+   │ certhold │  sshd    │  sshd    │   sshd     │
+   │ serve    │  (web01) │  (db01)  │  (rootbox) │
+   │          │  deploy  │  deploy  │   root     │
+   └──────────┴──────────┴──────────┴───────────┘
 ```
 
 - **manager** — multi-stage image: builds `./cmd/certhold` in `golang:1.25-alpine`,
   runs it in `alpine:3.20`. Pushes use Go's `x/crypto/ssh` (no `sshd` needed); it
   also carries `openssh-client` so the harness can `ssh-keyscan` the peers.
-- **peer1 / peer2** — `alpine:3.20` + `bash curl tar openssh openssh-client`,
+- **peer1 / peer2 / peer3** — `alpine:3.20` + `bash curl tar openssh openssh-client`,
   a `deploy` user, host keys via `ssh-keygen -A`, and `sshd -D -e` in the
-  foreground. **`sshd_config` is never modified** — v2 user-mode trust lives
-  entirely in `~deploy/.ssh/authorized_keys`, which stock OpenSSH honors.
+  foreground. **`sshd_config` is never modified** — user-mode trust lives
+  entirely in the target user's `~/.ssh/authorized_keys`, which stock OpenSSH
+  honors. peer1/peer2 are managed as `deploy`; **peer3 is the
+  root-via-`--user root` scenario** — its `root` account is password-unlocked
+  (`passwd -d root`) so cert auth is accepted (see caveat 2 below).
 
 The peers are enrolled under **names decoupled from their addresses** (`web01`
-@ `peer1`, `db01` @ `peer2`) to also exercise the per-peer `address` feature.
+@ `peer1`, `db01` @ `peer2`, `rootbox` @ `peer3`) to also exercise the per-peer
+`address` feature.
 
 ## Environment variables (set in `docker-compose.yml`)
 
@@ -82,20 +87,21 @@ The peers are enrolled under **names decoupled from their addresses** (`web01`
 | manager | `CERTHOLD_BASE_URL` | `https://manager:8443` | The enroll one-liner must point peers at the `manager` DNS name. |
 | manager | `CERTHOLD_CA_PASSPHRASE` | `e2e-ca-pass` | Non-interactive CA passphrase for `init`/`enroll`/`update`/`group`/`revoke`/`rekey`. |
 | manager | `CERTHOLD_PEER_PASSPHRASE` | `e2e-ca-pass` | Manager peer-key passphrase for pushes. Same value: `init`'s default branch reuses the CA passphrase for the manager peer key. |
-| peer1/2 | `CERTHOLD_NO_PASSPHRASE` | `1` | Leave each installed peer key **unencrypted** so peer→peer `ssh` is non-interactive (an encrypted key would prompt at `/dev/tty`). |
+| peer1/2/3 | `CERTHOLD_NO_PASSPHRASE` | `1` | Leave each installed peer key **unencrypted** so peer→peer `ssh` is non-interactive (an encrypted key would prompt at `/dev/tty`). |
 
 ## Scenario sequence (assertions are live `ssh` exit codes)
 
 The single ordered `TestE2E` shares state across `t.Run` steps:
 
-1. **init + serve** — `certhold init --mode user --user deploy --listen-ip 0.0.0.0 --no-prompt`, then `certhold serve` in the background; wait for HTTPS :8443 and both peers' sshd.
+1. **init + serve** — `certhold init --user deploy --listen-ip 0.0.0.0 --no-prompt`, then `certhold serve` in the background; wait for HTTPS :8443 and all three peers' sshd.
 2. **enroll web01 → install on peer1** — assert the namespaced identity files, the `cert-authority` line in `authorized_keys`, and the keyed `# BEGIN certhold <key> v2` block in `~/.ssh/config`.
-3. **enroll db01 → install on peer2** — same assertions; then **seed the manager's outbound `known_hosts`** (see caveat below).
-4. **`update web01`** exits 0 — proves manager cert-auth *into* peer1.
+3. **enroll db01 → install on peer2** — same assertions; then **seed the manager's outbound `known_hosts`** (peer1/peer2/peer3; see caveat below).
+4. **`update web01`** exits 0 — proves manager cert-auth *into* `deploy@peer1` (`update` dials `pushUser(peer)`).
 5. **group allow/disallow** — peer1→peer2 is non-zero before `group allow web --on db01`, zero after, non-zero again after `group disallow`.
 6. **`update web01 --groups web,db`** — peer1→peer2 becomes zero (web01's cert now carries `db`, which db01 allows).
 7. **`revoke db01`** (partial CA rekey) — peer1(new-CA cert)→peer2(db01, still old CA) is non-zero; `update db01` errors.
 8. **`rekey`** — `update web01` still exits 0; bonus: an SSH presenting web01's **stashed pre-rekey cert** into peer1 (which rotated to the new CA) fails, proving old certs die.
+9. **enroll rootbox `--user root` → install AS ROOT on peer3** — the headline root-via-user-mode scenario. The install one-liner runs as root (`docker compose exec` without `-u`), so `$HOME`/`id -un` target **`/root/.ssh`**; assert the namespaced files, the `cert-authority` line and the keyed `v2` block all landed there. Then `update rootbox` exits 0 (manager cert-auth into **`root@peer3`**, since `update` dials `pushUser(peer)=="root"`), and a real cert SSH as `root@peer3` (peer3 loopback, principal `infra`) succeeds.
 
 ## Important runtime caveats (read before running `make e2e`)
 
@@ -114,10 +120,18 @@ certhold source. If `make e2e` misbehaves, check these first:
    the manager's host trust the same way (documented in
    `docs/maintenance-and-operations.md`).
 
-2. **`deploy` account login.** The peer images create `deploy` with `adduser -D`
-   (no password; password field `!`). Stock OpenSSH still allows pubkey/cert auth
-   for such an account. If a future base image locks the account harder, cert
-   auth could break — adjust `Dockerfile.peer`.
+2. **Account locking blocks cert auth (deploy AND root).** OpenSSH **without
+   PAM** (alpine's default, `UsePAM no`) refuses **all** authentication —
+   including a valid certificate — for an account whose `/etc/shadow` password
+   field is locked, logging `User <u> not allowed because account is locked`.
+   `adduser -D` leaves `deploy` locked (`!`), and alpine ships `root` locked too
+   (`root:!:`). `Dockerfile.peer` runs `passwd -d deploy` **and** `passwd -d root`
+   to clear those fields (unlocking cert auth; password login stays off since
+   `PermitEmptyPasswords` defaults to `no`). Root cert login also needs sshd's
+   `PermitRootLogin` to permit pubkey/cert — alpine's default
+   `prohibit-password` does, and we never modify `sshd_config`. If a future base
+   image re-locks an account or overrides `PermitRootLogin`, cert auth (esp. the
+   step-9 root scenario) breaks — adjust `Dockerfile.peer`.
 
 3. **`StrictModes` / permissions.** The install one-liner runs **as `deploy`** and
    creates `~/.ssh` 700 / `authorized_keys` 600; the Dockerfile tightens

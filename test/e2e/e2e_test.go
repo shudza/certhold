@@ -122,9 +122,19 @@ func certholdExpectFail(ctx context.Context, t *testing.T, args ...string) strin
 }
 
 // sshTry attempts a non-interactive, pubkey-only SSH from `fromService` to
-// deploy@<toHost> running `true`, and returns the exit code. The options pin
-// the attempt to certificate/pubkey auth so the result reflects ONLY certhold's
-// trust state, not host-key prompts or password fallback:
+// deploy@<toHost> running `true`, and returns the exit code. It is the
+// deploy-user convenience wrapper around sshTryAs.
+func sshTry(ctx context.Context, t *testing.T, fromService, toHost string) int {
+	return sshTryAs(ctx, t, targetUser, fromService, toHost)
+}
+
+// sshTryAs attempts a non-interactive, pubkey-only SSH from `fromService` to
+// loginUser@<toHost> running `true`, and returns the exit code. The ssh client
+// runs AS loginUser on fromService (so it reads that user's ~/.ssh/config block
+// the v2 install spliced in) and logs into the same loginUser on toHost. Pass
+// "root" for the root-via-`--user root` scenario. The options pin the attempt to
+// certificate/pubkey auth so the result reflects ONLY certhold's trust state,
+// not host-key prompts or password fallback:
 //
 //	StrictHostKeyChecking=no     - peers bootstrap host trust via TOFU; don't
 //	                               block on an unknown host key (we are testing
@@ -134,16 +144,16 @@ func certholdExpectFail(ctx context.Context, t *testing.T, args ...string) strin
 //	                               exit then means "cert not accepted".
 //	BatchMode=yes                - never prompt; fail fast instead.
 //
-// The client presents web01's/db01's cert via the ~/.ssh/config block the v2
-// install spliced in (CertificateFile/IdentityFile), so no -i is needed.
-func sshTry(ctx context.Context, t *testing.T, fromService, toHost string) int {
+// The client presents the peer's cert via the loginUser's ~/.ssh/config block the
+// v2 install spliced in (CertificateFile/IdentityFile), so no -i is needed.
+func sshTryAs(ctx context.Context, t *testing.T, loginUser, fromService, toHost string) int {
 	t.Helper()
 	sshCmd := fmt.Sprintf(
 		"ssh -o StrictHostKeyChecking=no -o PreferredAuthentications=publickey "+
 			"-o PasswordAuthentication=no -o BatchMode=yes -o ConnectTimeout=10 "+
-			"%s@%s true", targetUser, toHost)
-	res := composeExec(ctx, t, targetUser, fromService, sshCmd)
-	t.Logf("ssh %s->%s exit=%d output=%q", fromService, toHost, res.exitCode, strings.TrimSpace(res.out))
+			"%s@%s true", loginUser, toHost)
+	res := composeExec(ctx, t, loginUser, fromService, sshCmd)
+	t.Logf("ssh %s->%s (login %s) exit=%d output=%q", fromService, toHost, loginUser, res.exitCode, strings.TrimSpace(res.out))
 	return res.exitCode
 }
 
@@ -193,12 +203,14 @@ func waitForSSHD(ctx context.Context, t *testing.T, services ...string) {
 	}
 }
 
-// enrollOneLiner runs `certhold enroll` and returns the printed install
-// one-liner (`curl -kfsSL .../enroll/<tok>.sh | bash`).
-func enrollOneLiner(ctx context.Context, t *testing.T, name, address, groups string) string {
+// enrollOneLiner runs `certhold enroll <name> --user <user>` and returns the
+// printed install one-liner (`curl -kfsSL .../enroll/<tok>.sh | bash`). The user
+// is pinned so the install request must match it; pass "root" for the
+// root-via-`--user root` scenario.
+func enrollOneLiner(ctx context.Context, t *testing.T, name, address, user, groups string) string {
 	t.Helper()
 	out := certhold(ctx, t, "enroll", name,
-		"--address", address, "--user", targetUser,
+		"--address", address, "--user", user,
 		"--groups", groups)
 	line := strings.TrimSpace(out)
 	if !strings.Contains(line, "curl") || !strings.Contains(line, "| bash") {
@@ -295,7 +307,7 @@ func TestE2E(t *testing.T) {
 		t.Logf("serve launch output:\n%s", res.out)
 
 		waitForManagerHTTPS(ctx, t)
-		waitForSSHD(ctx, t, "peer1", "peer2")
+		waitForSSHD(ctx, t, "peer1", "peer2", "peer3")
 
 		// Capture the instance key from the manager's namespaced self key file.
 		ls := composeExec(ctx, t, "", "manager",
@@ -309,39 +321,37 @@ func TestE2E(t *testing.T) {
 	})
 
 	t.Run("02_enroll_web01_install_peer1", func(t *testing.T) {
-		line := enrollOneLiner(ctx, t, "web01", "peer1", "web")
+		line := enrollOneLiner(ctx, t, "web01", "peer1", targetUser, "web")
 		// Run the install one-liner AS deploy on peer1.
 		res := composeExec(ctx, t, targetUser, "peer1", line)
 		if res.exitCode != 0 {
 			t.Fatalf("install on peer1 exit=%d:\n%s", res.exitCode, res.out)
 		}
-		assertPeerInstall(ctx, t, "peer1", instanceKey, []string{"manager", "web"})
+		assertPeerInstall(ctx, t, "peer1", targetUser, "/home/"+targetUser, instanceKey, []string{"manager", "web"})
 	})
 
 	t.Run("03_enroll_db01_install_peer2", func(t *testing.T) {
-		line := enrollOneLiner(ctx, t, "db01", "peer2", "db")
+		line := enrollOneLiner(ctx, t, "db01", "peer2", targetUser, "db")
 		res := composeExec(ctx, t, targetUser, "peer2", line)
 		if res.exitCode != 0 {
 			t.Fatalf("install on peer2 exit=%d:\n%s", res.exitCode, res.out)
 		}
-		assertPeerInstall(ctx, t, "peer2", instanceKey, []string{"manager", "db"})
+		assertPeerInstall(ctx, t, "peer2", targetUser, "/home/"+targetUser, instanceKey, []string{"manager", "db"})
 
-		// Now that both peers' sshd are reachable, seed the manager's outbound
+		// Now that the peers' sshd are reachable, seed the manager's outbound
 		// known_hosts so subsequent pushes pass strict host-key verification.
-		seedManagerKnownHosts(ctx, t, "peer1", "peer2")
+		// peer3 is included here so the manager can later push to root@peer3
+		// (step 09); the host key is per-host, not per-login-user.
+		seedManagerKnownHosts(ctx, t, "peer1", "peer2", "peer3")
 	})
 
 	t.Run("04_manager_push_update_web01", func(t *testing.T) {
 		// Proves manager cert-auth INTO peer1: update dials peer1 with the
 		// manager cert, writes the reissued cert, and runs VerifyHealth (`true`).
-		//
-		// MAINTAINER NOTE (suspected product bug): unlike `group`/`revoke`/`rekey`
-		// — which set pushOpts.User = pushUser(peer)/pushUser(self) — `update` in
-		// internal/cli/update.go does NOT set pushOpts.User, so sshpush.Dial
-		// defaults the login user to "root". A v2 user-mode peer only trusts the
-		// manager CA in ~deploy/.ssh, not root's, so this dial is expected to FAIL
-		// as root@peer1 until update sets the target user. If this step fails with
-		// an ssh/auth error, that is the bug, not the harness. See the PR body.
+		// `update` sets pushOpts.User = pushUser(peer) (the peer's target_user),
+		// so it dials deploy@peer1 and authenticates against the cert-authority
+		// line in ~deploy/.ssh/authorized_keys. (Step 09 exercises the same path
+		// with target_user=root, dialing root@peer3.)
 		out := certhold(ctx, t, "update", "web01", "--groups", "web")
 		if !strings.Contains(out, "updated web01") {
 			t.Fatalf("update web01 did not confirm success:\n%s", out)
@@ -423,6 +433,43 @@ func TestE2E(t *testing.T) {
 			t.Fatalf("peer1->peer1 with the stashed pre-rekey cert unexpectedly succeeded (want non-zero)")
 		}
 	})
+
+	t.Run("09_enroll_root_user", func(t *testing.T) {
+		// The headline of the unified model: managing root is just `--user root`.
+		// Enroll rootbox @ peer3 with --user root, then run the install one-liner
+		// AS ROOT on peer3 (composeExec user "" => root). The script reads $HOME
+		// (/root) and `id -un` (root), so all files land in /root/.ssh — no special
+		// root-mode codepath. We enroll AFTER the rekeys above, so rootbox's cert
+		// and trust line are signed with the CURRENT active CA, matching the
+		// manager's freshly-rotated self cert.
+		line := enrollOneLiner(ctx, t, "rootbox", "peer3", "root", "infra")
+
+		// Run the one-liner as root (no -u): the install must target /root/.ssh.
+		res := composeExec(ctx, t, "", "peer3", line)
+		if res.exitCode != 0 {
+			t.Fatalf("root install on peer3 exit=%d:\n%s", res.exitCode, res.out)
+		}
+
+		// Files landed in /root/.ssh with the cert-authority line + keyed config.
+		// rootbox's principals are {manager, infra}; we assert both are present.
+		assertPeerInstall(ctx, t, "peer3", "", "/root", instanceKey, []string{"manager", "infra"})
+
+		// Manager can push to root@peer3: `update` dials pushUser(peer)=="root"
+		// (the peer's target_user), so this proves manager cert-auth INTO
+		// root@peer3 against the cert-authority line in /root/.ssh/authorized_keys.
+		out := certhold(ctx, t, "update", "rootbox", "--groups", "infra")
+		if !strings.Contains(out, "updated rootbox") {
+			t.Fatalf("update rootbox did not confirm success:\n%s", out)
+		}
+
+		// A real cert SSH as root@peer3 must succeed. peer3 (loopback) presents
+		// rootbox's cert (principal `infra`, which peer3 allows alongside the
+		// implicit `manager`) via root's spliced ~/.ssh/config block. This is the
+		// end-to-end proof that root cert login works under --user root.
+		if code := sshTryAs(ctx, t, "root", "peer3", "peer3"); code != 0 {
+			t.Fatalf("root@peer3->root@peer3 cert SSH failed (exit %d) after root install+update (want 0)", code)
+		}
+	})
 }
 
 // parseInstanceKey extracts the 16-hex instance key from a self/.ssh listing
@@ -439,17 +486,21 @@ func parseInstanceKey(t *testing.T, lsOut string) string {
 }
 
 // assertPeerInstall verifies the v2 user-mode install landed the expected files
-// and trust lines in ~deploy/.ssh on the given peer.
-func assertPeerInstall(ctx context.Context, t *testing.T, service, instanceKey string, wantPrincipals []string) {
+// and trust lines in the target user's ~/.ssh on the given peer. loginUser is the
+// OS user the install ran as (empty => root, which targets /root/.ssh); home is
+// that user's home directory. The deploy peers pass loginUser=targetUser,
+// home=/home/<targetUser>; the root scenario passes loginUser="" (root),
+// home="/root".
+func assertPeerInstall(ctx context.Context, t *testing.T, service, loginUser, home, instanceKey string, wantPrincipals []string) {
 	t.Helper()
-	base := "/home/" + targetUser + "/.ssh"
+	base := home + "/.ssh"
 
 	// Namespaced identity files exist.
 	for _, f := range []string{
 		"id_ed25519_" + instanceKey,
 		"id_ed25519_" + instanceKey + "-cert.pub",
 	} {
-		res := composeExec(ctx, t, targetUser, service, "test -f "+base+"/"+f+" && echo ok")
+		res := composeExec(ctx, t, loginUser, service, "test -f "+base+"/"+f+" && echo ok")
 		if !strings.Contains(res.out, "ok") {
 			t.Fatalf("%s: expected identity file %s missing:\n%s", service, f, res.out)
 		}
@@ -457,7 +508,7 @@ func assertPeerInstall(ctx context.Context, t *testing.T, service, instanceKey s
 
 	// authorized_keys carries the cert-authority line with the expected
 	// principals (manager is always first).
-	ak := composeExec(ctx, t, targetUser, service, "cat "+base+"/authorized_keys")
+	ak := composeExec(ctx, t, loginUser, service, "cat "+base+"/authorized_keys")
 	if !strings.Contains(ak.out, "cert-authority") {
 		t.Fatalf("%s: authorized_keys missing cert-authority line:\n%s", service, ak.out)
 	}
@@ -468,7 +519,7 @@ func assertPeerInstall(ctx context.Context, t *testing.T, service, instanceKey s
 	}
 
 	// The keyed v2 client-config block was spliced into ~/.ssh/config.
-	cfg := composeExec(ctx, t, targetUser, service, "cat "+base+"/config")
+	cfg := composeExec(ctx, t, loginUser, service, "cat "+base+"/config")
 	wantBegin := "# BEGIN certhold " + instanceKey + " v2"
 	if !strings.Contains(cfg.out, wantBegin) {
 		t.Fatalf("%s: ~/.ssh/config missing v2 block %q:\n%s", service, wantBegin, cfg.out)
