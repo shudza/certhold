@@ -1,0 +1,50 @@
+# e2e topology: a certhold manager and two alpine peers on a single user-defined
+# bridge network. Service names double as DNS names on that network, so the
+# manager reaches peers as `peer1`/`peer2` and peers reach the manager as
+# `manager`. v2 USER mode; target user `deploy`.
+#
+# Build contexts are the repo root (../..) so the manager image can compile the
+# certhold binary from source; the Dockerfiles live under test/e2e.
+
+services:
+  manager:
+    build:
+      context: ../..
+      dockerfile: test/e2e/Dockerfile.manager
+    hostname: manager
+    environment:
+      # The enroll one-liner must point peers at the `manager` DNS name.
+      CERTHOLD_BASE_URL: "https://manager:8443"
+      # Non-interactive passphrases for init/enroll/update/group/revoke/rekey.
+      # init's default branch reuses the CA passphrase for the manager peer key,
+      # and pushes read CERTHOLD_PEER_PASSPHRASE, so both share one value.
+      CERTHOLD_CA_PASSPHRASE: "e2e-ca-pass"
+      CERTHOLD_PEER_PASSPHRASE: "e2e-ca-pass"
+    networks:
+      - chnet
+
+  peer1:
+    build:
+      context: ../..
+      dockerfile: test/e2e/Dockerfile.peer
+    hostname: peer1
+    environment:
+      # Leave the installed peer key UNENCRYPTED so peer->peer ssh is
+      # non-interactive (an encrypted key would prompt at /dev/tty).
+      CERTHOLD_NO_PASSPHRASE: "1"
+    networks:
+      - chnet
+
+  peer2:
+    build:
+      context: ../..
+      dockerfile: test/e2e/Dockerfile.peer
+    hostname: peer2
+    environment:
+      CERTHOLD_NO_PASSPHRASE: "1"
+    networks:
+      - chnet
+
+networks:
+  chnet:
+    driver: bridge

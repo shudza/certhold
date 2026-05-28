@@ -1,10 +1,16 @@
-.PHONY: build test vet static clean
+.PHONY: build test vet e2e static clean
 
 build:
 	go build -o ./bin/certhold ./cmd/certhold
 
 test:
 	go test ./...
+
+# Real end-to-end suite: spins up docker compose (manager + 2 sshd peers) and
+# asserts on live SSH trust. Requires a Docker daemon + `docker compose`; the
+# tests are gated behind the `e2e` build tag so plain `make test` never runs them.
+e2e:
+	go test -tags e2e -count=1 -timeout 20m ./test/e2e/...
 
 vet:
 	go vet ./...

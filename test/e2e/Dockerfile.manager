@@ -1,0 +1,25 @@
+# Multi-stage build so the manager image is fully self-contained: build the
+# certhold binary in the Go toolchain image, then copy the static binary into a
+# minimal alpine runtime. The manager does NOT need openssh: its pushes use
+# Go's x/crypto/ssh. ssh-keyscan (openssh-client) is still installed so the test
+# harness can seed the manager's outbound known_hosts (see e2e_test.go).
+FROM golang:1.25-alpine AS builder
+WORKDIR /src
+
+# Cache module downloads independently of the source tree.
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /out/certhold ./cmd/certhold
+
+FROM alpine:3.20
+# curl: used by the harness's HTTPS readiness probe (busybox ships only wget).
+# openssh-client (ssh-keyscan): seeds the manager's outbound known_hosts.
+RUN apk add --no-cache ca-certificates openssh-client curl
+COPY --from=builder /out/certhold /usr/local/bin/certhold
+
+# The test harness runs `certhold init` then `certhold serve` via
+# `docker compose exec`, so keep the container alive with a no-op foreground
+# process. (serve is started explicitly by the test once init has run.)
+CMD ["tail", "-f", "/dev/null"]

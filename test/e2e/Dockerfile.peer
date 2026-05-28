@@ -1,0 +1,33 @@
+# A peer runs a real OpenSSH sshd plus the openssh client (so peer->peer SSH can
+# be attempted). bash/curl/tar are needed by certhold's install one-liner.
+FROM alpine:3.20
+
+RUN apk add --no-cache bash curl tar openssh openssh-client
+
+# Target user for v2 user-mode installs. The install one-liner runs AS this user
+# (it reads $HOME and `id -un`), and sshd is strict about ownership/permissions:
+# home must not be group/world-writable and ~/.ssh must be 700. A fresh
+# adduser-created home is 0755 root-owned-parent which is fine; we tighten the
+# home dir itself to 700 to satisfy StrictModes regardless of distro defaults.
+#
+# The account is created with no password. OpenSSH WITHOUT PAM (alpine's default,
+# UsePAM no) refuses ALL authentication — including pubkey/cert — for an account
+# whose shadow password field is locked ("!", as left by `adduser -D`), logging
+# "User deploy not allowed because account is locked". `passwd -d` clears the
+# field to empty, which unlocks the account for cert auth while password login
+# stays disabled (PermitEmptyPasswords defaults to no).
+RUN adduser -D -s /bin/bash deploy \
+    && passwd -d deploy \
+    && chmod 700 /home/deploy
+
+# Generate host keys for sshd. ssh-keygen -A creates the standard set
+# (ed25519/rsa/ecdsa) under /etc/ssh.
+RUN ssh-keygen -A
+
+# Default OpenSSH on alpine already has PubkeyAuthentication yes and reads
+# ~/.ssh/authorized_keys; the certhold v2 install appends its cert-authority
+# line there, so NO sshd_config change is required. We do NOT modify
+# sshd_config. Expose sshd in the foreground with verbose logging to stderr so
+# `docker compose logs peerN` shows auth decisions during debugging.
+EXPOSE 22
+CMD ["/usr/sbin/sshd", "-D", "-e"]
