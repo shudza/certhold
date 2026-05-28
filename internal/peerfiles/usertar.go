@@ -18,24 +18,7 @@ type UserPeerFiles struct {
 	CAPub           []byte
 	Principals      []string
 	KnownHostsLines []string
-	// Layout selects the on-disk file set. Zero means LayoutV1 (legacy
-	// user-mode). LayoutV2 namespaces the identity files by InstanceKey and
-	// drops the whole-file authorized_keys from the install tarball.
-	Layout      int
-	InstanceKey string
-}
-
-const UserSSHClientConfig = `Host *
-    CertificateFile ~/.ssh/id_ed25519-cert.pub
-    IdentityFile ~/.ssh/id_ed25519
-    UserKnownHostsFile ~/.ssh/known_hosts
-`
-
-func (p UserPeerFiles) layout() int {
-	if p.Layout == 0 {
-		return LayoutV1
-	}
-	return p.Layout
+	InstanceKey     string
 }
 
 // userFileEntry is one file destined for ~user/.ssh/.
@@ -45,29 +28,17 @@ type userFileEntry struct {
 	data []byte
 }
 
-// userFileEntries returns the on-disk file set for the peer's layout. v1 ships
-// the historical five entries (including a whole authorized_keys). v2 ships only
-// the namespaced identity files, known_hosts (TOFU), and the keyed client config;
-// the install script appends the cert-authority line idempotently.
+// userFileEntries returns the on-disk file set for the peer: the namespaced
+// identity files, known_hosts (TOFU), and the keyed client config. The install
+// script appends the cert-authority line from ca_authorized_keys to
+// authorized_keys idempotently (grep-guarded) so multiple instances coexist.
 func userFileEntries(p UserPeerFiles) []userFileEntry {
-	if p.layout() >= LayoutV2 {
-		return []userFileEntry{
-			{V2KeyFileName(p.InstanceKey), 0600, p.PrivKey},
-			{V2CertFileName(p.InstanceKey), 0644, p.CertPub},
-			{"known_hosts", 0644, buildKnownHosts(p.KnownHostsLines)},
-			{"config", 0644, []byte(V2SshClientBlock(p.InstanceKey))},
-			// The full cert-authority line for this instance's CA. The install
-			// script appends it to authorized_keys idempotently (grep-guarded)
-			// rather than clobbering the file, so multiple instances coexist.
-			{"ca_authorized_keys", 0644, buildAuthorizedKeysLine(p.CAPub, p.Principals)},
-		}
-	}
 	return []userFileEntry{
-		{"id_ed25519", 0600, p.PrivKey},
-		{"id_ed25519-cert.pub", 0644, p.CertPub},
-		{"authorized_keys", 0644, buildAuthorizedKeysLine(p.CAPub, p.Principals)},
+		{V2KeyFileName(p.InstanceKey), 0600, p.PrivKey},
+		{V2CertFileName(p.InstanceKey), 0644, p.CertPub},
 		{"known_hosts", 0644, buildKnownHosts(p.KnownHostsLines)},
-		{"config", 0644, []byte(UserSSHClientConfig)},
+		{"config", 0644, []byte(V2SshClientBlock(p.InstanceKey))},
+		{"ca_authorized_keys", 0644, buildAuthorizedKeysLine(p.CAPub, p.Principals)},
 	}
 }
 
@@ -108,11 +79,13 @@ func BuildUser(p UserPeerFiles) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// WriteUserSelfFiles writes the same five files as BuildUser into
-// <dir>/<HomeOf(target_user)>/.ssh/ (e.g. <dir>/root/.ssh/ for root,
-// <dir>/home/alice/.ssh/ for alice). The leading slash from HomeOf is stripped
-// so the result mirrors the on-disk layout the admin would see after running
-// the user-mode install script: `cp -r <dir>/. /` copies straight into place.
+// WriteUserSelfFiles writes the namespaced identity files, known_hosts, keyed
+// config, and a materialized authorized_keys (in place of the install-time
+// ca_authorized_keys append) into <dir>/<HomeOf(target_user)>/.ssh/ (e.g.
+// <dir>/root/.ssh/ for root, <dir>/home/alice/.ssh/ for alice). The leading
+// slash from HomeOf is stripped so the result mirrors the on-disk layout the
+// admin would see after running the user-mode install script: `cp -r <dir>/. /`
+// copies straight into place.
 func WriteUserSelfFiles(dir string, p UserPeerFiles) error {
 	if p.TargetUser == "" {
 		return fmt.Errorf("target user is empty")
@@ -130,9 +103,7 @@ func WriteUserSelfFiles(dir string, p UserPeerFiles) error {
 		}
 		entries = append(entries, e)
 	}
-	if p.layout() >= LayoutV2 {
-		entries = append(entries, userFileEntry{"authorized_keys", 0644, buildAuthorizedKeysLine(p.CAPub, p.Principals)})
-	}
+	entries = append(entries, userFileEntry{"authorized_keys", 0644, buildAuthorizedKeysLine(p.CAPub, p.Principals)})
 	for _, e := range entries {
 		full := filepath.Join(base, e.name)
 		mode := os.FileMode(e.mode)

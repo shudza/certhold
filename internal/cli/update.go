@@ -200,9 +200,9 @@ func selfPushOptions(dataDir string, self selfIdent, peerPassFn func() ([]byte, 
 }
 
 func peerCertRemotePath(p *db.Peer, instanceKey string) string {
-	return peerfiles.PathsFor(p.LayoutVersion, p.Mode, p.TargetUser, instanceKey).Cert
+	return peerfiles.PathsFor(p.TargetUser, instanceKey).Cert
 }
 
 func peerAuthorizedKeysRemotePath(p *db.Peer) string {
-	return peerfiles.PathsFor(p.LayoutVersion, p.Mode, p.TargetUser, "").AuthorizedKeys
+	return peerfiles.PathsFor(p.TargetUser, "").AuthorizedKeys
 }

@@ -113,7 +113,6 @@ func newEnrollCmd() *cobra.Command {
 				CertPub:     certBytes,
 				CAPub:       caObj.PublicKeyAuthorizedKey(),
 				Principals:  groups,
-				Layout:      peerfiles.CurrentLayout,
 				InstanceKey: instanceKey,
 			})
 			if err != nil {

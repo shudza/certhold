@@ -194,7 +194,6 @@ func newInitCmd() *cobra.Command {
 				CertPub:     certBytes,
 				CAPub:       caObj.PublicKeyAuthorizedKey(),
 				Principals:  nil,
-				Layout:      peerfiles.CurrentLayout,
 				InstanceKey: instanceKey,
 			}); err != nil {
 				return fmt.Errorf("write self files: %w", err)

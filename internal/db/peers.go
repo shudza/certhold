@@ -188,18 +188,3 @@ func (db *DB) SetPeerAddressIfEmpty(ctx context.Context, name, address string) e
 	}
 	return nil
 }
-
-func (db *DB) UpdatePeerLastKRL(ctx context.Context, name string, version int) error {
-	res, err := db.sql.ExecContext(ctx, `UPDATE peers SET last_krl_version = ? WHERE name = ?`, version, name)
-	if err != nil {
-		return fmt.Errorf("update peer last_krl_version: %w", err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("update peer last_krl_version rows: %w", err)
-	}
-	if n == 0 {
-		return ErrPeerNotFound
-	}
-	return nil
-}
