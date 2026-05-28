@@ -12,6 +12,7 @@ import (
 
 	"github.com/shudza/certhold/internal/ca"
 	"github.com/shudza/certhold/internal/db"
+	"github.com/shudza/certhold/internal/peerfiles"
 	"github.com/shudza/certhold/internal/sshpush"
 )
 
@@ -153,6 +154,74 @@ func withMockPusherCapturingHost(t *testing.T, gotHost *string) *mockPusher {
 	}
 	t.Cleanup(func() { dialFn = prev })
 	return mp
+}
+
+// withMockPusherCapturingUser installs a dial stub that records the SSH user
+// the push authenticates as, so tests can assert update targets the peer's
+// owning user (not an unconditional root).
+func withMockPusherCapturingUser(t *testing.T, gotUser *string) *mockPusher {
+	t.Helper()
+	mp := &mockPusher{}
+	prev := dialFn
+	dialFn = func(ctx context.Context, host string, opts sshpush.Options) (sshpush.Pusher, error) {
+		*gotUser = opts.User
+		return mp, nil
+	}
+	t.Cleanup(func() { dialFn = prev })
+	return mp
+}
+
+func TestUpdateDialsTargetUserForUserModePeer(t *testing.T) {
+	dataDir := t.TempDir()
+	caObj, err := ca.Generate(filepath.Join(dataDir, "ca"))
+	if err != nil {
+		t.Fatalf("ca.Generate: %v", err)
+	}
+	_, pubAuth, sshPub, err := ca.GeneratePeerKey()
+	if err != nil {
+		t.Fatalf("GeneratePeerKey: %v", err)
+	}
+	_, serial, err := caObj.SignCert(ca.SignOptions{Pubkey: sshPub, KeyID: "web01", Principals: []string{"web01", "web"}})
+	if err != nil {
+		t.Fatalf("SignCert: %v", err)
+	}
+	dbPath := filepath.Join(dataDir, "state.db")
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	ctx := context.Background()
+	if err := d.InsertPeerWithMode(ctx, "web01", serial, ssh.FingerprintSHA256(sshPub), pubAuth, db.ModeUser, "deploy", peerfiles.CurrentLayout); err != nil {
+		t.Fatalf("InsertPeerWithMode: %v", err)
+	}
+	if err := d.EnsureGroup(ctx, "web"); err != nil {
+		t.Fatalf("EnsureGroup: %v", err)
+	}
+	if err := d.SetPeerGroups(ctx, "web01", []string{"web"}); err != nil {
+		t.Fatalf("SetPeerGroups: %v", err)
+	}
+	d.Close()
+
+	var gotUser string
+	withMockPusherCapturingUser(t, &gotUser)
+	if _, stderr, err := runUpdate(t, dataDir, dbPath, "web01", "--groups", "web"); err != nil {
+		t.Fatalf("update: err=%v stderr=%s", err, stderr)
+	}
+	if gotUser != "deploy" {
+		t.Errorf("dialed user = %q, want deploy (user-mode peer's owning user)", gotUser)
+	}
+}
+
+func TestUpdateDialsRootForRootModePeer(t *testing.T) {
+	dataDir, dbPath, _ := setupUpdateEnv(t, "peer1", []string{"oldA"}, false)
+	var gotUser string
+	withMockPusherCapturingUser(t, &gotUser)
+	if _, stderr, err := runUpdate(t, dataDir, dbPath, "peer1", "--groups", "newA"); err != nil {
+		t.Fatalf("update: err=%v stderr=%s", err, stderr)
+	}
+	if gotUser != "root" {
+		t.Errorf("dialed user = %q, want root (root-mode peer)", gotUser)
+	}
 }
 
 func TestUpdateDialsAddressWhenNoHostFlag(t *testing.T) {

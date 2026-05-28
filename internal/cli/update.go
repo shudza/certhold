@@ -119,7 +119,9 @@ func newUpdateCmd() *cobra.Command {
 				return fmt.Errorf("ensure instance key: %w", err)
 			}
 
-			pusher, err := dialFn(ctx, host, selfPushOptions(dataDir, resolveSelfIdent(ctx, d), peerUnlock.get))
+			pushOpts := selfPushOptions(dataDir, resolveSelfIdent(ctx, d), peerUnlock.get)
+			pushOpts.User = pushUser(peer)
+			pusher, err := dialFn(ctx, host, pushOpts)
 			if err != nil {
 				return fmt.Errorf("ssh dial %s: %w", host, err)
 			}
