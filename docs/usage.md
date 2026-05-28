@@ -37,18 +37,13 @@ CA key, so it can run as an unprivileged, network-facing service.
 
 ### Activating the manager as a peer
 
-`init` writes certhold's own peer files under `<data-dir>/self/`, but does not
-install them into the manager host's live SSH config. The manager uses those
-files directly for its outbound pushes, so the fleet works without this step —
-but to make the manager itself reachable as a peer (or to use the issued cert
-for ordinary `ssh` from it), put the self files in place:
-
-- **User mode:** copy the contents of `<data-dir>/self/<home>/.ssh/` into the
-  real `~<user>/.ssh/`.
-- **Root mode:** splice `<data-dir>/self/etc/ssh/sshd_config_block.conf` and
-  `ssh_config_block.conf` into `/etc/ssh/sshd_config` and `/etc/ssh/ssh_config`
-  (verbatim, between the `# BEGIN certhold` / `# END certhold` sentinels), copy
-  the remaining `self/etc/ssh/` files into `/etc/ssh/`, then reload `sshd`.
+`init` writes certhold's own peer files under `<data-dir>/self/<home>/.ssh/`, but
+does not install them into the manager host's live SSH config. The manager uses
+those files directly for its outbound pushes, so the fleet works without this
+step — but to make the manager itself reachable as a peer (or to use the issued
+cert for ordinary `ssh` from it), copy the contents of
+`<data-dir>/self/<home>/.ssh/` into the real `~/.ssh/` of the matching user
+(`<data-dir>/self/root/.ssh/` → `/root/.ssh/` when `init --user root`).
 
 ## Onboarding a peer
 
@@ -71,21 +66,24 @@ What happens under the hood:
   `--groups`), builds the install tarball, and stores it against the token row.
   This **sign-at-mint** step is the only thing that touches the CA key.
 - The peer's `curl … | bash` fetches a small install script, then the tarball,
-  unpacks it into place, and (in root mode only) splices the `sshd` config and
-  reloads. In user mode nothing system-wide changes and there is no reload.
+  unpacks it into the invoking user's `~/.ssh/`, appends the `cert-authority`
+  line, and splices the keyed `~/.ssh/config` block. Nothing system-wide changes
+  and there is no `sshd` reload.
 
-The one-liner is identical for both modes — the mode is recorded on the token,
-and the server emits the right script. The `-k` accepts the self-signed TLS
-cert; the enrollment token is the real authentication.
+The `-k` accepts the self-signed TLS cert; the enrollment token is the real
+authentication.
 
-### Modes and the install user
+### The install user (and managing root)
 
-- `--mode user` (default) installs under `~<user>/.ssh`; `--mode root` installs
-  under `/etc/ssh`. See [architecture.md](architecture.md#operating-modes).
-- In user mode the install user is, by default, **reported by the peer** at
-  install time (`id -un`) and recorded back on the peer row. Pass
-  `enroll --user <name>` to **pin** it: the install request must then match, or
-  the server rejects it (the token is preserved, so it can be retried).
+- The install targets the **invoking user's** `~/.ssh` — the script reads `$HOME`
+  and `id -un`. Running it as `alice` targets `/home/alice/.ssh`; running it **as
+  root** targets `/root/.ssh`.
+- By default that user is **reported by the peer** at install time and recorded
+  on the peer row (`target_user`). Pass `enroll --user <name>` to **pin** it: the
+  install request must then match, or the server rejects it (the token is
+  preserved, so it can be retried).
+- **To manage root, enroll with `--user root` and run the one-liner as root.**
+  There is no separate mode; root is just a target user whose home is `/root`.
 
 ### Name vs. address
 
@@ -107,8 +105,8 @@ not trusted, so behind a proxy or NAT use `enroll --address` explicitly).
   inspected, **not consumed**.
 - **`GET /enroll/<token>`** — streams the pre-built tarball and **consumes** the
   token (the stored bundle is cleared in the same step, so it cannot be
-  re-downloaded). User-mode requests carry a `?user=` parameter, added by the
-  install script.
+  re-downloaded). The request carries a `?user=` parameter (the invoking user),
+  added by the install script.
 
 Status codes:
 
@@ -116,7 +114,7 @@ Status codes:
 |---|---|
 | missing token | `400` |
 | token not found | `404` |
-| user mode: missing / invalid / mismatched `?user=` | `400` (token preserved) |
+| missing / invalid / mismatched `?user=` | `400` (token preserved) |
 | token already consumed (re-fetch) | `410` |
 | otherwise | `200` |
 
@@ -145,7 +143,7 @@ Which keys each command unlocks is summarized in
 ### `init`
 
 ```
-certhold init [--hostname <name>] [--mode user|root] [--user <name>]
+certhold init [--hostname <name>] [--user <name>]
               [--listen-ip <ip>] [--port <port>] [--no-prompt]
               [--no-passphrase] [--separate-passphrases]
 ```
@@ -156,8 +154,7 @@ Generates the CA, self-enrolls the manager, picks the enroll interface, persists
 | Flag | Default | Meaning |
 |---|---|---|
 | `--hostname` | OS hostname | Manager peer name (cert key-id and a principal). |
-| `--mode` | `user` | Mode for the manager's own files. |
-| `--user` | current OS user (user mode) | Unix user owning the manager's `~/.ssh`. Forced empty in root mode. |
+| `--user` | current OS user | Unix user owning the manager's `~/.ssh` files; `--user root` puts them under `/root/.ssh`. |
 | `--listen-ip` | — | IPv4 peers reach the manager on; skips the interactive interface picker. |
 | `--port` | `8443` | Port baked into the persisted base URL. |
 | `--no-prompt` | `false` | Fail instead of prompting for the interface (auto-selects a sole candidate). |
@@ -171,8 +168,8 @@ is given.
 ### `enroll`
 
 ```
-certhold enroll <name> --groups <a,b,c> [--base-url URL] [--mode user|root]
-                [--user <name>] [--address <host>] [--hostname <name>]
+certhold enroll <name> --groups <a,b,c> [--base-url URL]
+                [--user <name>] [--address <host>]
 ```
 
 Mints a one-time token, signs the peer cert (sign-at-mint), builds and stores the
@@ -184,10 +181,11 @@ a peer of that name already exists. No SSH push — the peer pulls its tarball f
 |---|---|---|
 | `--groups` | — (**required**) | Comma-separated groups for the new peer (≥1, deduped). |
 | `--base-url` | persisted / fallback | Enroll base URL for the one-liner. Precedence: flag > `$CERTHOLD_BASE_URL` > the `base_url` persisted by `init` > `https://certhold.home.lan`. |
-| `--mode` | `user` | Install mode for the peer's tarball. |
-| `--user` | — | Pin the install user (user mode only); a hard constraint at install time. |
+| `--user` | — | Pin the install user; a hard constraint at install time. Use `--user root` (and run the one-liner as root) to manage `/root/.ssh`. |
 | `--address` | — | Network address (host or IP) certhold dials to reach this peer. Defaults to the source IP seen at install, then the peer name. See [Name vs. address](#name-vs-address). |
-| `--hostname` | OS hostname | Host label for the root-mode `@cert-authority` entry. |
+
+(`--hostname` is accepted but unused under the current layout — host trust is
+TOFU `known_hosts`, so there is no host-label entry to set.)
 
 Unlocks the CA key (to sign); no manager-key prompt, since `enroll` does not push.
 
@@ -198,9 +196,9 @@ certhold list [--peers | --groups]
 ```
 
 Reads local state and prints a table. No push, no passphrase. Default (or
-`--peers`): `NAME GROUPS ALLOWED REVOKED LAST_KRL`. `--groups`: groups with peer
-counts. `GROUPS` is the peer's own membership; `ALLOWED` is who may connect into
-it (see [data-model.md](data-model.md)).
+`--peers`): `NAME GROUPS ALLOWED REVOKED`. `--groups`: groups with peer counts.
+`GROUPS` is the peer's own membership; `ALLOWED` is who may connect into it (see
+[data-model.md](data-model.md)).
 
 ### `update`
 
@@ -208,9 +206,9 @@ it (see [data-model.md](data-model.md)).
 certhold update <name> --groups <a,b,d> [--host HOST]
 ```
 
-Reissues the peer's cert with a new group set, then SSHes in and pushes the new
-cert. Root-mode peers also get an `sshd` reload; user-mode peers do not. Runs a
-post-push health check. Errors if the peer is unknown or revoked.
+Reissues the peer's cert with a new group set, then SSHes in (as the peer's
+`target_user`) and pushes the new cert. No `sshd` reload. Runs a post-push health
+check. Errors if the peer is unknown or revoked.
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -227,10 +225,10 @@ certhold group disallow <group> --on <peer> [--host HOST]
 ```
 
 Changes which groups may **connect into** a peer (its inbound allow-list),
-without reissuing the peer's cert. `allow` adds, `disallow` removes; both push
-the rewritten trust file and run a health check (root mode also reloads `sshd`).
-Idempotent — a no-op exits without pushing. `manager` is always implicit and
-cannot be removed.
+without reissuing the peer's cert. `allow` adds, `disallow` removes; both rewrite
+the `principals="…"` value on the peer's `authorized_keys` `cert-authority` line,
+push it, and run a health check (no `sshd` reload). Idempotent — a no-op exits
+without pushing. `manager` is always implicit and cannot be removed.
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -245,14 +243,15 @@ Unlocks the manager peer key only (no CA signing).
 certhold revoke <name> [--hostname <manager-name>]
 ```
 
-Marks the peer revoked, then cuts its cert off across the fleet. The mechanism
-depends on the revoked peer's mode — root-mode peers get a KRL push, user-mode
-peers force a partial CA rekey. Full mechanics and the mixed-fleet caveats are in
+Marks the peer revoked, then cuts its cert off across the fleet by forcing a
+**partial CA rekey**: the CA is rotated and every other peer is reissued, while
+the revoked peer is excluded so its old-CA cert stops being accepted as the new
+CA propagates. Full mechanics are in
 [revocation](maintenance-and-operations.md#revocation).
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--hostname` | OS hostname | Manager's own peer name; used only on the user-mode rekey path. |
+| `--hostname` | OS hostname | Manager's own peer name (must match the self row); the rekey rotates it last. |
 
 Unlocks the CA key and the manager peer key.
 
@@ -296,7 +295,6 @@ db; never touches the CA key or prompts for a passphrase.
 
 | Symptom | Likely cause |
 |---|---|
-| `revoke` errors with `ssh-keygen not found` (root-mode peers) | Install `openssh-client` on the manager — KRL generation shells out to `ssh-keygen`. |
-| Push fails with `ssh: handshake failed` | The peer's host key changed; update the manager's host-trust file (`known_hosts` / `ca_known_hosts`). |
-| `update` / `group` health check fails on a user-mode peer | Inspect the peer's `~<user>/.ssh/authorized_keys` and `id_ed25519-cert.pub`, and check `sshd`'s logs for auth errors. |
+| Push fails with `ssh: handshake failed` | The peer's host key changed (or was never seeded); update the manager's `known_hosts` — see [maintenance-and-operations.md](maintenance-and-operations.md#host-key-trust-on-the-push). |
+| `update` / `group` health check fails | Inspect the peer's `~<user>/.ssh/authorized_keys` and `id_ed25519_<key>-cert.pub`, and check `sshd`'s logs for auth errors. For a `--user root` peer also confirm the account isn't password-locked and `PermitRootLogin` allows pubkey/cert. |
 | `init` errors `state db already exists` | A `state.db` is already present; move it aside or use a different `--data-dir` / `--db`. |

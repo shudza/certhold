@@ -6,8 +6,9 @@ holding a CA-signed certificate; access is granted by group-principal matching,
 enforced natively by `sshd`.
 
 - [architecture.md](architecture.md) — the trust model (one CA, the `manager`
-  principal, no-expiry certs), the two components, the data directory, operating
-  modes (user vs root), and OpenSSH/host requirements.
+  principal, no-expiry certs, the single user-level trust model where managing
+  root is `--user root`), the two components, the data directory, and OpenSSH/host
+  requirements.
 - [usage.md](usage.md) — installing, bootstrapping the manager, onboarding peers,
   and the full command reference with flags and environment variables.
 - [maintenance-and-operations.md](maintenance-and-operations.md) — the push
@@ -15,7 +16,7 @@ enforced natively by `sshd`.
   recovery semantics).
 - [data-model.md](data-model.md) — the SQLite schema.
 - [peer-file-layout.md](peer-file-layout.md) — the exact files installed on a
-  peer in each mode, and the sentinel config blocks.
+  peer under the target user's `~/.ssh/`, and the keyed `config` block.
 - [security.md](security.md) — trust-root blast radius, at-rest passphrase
   protection, the prompt matrix, the install-side per-peer passphrase, and
   `--no-passphrase`.
