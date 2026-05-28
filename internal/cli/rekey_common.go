@@ -101,7 +101,6 @@ func runRekeyCore(ctx context.Context, deps rekeyDeps, exclude map[string]bool) 
 	newCAPub := newCA.PublicKeyAuthorizedKey()
 
 	pushOpts := selfPushOptions(deps.DataDir, selfIdent{
-		layout:      self.LayoutVersion,
 		targetUser:  selfHomeUser(self),
 		instanceKey: instanceKey,
 		resolved:    true,
@@ -285,11 +284,9 @@ func caKeyEncrypted(caDir string) (bool, error) {
 	return false, fmt.Errorf("parse ca key: %w", err)
 }
 
-// pushPeerRekey delivers the new CA + cert to a single peer, branching on the
-// peer's layout/mode. v2 (both modes) and v1 user mode swap this instance's
-// cert-authority line in <home>/.ssh/authorized_keys (preserving any other
-// instance's lines) and push the namespaced cert; no reload. Legacy v1 root
-// pushes ca.pub + cert and reloads sshd.
+// pushPeerRekey delivers the new CA + cert to a single peer. It swaps this
+// instance's cert-authority line in <home>/.ssh/authorized_keys (preserving any
+// other instance's lines) and pushes the namespaced cert; no reload.
 func pushPeerRekey(ctx context.Context, dial func(context.Context, string, sshpush.Options) (sshpush.Pusher, error), p *db.Peer, oldCAPub ssh.PublicKey, newCAPub []byte, instanceKey string, certBytes []byte, allowed []string, opts sshpush.Options) error {
 	if p.Name == "" {
 		return errors.New("empty host")
@@ -300,36 +297,18 @@ func pushPeerRekey(ctx context.Context, dial func(context.Context, string, sshpu
 	}
 	defer cl.Close()
 
-	if p.Mode == db.ModeUser || p.LayoutVersion >= peerfiles.LayoutV2 {
-		akPath := peerAuthorizedKeysRemotePath(p)
-		newLine := userAuthorizedKeysLine(newCAPub, allowed)
-		var akContent []byte
-		if p.LayoutVersion >= peerfiles.LayoutV2 {
-			existing, err := cl.ReadFile(ctx, akPath)
-			if err != nil {
-				return fmt.Errorf("read authorized_keys: %w", err)
-			}
-			akContent = peerfiles.ReplaceCALine(existing, oldCAPub, newLine)
-		} else {
-			akContent = newLine
-		}
-		if err := cl.WriteFileAtomic(ctx, akPath, akContent, fs.FileMode(0644)); err != nil {
-			return fmt.Errorf("write authorized_keys: %w", err)
-		}
-		if err := cl.WriteFileAtomic(ctx, peerCertRemotePath(p, instanceKey), certBytes, fs.FileMode(0644)); err != nil {
-			return fmt.Errorf("write peer cert: %w", err)
-		}
-	} else {
-		paths := peerfiles.PathsFor(p.LayoutVersion, p.Mode, p.TargetUser, "")
-		if err := cl.WriteFileAtomic(ctx, paths.CAPub, newCAPub, fs.FileMode(0644)); err != nil {
-			return fmt.Errorf("write ca.pub: %w", err)
-		}
-		if err := cl.WriteFileAtomic(ctx, paths.Cert, certBytes, fs.FileMode(0644)); err != nil {
-			return fmt.Errorf("write peer cert: %w", err)
-		}
-		if err := cl.ReloadSSHD(ctx); err != nil {
-			return fmt.Errorf("reload sshd: %w", err)
-		}
+	akPath := peerAuthorizedKeysRemotePath(p)
+	newLine := userAuthorizedKeysLine(newCAPub, allowed)
+	existing, err := cl.ReadFile(ctx, akPath)
+	if err != nil {
+		return fmt.Errorf("read authorized_keys: %w", err)
+	}
+	akContent := peerfiles.ReplaceCALine(existing, oldCAPub, newLine)
+	if err := cl.WriteFileAtomic(ctx, akPath, akContent, fs.FileMode(0644)); err != nil {
+		return fmt.Errorf("write authorized_keys: %w", err)
+	}
+	if err := cl.WriteFileAtomic(ctx, peerCertRemotePath(p, instanceKey), certBytes, fs.FileMode(0644)); err != nil {
+		return fmt.Errorf("write peer cert: %w", err)
 	}
 	if err := cl.VerifyHealth(ctx); err != nil {
 		return fmt.Errorf("verify health: %w", err)
@@ -378,47 +357,18 @@ func trimTrailingNewline(b []byte) []byte {
 }
 
 func writeSelfRekey(dataDir string, self *db.Peer, oldCAPub ssh.PublicKey, newCAPub []byte, instanceKey string, selfCert []byte) error {
-	if self.LayoutVersion >= peerfiles.LayoutV2 {
-		homeRel := strings.TrimPrefix(peerfiles.HomeOf(selfHomeUser(self)), "/")
-		base := filepath.Join(dataDir, "self", homeRel, ".ssh")
-		if err := os.MkdirAll(base, 0700); err != nil {
-			return err
-		}
-		newLine := userAuthorizedKeysLine(newCAPub, nil)
-		akPath := filepath.Join(base, "authorized_keys")
-		existing, _ := os.ReadFile(akPath)
-		if err := writeFileAtomicLocal(akPath, peerfiles.ReplaceCALine(existing, oldCAPub, newLine), 0644); err != nil {
-			return fmt.Errorf("write self authorized_keys: %w", err)
-		}
-		if err := writeFileAtomicLocal(filepath.Join(base, peerfiles.V2CertFileName(instanceKey)), selfCert, 0644); err != nil {
-			return fmt.Errorf("write self cert: %w", err)
-		}
-		return nil
+	homeRel := strings.TrimPrefix(peerfiles.HomeOf(selfHomeUser(self)), "/")
+	base := filepath.Join(dataDir, "self", homeRel, ".ssh")
+	if err := os.MkdirAll(base, 0700); err != nil {
+		return err
 	}
-	paths := peerfiles.PathsFor(self.LayoutVersion, self.Mode, self.TargetUser, "")
-	if self.Mode == db.ModeUser {
-		user := self.TargetUser
-		if user == "" {
-			user = "root"
-		}
-		base := filepath.Join(dataDir, "self", "home", user, ".ssh")
-		if err := os.MkdirAll(base, 0700); err != nil {
-			return err
-		}
-		ak := userAuthorizedKeysLine(newCAPub, nil)
-		if err := writeFileAtomicLocal(filepath.Join(base, filepath.Base(paths.AuthorizedKeys)), ak, 0644); err != nil {
-			return fmt.Errorf("write self authorized_keys: %w", err)
-		}
-		if err := writeFileAtomicLocal(filepath.Join(base, filepath.Base(paths.Cert)), selfCert, 0644); err != nil {
-			return fmt.Errorf("write self cert: %w", err)
-		}
-		return nil
+	newLine := userAuthorizedKeysLine(newCAPub, nil)
+	akPath := filepath.Join(base, "authorized_keys")
+	existing, _ := os.ReadFile(akPath)
+	if err := writeFileAtomicLocal(akPath, peerfiles.ReplaceCALine(existing, oldCAPub, newLine), 0644); err != nil {
+		return fmt.Errorf("write self authorized_keys: %w", err)
 	}
-	selfSSHDir := filepath.Join(dataDir, "self", "etc", "ssh")
-	if err := writeFileAtomicLocal(filepath.Join(selfSSHDir, filepath.Base(paths.CAPub)), newCAPub, 0644); err != nil {
-		return fmt.Errorf("write self ca.pub: %w", err)
-	}
-	if err := writeFileAtomicLocal(filepath.Join(selfSSHDir, filepath.Base(paths.Cert)), selfCert, 0644); err != nil {
+	if err := writeFileAtomicLocal(filepath.Join(base, peerfiles.V2CertFileName(instanceKey)), selfCert, 0644); err != nil {
 		return fmt.Errorf("write self cert: %w", err)
 	}
 	return nil

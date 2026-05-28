@@ -56,7 +56,7 @@ func runListPeers(ctx context.Context, cmd *cobra.Command, d *db.DB) error {
 		return err
 	}
 	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME \tGROUPS \tALLOWED \tREVOKED \tLAST_KRL")
+	fmt.Fprintln(w, "NAME \tGROUPS \tALLOWED \tREVOKED")
 	for _, p := range peers {
 		gs, err := d.GetPeerGroups(ctx, p.Name)
 		if err != nil {
@@ -70,8 +70,8 @@ func runListPeers(ctx context.Context, cmd *cobra.Command, d *db.DB) error {
 		if p.Revoked {
 			revoked = "Y"
 		}
-		fmt.Fprintf(w, "%s \t%s \t%s \t%s \t%d\n",
-			p.Name, strings.Join(gs, ","), strings.Join(as, ","), revoked, p.LastKRLVersion)
+		fmt.Fprintf(w, "%s \t%s \t%s \t%s\n",
+			p.Name, strings.Join(gs, ","), strings.Join(as, ","), revoked)
 	}
 	return w.Flush()
 }

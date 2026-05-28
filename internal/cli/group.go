@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io/fs"
 	"path/filepath"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
@@ -143,39 +142,27 @@ func runGroupAction(cmd *cobra.Command, group string, allow bool) error {
 	}
 	defer pusher.Close()
 
-	// v2 (both modes) and v1 user mode carry inbound trust in
-	// <home>/.ssh/authorized_keys, isolated per CA — rewrite it in place, no
-	// reload. Only legacy v1 root uses the global auth_principals/root file.
-	if peer.Mode == db.ModeUser || peer.LayoutVersion >= peerfiles.LayoutV2 {
-		caPubBytes, err := ca.LoadPublicKey(filepath.Join(dataDir, "ca"))
-		if err != nil {
-			return fmt.Errorf("load ca public key: %w", err)
-		}
-		caPub, _, _, _, err := ssh.ParseAuthorizedKey(caPubBytes)
-		if err != nil {
-			return fmt.Errorf("parse ca pubkey: %w", err)
-		}
-		remote := peerAuthorizedKeysRemotePath(peer)
-		existing, err := pusher.ReadFile(ctx, remote)
-		if err != nil {
-			return fmt.Errorf("read %s: %w", remote, err)
-		}
-		newContent, err := peerfiles.RewritePrincipals(existing, caPub, current)
-		if err != nil {
-			return fmt.Errorf("rewrite authorized_keys: %w", err)
-		}
-		if err := pusher.WriteFileAtomic(ctx, remote, newContent, fs.FileMode(0644)); err != nil {
-			return fmt.Errorf("write %s: %w", remote, err)
-		}
-	} else {
-		authPrincipalsRootPath := peerfiles.PathsFor(peer.LayoutVersion, peer.Mode, peer.TargetUser, "").AuthorizedKeys
-		content := renderAuthPrincipalsRoot(current)
-		if err := pusher.WriteFileAtomic(ctx, authPrincipalsRootPath, []byte(content), fs.FileMode(0644)); err != nil {
-			return fmt.Errorf("write %s: %w", authPrincipalsRootPath, err)
-		}
-		if err := pusher.ReloadSSHD(ctx); err != nil {
-			return fmt.Errorf("reload sshd: %w", err)
-		}
+	// Inbound trust lives in <home>/.ssh/authorized_keys, isolated per CA —
+	// rewrite it in place, no reload.
+	caPubBytes, err := ca.LoadPublicKey(filepath.Join(dataDir, "ca"))
+	if err != nil {
+		return fmt.Errorf("load ca public key: %w", err)
+	}
+	caPub, _, _, _, err := ssh.ParseAuthorizedKey(caPubBytes)
+	if err != nil {
+		return fmt.Errorf("parse ca pubkey: %w", err)
+	}
+	remote := peerAuthorizedKeysRemotePath(peer)
+	existing, err := pusher.ReadFile(ctx, remote)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", remote, err)
+	}
+	newContent, err := peerfiles.RewritePrincipals(existing, caPub, current)
+	if err != nil {
+		return fmt.Errorf("rewrite authorized_keys: %w", err)
+	}
+	if err := pusher.WriteFileAtomic(ctx, remote, newContent, fs.FileMode(0644)); err != nil {
+		return fmt.Errorf("write %s: %w", remote, err)
 	}
 	if err := pusher.VerifyHealth(ctx); err != nil {
 		return fmt.Errorf("verify health: %w", err)
@@ -197,16 +184,6 @@ func pushUser(p *db.Peer) string {
 		return "root"
 	}
 	return "root"
-}
-
-func renderAuthPrincipalsRoot(groups []string) string {
-	var b strings.Builder
-	b.WriteString("manager\n")
-	for _, g := range groups {
-		b.WriteString(g)
-		b.WriteString("\n")
-	}
-	return b.String()
 }
 
 func contains(xs []string, v string) bool {

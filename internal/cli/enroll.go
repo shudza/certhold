@@ -36,19 +36,9 @@ func newEnrollCmd() *cobra.Command {
 			}
 			baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "\n/")
 
-			mode, err := cmd.Flags().GetString("mode")
-			if err != nil {
-				return err
-			}
-			if mode != db.ModeUser && mode != db.ModeRoot {
-				return fmt.Errorf("--mode must be 'user' or 'root', got %q", mode)
-			}
 			targetUser, err := cmd.Flags().GetString("user")
 			if err != nil {
 				return err
-			}
-			if mode == db.ModeRoot {
-				targetUser = ""
 			}
 			address, err := cmd.Flags().GetString("address")
 			if err != nil {
@@ -117,15 +107,8 @@ func newEnrollCmd() *cobra.Command {
 
 			fingerprint := ssh.FingerprintSHA256(sshPub)
 
-			// Newly enrolled peers are layout v2 for BOTH modes: root mode is
-			// implemented as user-mode trust targeting /root, so the tarball
-			// is always the namespaced user-style file set.
-			tarballUser := targetUser
-			if mode == db.ModeRoot {
-				tarballUser = "root"
-			}
 			tarball, err := peerfiles.BuildUser(peerfiles.UserPeerFiles{
-				TargetUser:  tarballUser,
+				TargetUser:  targetUser,
 				PrivKey:     priv,
 				CertPub:     certBytes,
 				CAPub:       caObj.PublicKeyAuthorizedKey(),
@@ -143,10 +126,10 @@ func newEnrollCmd() *cobra.Command {
 			}
 
 			if err := d.WithTx(ctx, func(tx *db.Tx) error {
-				if err := tx.InsertTokenWithMode(ctx, tok, name, strings.Join(groups, ","), mode, targetUser, tarball); err != nil {
+				if err := tx.InsertTokenWithMode(ctx, tok, name, strings.Join(groups, ","), db.ModeUser, targetUser, tarball); err != nil {
 					return err
 				}
-				if err := tx.InsertPeerWithMode(ctx, name, serial, fingerprint, pubAuth, mode, targetUser, peerfiles.CurrentLayout); err != nil {
+				if err := tx.InsertPeerWithMode(ctx, name, serial, fingerprint, pubAuth, db.ModeUser, targetUser, peerfiles.CurrentLayout); err != nil {
 					return fmt.Errorf("insert peer: %w", err)
 				}
 				if address != "" {
@@ -177,8 +160,7 @@ func newEnrollCmd() *cobra.Command {
 
 	cmd.Flags().String("groups", "", "comma-separated list of groups for the new peer (required)")
 	cmd.Flags().String("base-url", legacyBaseURL, "base URL of certhold's enroll endpoint (defaults to value persisted by `init`, then $CERTHOLD_BASE_URL, then https://certhold.home.lan)")
-	cmd.Flags().String("mode", db.ModeUser, "install mode: 'user' (default, files under ~user/.ssh) or 'root' (files under /etc/ssh)")
-	cmd.Flags().String("user", "", "Unix user owning the ~/.ssh files; when set, acts as a hard constraint at install time (only meaningful with --mode=user)")
+	cmd.Flags().String("user", "", "Unix user owning the ~/.ssh files; when set, acts as a hard constraint at install time (--user root targets /root/.ssh)")
 	cmd.Flags().String("hostname", "", "deprecated/unused under layout v2 (host trust is TOFU known_hosts)")
 	cmd.Flags().String("address", "", "network address (host or IP) certhold uses to SSH to this peer; defaults to the source IP seen at install, then the peer name")
 	_ = cmd.MarkFlagRequired("groups")

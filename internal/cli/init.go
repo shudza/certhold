@@ -66,20 +66,11 @@ func newInitCmd() *cobra.Command {
 				}
 				hostname = h
 			}
-			mode, err := cmd.Flags().GetString("mode")
-			if err != nil {
-				return fmt.Errorf("get mode: %w", err)
-			}
-			if mode != db.ModeUser && mode != db.ModeRoot {
-				return fmt.Errorf("--mode must be 'user' or 'root', got %q", mode)
-			}
 			targetUser, err := cmd.Flags().GetString("user")
 			if err != nil {
 				return fmt.Errorf("get user: %w", err)
 			}
-			if mode == db.ModeRoot {
-				targetUser = ""
-			} else if !cmd.Flags().Changed("user") {
+			if !cmd.Flags().Changed("user") {
 				targetUser = currentUsername()
 			}
 
@@ -186,7 +177,7 @@ func newInitCmd() *cobra.Command {
 
 			fingerprint := ssh.FingerprintSHA256(sshPub)
 
-			if err := database.InsertPeerWithMode(ctx, hostname, serial, fingerprint, pubAuth, mode, targetUser, peerfiles.CurrentLayout); err != nil {
+			if err := database.InsertPeerWithMode(ctx, hostname, serial, fingerprint, pubAuth, db.ModeUser, targetUser, peerfiles.CurrentLayout); err != nil {
 				return fmt.Errorf("insert peer: %w", err)
 			}
 			if err := database.EnsureGroup(ctx, "manager"); err != nil {
@@ -196,16 +187,9 @@ func newInitCmd() *cobra.Command {
 				return fmt.Errorf("set allowed groups: %w", err)
 			}
 
-			// Layout v2 converges both modes onto the user-mode trust model:
-			// the manager's own outbound identity lives under <home>/.ssh/ with
-			// namespaced files. Root mode resolves the home of "root" (/root).
 			selfDir := filepath.Join(dataDir, "self")
-			selfUser := targetUser
-			if mode == db.ModeRoot {
-				selfUser = "root"
-			}
 			if err := peerfiles.WriteUserSelfFiles(selfDir, peerfiles.UserPeerFiles{
-				TargetUser:  selfUser,
+				TargetUser:  targetUser,
 				PrivKey:     priv,
 				CertPub:     certBytes,
 				CAPub:       caObj.PublicKeyAuthorizedKey(),
@@ -230,10 +214,7 @@ func newInitCmd() *cobra.Command {
 			fmt.Fprintf(out, "certhold initialized\n")
 			fmt.Fprintf(out, "  data-dir:       %s\n", dataDir)
 			fmt.Fprintf(out, "  db:             %s\n", dbPath)
-			fmt.Fprintf(out, "  mode:           %s\n", mode)
-			if mode == db.ModeUser {
-				fmt.Fprintf(out, "  target user:    %s\n", targetUser)
-			}
+			fmt.Fprintf(out, "  target user:    %s\n", targetUser)
 			fmt.Fprintf(out, "  ca fingerprint: %s\n", caFingerprint)
 			fmt.Fprintf(out, "  self files:     %s\n", selfDir)
 			fmt.Fprintf(out, "  base url:       %s\n", baseURL)
@@ -241,8 +222,7 @@ func newInitCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().String("hostname", "", "hostname to use as the certhold peer name (default: os.Hostname())")
-	cmd.Flags().String("mode", db.ModeUser, "install mode for the manager's own self files: 'user' (default) or 'root'")
-	cmd.Flags().String("user", "root", "Unix user that owns the manager's ~/.ssh files (defaults to the OS user running certhold when --mode=user; only meaningful in user mode)")
+	cmd.Flags().String("user", "root", "Unix user that owns the manager's ~/.ssh files (defaults to the OS user running certhold; --user root targets /root/.ssh)")
 	cmd.Flags().String("listen-ip", "", "IPv4 of the interface peers will reach certhold on (skip prompt)")
 	cmd.Flags().Int("port", 8443, "port the enroll endpoint listens on (used in the persisted base-url)")
 	cmd.Flags().Bool("no-prompt", false, "fail instead of prompting; pass --listen-ip to choose explicitly")
