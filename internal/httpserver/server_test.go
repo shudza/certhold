@@ -158,6 +158,87 @@ func extractTarball(t *testing.T, body []byte) map[string][]byte {
 	return out
 }
 
+// newRemoteAddrServer wraps the enroll handler so every request presents a
+// fixed RemoteAddr. httptest's own client connects over loopback, so to assert a
+// deterministic source IP for the install-time backfill we override RemoteAddr in
+// a wrapper rather than depend on the OS-assigned ephemeral loopback port.
+func newRemoteAddrServer(t *testing.T, d *db.DB, remoteAddr string) *httptest.Server {
+	t.Helper()
+	inner := New(d)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.RemoteAddr = remoteAddr
+		inner.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestEnrollBackfillsAddressFromRemoteAddr(t *testing.T) {
+	env := setupTestEnv(t)
+	ctx := context.Background()
+	srv := newRemoteAddrServer(t, env.db, "203.0.113.7:54321")
+
+	const tok = "tok-backfill"
+	tb := env.seedRootTarball(t, "vmBF", []string{"infra"})
+	env.seedPeerRow(t, "vmBF", db.ModeRoot, "")
+	if err := env.db.InsertTokenWithMode(ctx, tok, "vmBF", "infra", db.ModeRoot, "", tb); err != nil {
+		t.Fatalf("InsertTokenWithMode: %v", err)
+	}
+
+	resp, err := http.Get(srv.URL + "/enroll/" + tok)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	peer, err := env.db.GetPeer(ctx, "vmBF")
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if peer.Address != "203.0.113.7" {
+		t.Errorf("Address = %q, want 203.0.113.7 (host of RemoteAddr)", peer.Address)
+	}
+}
+
+func TestEnrollDoesNotOverwriteExplicitAddress(t *testing.T) {
+	env := setupTestEnv(t)
+	ctx := context.Background()
+	srv := newRemoteAddrServer(t, env.db, "203.0.113.7:54321")
+
+	const tok = "tok-explicit-addr"
+	tb := env.seedRootTarball(t, "vmEA", []string{"infra"})
+	env.seedPeerRow(t, "vmEA", db.ModeRoot, "")
+	// Simulate enroll --address: an explicit address already on the peer row.
+	if err := env.db.SetPeerAddress(ctx, "vmEA", "vm.internal.example"); err != nil {
+		t.Fatalf("SetPeerAddress: %v", err)
+	}
+	if err := env.db.InsertTokenWithMode(ctx, tok, "vmEA", "infra", db.ModeRoot, "", tb); err != nil {
+		t.Fatalf("InsertTokenWithMode: %v", err)
+	}
+
+	resp, err := http.Get(srv.URL + "/enroll/" + tok)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	peer, err := env.db.GetPeer(ctx, "vmEA")
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if peer.Address != "vm.internal.example" {
+		t.Errorf("Address = %q, want vm.internal.example (explicit address must not be overwritten)", peer.Address)
+	}
+}
+
 func TestEnrollStreamsSeededTarball(t *testing.T) {
 	env := setupTestEnv(t)
 	ctx := context.Background()

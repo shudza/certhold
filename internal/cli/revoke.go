@@ -174,7 +174,7 @@ func runRevoke(cmd *cobra.Command, name string) error {
 			continue
 		}
 		targets++
-		if err := pushOne(ctx, dial, p.Name, krlBytes, pushOpts); err != nil {
+		if err := pushOne(ctx, dial, p.DialHost(), krlBytes, pushOpts); err != nil {
 			fmt.Fprintf(errOut, "push %s: %v\n", p.Name, err)
 			continue
 		}

@@ -26,6 +26,18 @@ type Peer struct {
 	Mode           string
 	TargetUser     string
 	LayoutVersion  int
+	Address        string
+}
+
+// DialHost returns the network address certhold dials to reach this peer:
+// the recorded Address when set, otherwise the peer Name. Every push path
+// resolves the dial target through this so peers whose name is not a reachable
+// hostname are still reachable.
+func (p *Peer) DialHost() string {
+	if p.Address != "" {
+		return p.Address
+	}
+	return p.Name
 }
 
 // InsertPeer keeps the original v1 signature for backward compatibility. The
@@ -59,12 +71,12 @@ func (db *DB) InsertPeerWithMode(ctx context.Context, name string, serial uint64
 
 func (db *DB) GetPeer(ctx context.Context, name string) (*Peer, error) {
 	row := db.sql.QueryRowContext(ctx,
-		`SELECT name, cert_serial, pubkey_fingerprint, authorized_key, revoked, created_at, last_krl_version, mode, target_user, layout_version
+		`SELECT name, cert_serial, pubkey_fingerprint, authorized_key, revoked, created_at, last_krl_version, mode, target_user, layout_version, address
 		 FROM peers WHERE name = ?`, name)
 	p := &Peer{}
 	var serial int64
 	var revoked int
-	if err := row.Scan(&p.Name, &serial, &p.Fingerprint, &p.AuthorizedKey, &revoked, &p.CreatedAt, &p.LastKRLVersion, &p.Mode, &p.TargetUser, &p.LayoutVersion); err != nil {
+	if err := row.Scan(&p.Name, &serial, &p.Fingerprint, &p.AuthorizedKey, &revoked, &p.CreatedAt, &p.LastKRLVersion, &p.Mode, &p.TargetUser, &p.LayoutVersion, &p.Address); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrPeerNotFound
 		}
@@ -77,7 +89,7 @@ func (db *DB) GetPeer(ctx context.Context, name string) (*Peer, error) {
 
 func (db *DB) ListPeers(ctx context.Context) ([]Peer, error) {
 	rows, err := db.sql.QueryContext(ctx,
-		`SELECT name, cert_serial, pubkey_fingerprint, authorized_key, revoked, created_at, last_krl_version, mode, target_user, layout_version
+		`SELECT name, cert_serial, pubkey_fingerprint, authorized_key, revoked, created_at, last_krl_version, mode, target_user, layout_version, address
 		 FROM peers ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("list peers: %w", err)
@@ -88,7 +100,7 @@ func (db *DB) ListPeers(ctx context.Context) ([]Peer, error) {
 		var p Peer
 		var serial int64
 		var revoked int
-		if err := rows.Scan(&p.Name, &serial, &p.Fingerprint, &p.AuthorizedKey, &revoked, &p.CreatedAt, &p.LastKRLVersion, &p.Mode, &p.TargetUser, &p.LayoutVersion); err != nil {
+		if err := rows.Scan(&p.Name, &serial, &p.Fingerprint, &p.AuthorizedKey, &revoked, &p.CreatedAt, &p.LastKRLVersion, &p.Mode, &p.TargetUser, &p.LayoutVersion, &p.Address); err != nil {
 			return nil, fmt.Errorf("scan peer: %w", err)
 		}
 		p.Serial = uint64(serial)
@@ -144,6 +156,35 @@ func (db *DB) SetPeerTargetUser(ctx context.Context, name, targetUser string) er
 	}
 	if n == 0 {
 		return ErrPeerNotFound
+	}
+	return nil
+}
+
+// SetPeerAddress records the network address certhold dials to reach this peer.
+// Mirrors SetPeerTargetUser; the enroll --address flag (via Tx.SetPeerAddress)
+// and operator edits use it.
+func (db *DB) SetPeerAddress(ctx context.Context, name, address string) error {
+	res, err := db.sql.ExecContext(ctx, `UPDATE peers SET address = ? WHERE name = ?`, address, name)
+	if err != nil {
+		return fmt.Errorf("set peer address: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set peer address rows: %w", err)
+	}
+	if n == 0 {
+		return ErrPeerNotFound
+	}
+	return nil
+}
+
+// SetPeerAddressIfEmpty records address only when the peer has none yet, so an
+// explicit address set at enroll time is never overwritten by the install-time
+// source-IP backfill. Matching 0 rows (no peer, or address already set) is NOT
+// an error.
+func (db *DB) SetPeerAddressIfEmpty(ctx context.Context, name, address string) error {
+	if _, err := db.sql.ExecContext(ctx, `UPDATE peers SET address = ? WHERE name = ? AND address = ''`, address, name); err != nil {
+		return fmt.Errorf("set peer address if empty: %w", err)
 	}
 	return nil
 }

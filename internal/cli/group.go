@@ -72,9 +72,6 @@ func runGroupAction(cmd *cobra.Command, group string, allow bool) error {
 	if err != nil {
 		return err
 	}
-	if host == "" {
-		host = peerName
-	}
 
 	dbPath, err := cmd.Root().PersistentFlags().GetString("db")
 	if err != nil {
@@ -104,6 +101,9 @@ func runGroupAction(cmd *cobra.Command, group string, allow bool) error {
 			return fmt.Errorf("peer %q not found", peerName)
 		}
 		return fmt.Errorf("get peer: %w", err)
+	}
+	if host == "" {
+		host = peer.DialHost()
 	}
 
 	current, err := d.GetPeerAllowedGroups(ctx, peerName)

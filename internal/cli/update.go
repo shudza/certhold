@@ -36,9 +36,6 @@ func newUpdateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if host == "" {
-				host = name
-			}
 			groups, err := parseGroups(groupsCSV)
 			if err != nil {
 				return err
@@ -85,6 +82,9 @@ func newUpdateCmd() *cobra.Command {
 			}
 			if peer.Revoked {
 				return fmt.Errorf("peer %q is revoked", name)
+			}
+			if host == "" {
+				host = peer.DialHost()
 			}
 
 			pk, _, _, _, err := ssh.ParseAuthorizedKey(peer.AuthorizedKey)

@@ -64,6 +64,21 @@ func (t *Tx) InsertPeerWithMode(ctx context.Context, name string, serial uint64,
 	return nil
 }
 
+func (t *Tx) SetPeerAddress(ctx context.Context, name, address string) error {
+	res, err := t.tx.ExecContext(ctx, `UPDATE peers SET address = ? WHERE name = ?`, address, name)
+	if err != nil {
+		return fmt.Errorf("set peer address: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set peer address rows: %w", err)
+	}
+	if n == 0 {
+		return ErrPeerNotFound
+	}
+	return nil
+}
+
 func (t *Tx) EnsureGroup(ctx context.Context, name string) error {
 	if _, err := t.tx.ExecContext(ctx, `INSERT OR IGNORE INTO groups(name) VALUES (?)`, name); err != nil {
 		return fmt.Errorf("ensure group: %w", err)

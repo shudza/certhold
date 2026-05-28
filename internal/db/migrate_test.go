@@ -141,8 +141,8 @@ func TestMigratePreV3AddsTarballColumnPreservingRows(t *testing.T) {
 	if err := raw.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='schema_version'`).Scan(&ver); err != nil {
 		t.Fatalf("read schema_version: %v", err)
 	}
-	if ver != "4" {
-		t.Errorf("schema_version = %q, want \"4\"", ver)
+	if ver != "5" {
+		t.Errorf("schema_version = %q, want \"5\"", ver)
 	}
 
 	if err := raw.Close(); err != nil {
@@ -273,8 +273,141 @@ func TestMigratePreV4AddsLayoutVersionColumnPreservingRows(t *testing.T) {
 	if err := raw.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='schema_version'`).Scan(&ver); err != nil {
 		t.Fatalf("read schema_version: %v", err)
 	}
-	if ver != "4" {
-		t.Errorf("schema_version = %q, want \"4\"", ver)
+	if ver != "5" {
+		t.Errorf("schema_version = %q, want \"5\"", ver)
+	}
+
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+}
+
+const v4SchemaSQL = `
+CREATE TABLE meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+CREATE TABLE peers (
+  name TEXT PRIMARY KEY,
+  cert_serial INTEGER NOT NULL,
+  pubkey_fingerprint TEXT NOT NULL,
+  authorized_key BLOB NOT NULL,
+  revoked INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMP NOT NULL,
+  last_krl_version INTEGER NOT NULL DEFAULT 0,
+  mode TEXT NOT NULL DEFAULT 'root',
+  target_user TEXT NOT NULL DEFAULT '',
+  layout_version INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE tokens (
+  token TEXT PRIMARY KEY,
+  peer_name TEXT NOT NULL,
+  groups TEXT NOT NULL,
+  tarball BLOB,
+  consumed INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMP NOT NULL,
+  mode TEXT NOT NULL DEFAULT 'root',
+  target_user TEXT NOT NULL DEFAULT ''
+);
+`
+
+func openV4DB(t *testing.T, path string) *sql.DB {
+	t.Helper()
+	raw, err := sql.Open("sqlite", path+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
+	if err != nil {
+		t.Fatalf("open raw sqlite: %v", err)
+	}
+	raw.SetMaxOpenConns(1)
+	ctx := context.Background()
+	if _, err := raw.ExecContext(ctx, v4SchemaSQL); err != nil {
+		t.Fatalf("apply v4 schema: %v", err)
+	}
+	if _, err := raw.ExecContext(ctx,
+		`INSERT INTO meta(key, value) VALUES('schema_version', '4')`); err != nil {
+		t.Fatalf("set schema_version=4: %v", err)
+	}
+	now := time.Now().UTC()
+	if _, err := raw.ExecContext(ctx,
+		`INSERT INTO peers(name, cert_serial, pubkey_fingerprint, authorized_key, created_at)
+		 VALUES('gamma', 11, 'SHA256:ghi', ?, ?)`,
+		[]byte("ssh-ed25519 AAAA-gamma"), now); err != nil {
+		t.Fatalf("insert v4 peer: %v", err)
+	}
+	return raw
+}
+
+func TestMigratePreV5AddsAddressColumnPreservingRows(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v4.sqlite")
+	raw := openV4DB(t, path)
+
+	ctx := context.Background()
+	if cols, err := (&DB{sql: raw}).tableHasColumns(ctx, "peers"); err != nil {
+		t.Fatalf("tableHasColumns: %v", err)
+	} else if cols["address"] {
+		t.Fatal("test precondition: v4 peers table must NOT have an address column")
+	}
+
+	d := &DB{sql: raw}
+	if err := d.migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	cols, err := d.tableHasColumns(ctx, "peers")
+	if err != nil {
+		t.Fatalf("tableHasColumns after migrate: %v", err)
+	}
+	if !cols["address"] {
+		t.Error("address column missing after migrate")
+	}
+
+	var notnull int
+	var dflt any
+	found := false
+	rows, err := raw.QueryContext(ctx, "PRAGMA table_info(peers)")
+	if err != nil {
+		t.Fatalf("pragma: %v", err)
+	}
+	for rows.Next() {
+		var cid, nn, pk int
+		var name, ctype string
+		var dv any
+		if err := rows.Scan(&cid, &name, &ctype, &nn, &dv, &pk); err != nil {
+			t.Fatalf("scan pragma: %v", err)
+		}
+		if name == "address" {
+			found = true
+			notnull = nn
+			dflt = dv
+		}
+	}
+	rows.Close()
+	if !found {
+		t.Fatal("address column not reported by PRAGMA")
+	}
+	if notnull != 1 {
+		t.Errorf("address column should be NOT NULL (notnull=1), got notnull=%d", notnull)
+	}
+	if fmt.Sprintf("%v", dflt) != "''" {
+		t.Errorf("address column should DEFAULT '' , got %v", dflt)
+	}
+
+	p, err := d.GetPeer(ctx, "gamma")
+	if err != nil {
+		t.Fatalf("GetPeer after migrate: %v", err)
+	}
+	if p.Serial != 11 || p.Fingerprint != "SHA256:ghi" || string(p.AuthorizedKey) != "ssh-ed25519 AAAA-gamma" {
+		t.Errorf("peer row not preserved: %+v", p)
+	}
+	if p.Address != "" {
+		t.Errorf("Address = %q, want empty for a migrated row", p.Address)
+	}
+
+	var ver string
+	if err := raw.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='schema_version'`).Scan(&ver); err != nil {
+		t.Fatalf("read schema_version: %v", err)
+	}
+	if ver != "5" {
+		t.Errorf("schema_version = %q, want \"5\"", ver)
 	}
 
 	if err := raw.Close(); err != nil {

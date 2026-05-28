@@ -589,6 +589,42 @@ func TestRekeyUserModePeer_RewritesAuthorizedKeys_NoReload(t *testing.T) {
 	}
 }
 
+// TestRekeyFanOutDialsDialHost verifies the rekey fan-out dials each peer's
+// DialHost() (address when set, name otherwise) while still keying its writes and
+// logging by name.
+func TestRekeyFanOutDialsDialHost(t *testing.T) {
+	dataDir, dbPath, hostname, rec, cleanup := setupRekeyEnv(t, nil)
+	defer cleanup()
+
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	// alpha gets an address; beta stays name-only.
+	if err := d.SetPeerAddress(context.Background(), "alpha", "10.0.0.1"); err != nil {
+		t.Fatalf("SetPeerAddress alpha: %v", err)
+	}
+	d.Close()
+
+	if _, stderr, err := runRekeyCmd(t, dataDir, dbPath, hostname); err != nil {
+		t.Fatalf("rekey: err=%v stderr=%s", err, stderr)
+	}
+
+	dialed := map[string]bool{}
+	for _, c := range rec.snapshot() {
+		dialed[c.host] = true
+	}
+	if !dialed["10.0.0.1"] {
+		t.Errorf("expected rekey fan-out to dial alpha's address 10.0.0.1; dialed=%v", dialed)
+	}
+	if !dialed["beta"] {
+		t.Errorf("expected rekey fan-out to dial beta by name (no address); dialed=%v", dialed)
+	}
+	if dialed["alpha"] {
+		t.Errorf("alpha should be dialed by address, not name; dialed=%v", dialed)
+	}
+}
+
 func instanceKeyFromDBPkg(t *testing.T, dbPath string) string {
 	t.Helper()
 	d, err := db.Open(dbPath)
