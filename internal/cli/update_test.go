@@ -12,7 +12,6 @@ import (
 
 	"github.com/shudza/certhold/internal/ca"
 	"github.com/shudza/certhold/internal/db"
-	"github.com/shudza/certhold/internal/peerfiles"
 	"github.com/shudza/certhold/internal/sshpush"
 )
 
@@ -101,8 +100,8 @@ func setupUpdateEnv(t *testing.T, peerName string, initialGroups []string, revok
 		t.Fatalf("EnsureInstanceKey: %v", err)
 	}
 	fingerprint := ssh.FingerprintSHA256(sshPub)
-	if err := d.InsertPeerWithMode(ctx, peerName, serial, fingerprint, pubAuth, db.ModeUser, "root", 2); err != nil {
-		t.Fatalf("InsertPeerWithMode: %v", err)
+	if err := d.InsertPeer(ctx, peerName, serial, fingerprint, pubAuth, "root"); err != nil {
+		t.Fatalf("InsertPeer: %v", err)
 	}
 	for _, g := range initialGroups {
 		if err := d.EnsureGroup(ctx, g); err != nil {
@@ -194,8 +193,8 @@ func TestUpdateDialsTargetUserForUserModePeer(t *testing.T) {
 		t.Fatalf("db.Open: %v", err)
 	}
 	ctx := context.Background()
-	if err := d.InsertPeerWithMode(ctx, "web01", serial, ssh.FingerprintSHA256(sshPub), pubAuth, db.ModeUser, "deploy", peerfiles.CurrentLayout); err != nil {
-		t.Fatalf("InsertPeerWithMode: %v", err)
+	if err := d.InsertPeer(ctx, "web01", serial, ssh.FingerprintSHA256(sshPub), pubAuth, "deploy"); err != nil {
+		t.Fatalf("InsertPeer: %v", err)
 	}
 	if err := d.EnsureGroup(ctx, "web"); err != nil {
 		t.Fatalf("EnsureGroup: %v", err)
@@ -384,8 +383,8 @@ func setupUpdateUserPeer(t *testing.T, peerName, targetUser string) (dataDir, db
 	if err != nil {
 		t.Fatalf("EnsureInstanceKey: %v", err)
 	}
-	if err := d.InsertPeerWithMode(ctx, peerName, 1, ssh.FingerprintSHA256(sshPub), pubAuth, db.ModeUser, targetUser, 2); err != nil {
-		t.Fatalf("InsertPeerWithMode: %v", err)
+	if err := d.InsertPeer(ctx, peerName, 1, ssh.FingerprintSHA256(sshPub), pubAuth, targetUser); err != nil {
+		t.Fatalf("InsertPeer: %v", err)
 	}
 	return dataDir, dbPath, key
 }
@@ -418,7 +417,7 @@ func TestUpdateUserMode_NoReload(t *testing.T) {
 	}
 }
 
-func setupUpdateV2Peer(t *testing.T, peerName, mode, targetUser string) (dataDir, dbPath, key string) {
+func setupUpdateV2Peer(t *testing.T, peerName, targetUser string) (dataDir, dbPath, key string) {
 	t.Helper()
 	dataDir = t.TempDir()
 	if _, err := ca.Generate(filepath.Join(dataDir, "ca")); err != nil {
@@ -438,15 +437,15 @@ func setupUpdateV2Peer(t *testing.T, peerName, mode, targetUser string) (dataDir
 	if err != nil {
 		t.Fatalf("EnsureInstanceKey: %v", err)
 	}
-	if err := d.InsertPeerWithMode(ctx, peerName, 1, ssh.FingerprintSHA256(sshPub), pubAuth, mode, targetUser, 2); err != nil {
-		t.Fatalf("InsertPeerWithMode: %v", err)
+	if err := d.InsertPeer(ctx, peerName, 1, ssh.FingerprintSHA256(sshPub), pubAuth, targetUser); err != nil {
+		t.Fatalf("InsertPeer: %v", err)
 	}
 	d.Close()
 	return dataDir, dbPath, key
 }
 
 func TestUpdateV2Root_NamespacedCert_NoReload(t *testing.T) {
-	dataDir, dbPath, key := setupUpdateV2Peer(t, "vmV2", db.ModeUser, "root")
+	dataDir, dbPath, key := setupUpdateV2Peer(t, "vmV2", "root")
 	mp := withMockPusher(t)
 	if _, _, err := runUpdate(t, dataDir, dbPath, "vmV2", "--groups", "infra"); err != nil {
 		t.Fatalf("update v2 root: %v", err)
@@ -518,8 +517,8 @@ func setupUpdateEncryptedCAEnv(t *testing.T, peerName string, initialGroups []st
 	if _, err := EnsureInstanceKey(ctx, d); err != nil {
 		t.Fatalf("EnsureInstanceKey: %v", err)
 	}
-	if err := d.InsertPeerWithMode(ctx, peerName, serial, ssh.FingerprintSHA256(sshPub), pubAuth, db.ModeUser, "root", 2); err != nil {
-		t.Fatalf("InsertPeerWithMode: %v", err)
+	if err := d.InsertPeer(ctx, peerName, serial, ssh.FingerprintSHA256(sshPub), pubAuth, "root"); err != nil {
+		t.Fatalf("InsertPeer: %v", err)
 	}
 	for _, g := range initialGroups {
 		if err := d.EnsureGroup(ctx, g); err != nil {

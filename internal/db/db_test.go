@@ -52,7 +52,7 @@ func TestInsertAndGetPeer(t *testing.T) {
 	ctx := t.Context()
 	d := newTestDB(t)
 	key := []byte("ssh-ed25519 AAAA...")
-	if err := d.InsertPeer(ctx, "alpha", 42, "SHA256:abc", key); err != nil {
+	if err := d.InsertPeer(ctx, "alpha", 42, "SHA256:abc", key, "alice"); err != nil {
 		t.Fatalf("InsertPeer: %v", err)
 	}
 	p, err := d.GetPeer(ctx, "alpha")
@@ -68,8 +68,8 @@ func TestInsertAndGetPeer(t *testing.T) {
 	if p.Revoked {
 		t.Error("expected not revoked")
 	}
-	if p.LastKRLVersion != 0 {
-		t.Errorf("LastKRLVersion = %d, want 0", p.LastKRLVersion)
+	if p.TargetUser != "alice" {
+		t.Errorf("TargetUser = %q, want alice", p.TargetUser)
 	}
 	if p.CreatedAt.IsZero() {
 		t.Error("CreatedAt should be set")
@@ -92,7 +92,7 @@ func TestListPeers(t *testing.T) {
 		t.Fatalf("empty list peers: err=%v len=%d", err, len(peers))
 	}
 	for _, n := range []string{"b", "a", "c"} {
-		if err := d.InsertPeer(ctx, n, 1, "fp", []byte("k")); err != nil {
+		if err := d.InsertPeer(ctx, n, 1, "fp", []byte("k"), ""); err != nil {
 			t.Fatalf("InsertPeer %s: %v", n, err)
 		}
 	}
@@ -111,7 +111,7 @@ func TestListPeers(t *testing.T) {
 func TestSetPeerRevoked(t *testing.T) {
 	ctx := t.Context()
 	d := newTestDB(t)
-	if err := d.InsertPeer(ctx, "peer1", 1, "fp", []byte("k")); err != nil {
+	if err := d.InsertPeer(ctx, "peer1", 1, "fp", []byte("k"), ""); err != nil {
 		t.Fatalf("InsertPeer: %v", err)
 	}
 	if err := d.SetPeerRevoked(ctx, "peer1"); err != nil {
@@ -143,7 +143,7 @@ func TestEnsureGroup(t *testing.T) {
 func TestSetGetPeerGroups(t *testing.T) {
 	ctx := t.Context()
 	d := newTestDB(t)
-	if err := d.InsertPeer(ctx, "p", 1, "fp", []byte("k")); err != nil {
+	if err := d.InsertPeer(ctx, "p", 1, "fp", []byte("k"), ""); err != nil {
 		t.Fatalf("InsertPeer: %v", err)
 	}
 	if err := d.SetPeerGroups(ctx, "p", []string{"infra", "db"}); err != nil {
@@ -176,7 +176,7 @@ func TestSetGetPeerGroups(t *testing.T) {
 func TestSetGetPeerAllowedGroups(t *testing.T) {
 	ctx := t.Context()
 	d := newTestDB(t)
-	if err := d.InsertPeer(ctx, "p", 1, "fp", []byte("k")); err != nil {
+	if err := d.InsertPeer(ctx, "p", 1, "fp", []byte("k"), ""); err != nil {
 		t.Fatalf("InsertPeer: %v", err)
 	}
 	if err := d.SetPeerAllowedGroups(ctx, "p", []string{"ops", "infra"}); err != nil {
@@ -205,10 +205,10 @@ func TestListGroupsWithPeerCount(t *testing.T) {
 	if gs, err := d.ListGroupsWithPeerCount(ctx); err != nil || len(gs) != 0 {
 		t.Fatalf("empty: err=%v len=%d", err, len(gs))
 	}
-	if err := d.InsertPeer(ctx, "alpha", 1, "fp", []byte("k")); err != nil {
+	if err := d.InsertPeer(ctx, "alpha", 1, "fp", []byte("k"), ""); err != nil {
 		t.Fatalf("InsertPeer alpha: %v", err)
 	}
-	if err := d.InsertPeer(ctx, "beta", 2, "fp", []byte("k")); err != nil {
+	if err := d.InsertPeer(ctx, "beta", 2, "fp", []byte("k"), ""); err != nil {
 		t.Fatalf("InsertPeer beta: %v", err)
 	}
 	if err := d.SetPeerGroups(ctx, "alpha", []string{"infra", "db"}); err != nil {
@@ -241,50 +241,50 @@ func TestListGroupsWithPeerCount(t *testing.T) {
 func TestInsertConsumeToken(t *testing.T) {
 	ctx := t.Context()
 	d := newTestDB(t)
-	if err := d.InsertToken(ctx, "tok1", "alpha", "infra,db"); err != nil {
+	if err := d.InsertToken(ctx, "tok1", "alpha", "infra,db", "", nil); err != nil {
 		t.Fatalf("InsertToken: %v", err)
 	}
-	peer, groups, mode, tu, tarball, err := d.ConsumeToken(ctx, "tok1")
+	peer, groups, tu, tarball, err := d.ConsumeToken(ctx, "tok1")
 	if err != nil {
 		t.Fatalf("ConsumeToken: %v", err)
 	}
 	if peer != "alpha" || groups != "infra,db" {
 		t.Errorf("got peer=%q groups=%q", peer, groups)
 	}
-	if mode != "root" || tu != "" {
-		t.Errorf("legacy InsertToken should default to mode=root, target_user=\"\"; got mode=%q tu=%q", mode, tu)
+	if tu != "" {
+		t.Errorf("target_user = %q, want empty", tu)
 	}
 	if tarball != nil {
-		t.Errorf("legacy InsertToken should yield nil tarball, got %d bytes", len(tarball))
+		t.Errorf("nil-tarball token should yield nil tarball, got %d bytes", len(tarball))
 	}
-	if _, _, _, _, _, err := d.ConsumeToken(ctx, "tok1"); !errors.Is(err, ErrTokenAlreadyConsumed) {
+	if _, _, _, _, err := d.ConsumeToken(ctx, "tok1"); !errors.Is(err, ErrTokenAlreadyConsumed) {
 		t.Errorf("second consume: %v", err)
 	}
-	if _, _, _, _, _, err := d.ConsumeToken(ctx, "missing"); !errors.Is(err, ErrTokenNotFound) {
+	if _, _, _, _, err := d.ConsumeToken(ctx, "missing"); !errors.Is(err, ErrTokenNotFound) {
 		t.Errorf("missing token: %v", err)
 	}
 }
 
-func TestInsertTokenWithMode(t *testing.T) {
+func TestInsertTokenRoundTrips(t *testing.T) {
 	ctx := t.Context()
 	d := newTestDB(t)
 	wantTarball := []byte("tarball-bytes-vmU")
-	if err := d.InsertTokenWithMode(ctx, "tokU", "vmU", "infra", ModeUser, "alice", wantTarball); err != nil {
-		t.Fatalf("InsertTokenWithMode: %v", err)
+	if err := d.InsertToken(ctx, "tokU", "vmU", "infra", "alice", wantTarball); err != nil {
+		t.Fatalf("InsertToken: %v", err)
 	}
-	peer, groups, mode, tu, consumed, err := d.LookupToken(ctx, "tokU")
+	peer, groups, tu, consumed, err := d.LookupToken(ctx, "tokU")
 	if err != nil {
 		t.Fatalf("LookupToken: %v", err)
 	}
-	if peer != "vmU" || groups != "infra" || mode != ModeUser || tu != "alice" || consumed {
-		t.Errorf("got peer=%q groups=%q mode=%q tu=%q consumed=%v", peer, groups, mode, tu, consumed)
+	if peer != "vmU" || groups != "infra" || tu != "alice" || consumed {
+		t.Errorf("got peer=%q groups=%q tu=%q consumed=%v", peer, groups, tu, consumed)
 	}
-	peer, groups, mode, tu, tarball, err := d.ConsumeToken(ctx, "tokU")
+	peer, groups, tu, tarball, err := d.ConsumeToken(ctx, "tokU")
 	if err != nil {
 		t.Fatalf("ConsumeToken: %v", err)
 	}
-	if peer != "vmU" || groups != "infra" || mode != ModeUser || tu != "alice" {
-		t.Errorf("consume got peer=%q groups=%q mode=%q tu=%q", peer, groups, mode, tu)
+	if peer != "vmU" || groups != "infra" || tu != "alice" {
+		t.Errorf("consume got peer=%q groups=%q tu=%q", peer, groups, tu)
 	}
 	if !bytes.Equal(tarball, wantTarball) {
 		t.Errorf("consume tarball = %q, want %q", tarball, wantTarball)
@@ -294,10 +294,10 @@ func TestInsertTokenWithMode(t *testing.T) {
 func TestConsumeTokenClearsBlob(t *testing.T) {
 	ctx := t.Context()
 	d := newTestDB(t)
-	if err := d.InsertTokenWithMode(ctx, "tokB", "vmB", "infra", ModeRoot, "", []byte("blob")); err != nil {
-		t.Fatalf("InsertTokenWithMode: %v", err)
+	if err := d.InsertToken(ctx, "tokB", "vmB", "infra", "", []byte("blob")); err != nil {
+		t.Fatalf("InsertToken: %v", err)
 	}
-	if _, _, _, _, tarball, err := d.ConsumeToken(ctx, "tokB"); err != nil {
+	if _, _, _, tarball, err := d.ConsumeToken(ctx, "tokB"); err != nil {
 		t.Fatalf("ConsumeToken: %v", err)
 	} else if !bytes.Equal(tarball, []byte("blob")) {
 		t.Errorf("tarball = %q, want blob", tarball)
@@ -314,23 +314,23 @@ func TestConsumeTokenClearsBlob(t *testing.T) {
 func TestLookupToken(t *testing.T) {
 	ctx := t.Context()
 	d := newTestDB(t)
-	if _, _, _, _, _, err := d.LookupToken(ctx, "missing"); !errors.Is(err, ErrTokenNotFound) {
+	if _, _, _, _, err := d.LookupToken(ctx, "missing"); !errors.Is(err, ErrTokenNotFound) {
 		t.Errorf("missing: %v", err)
 	}
-	if err := d.InsertToken(ctx, "tokL", "peerL", "g1,g2"); err != nil {
+	if err := d.InsertToken(ctx, "tokL", "peerL", "g1,g2", "", nil); err != nil {
 		t.Fatalf("InsertToken: %v", err)
 	}
-	peer, groups, mode, tu, consumed, err := d.LookupToken(ctx, "tokL")
+	peer, groups, tu, consumed, err := d.LookupToken(ctx, "tokL")
 	if err != nil {
 		t.Fatalf("LookupToken unconsumed: %v", err)
 	}
-	if peer != "peerL" || groups != "g1,g2" || consumed || mode != "root" || tu != "" {
-		t.Errorf("got peer=%q groups=%q mode=%q tu=%q consumed=%v", peer, groups, mode, tu, consumed)
+	if peer != "peerL" || groups != "g1,g2" || consumed || tu != "" {
+		t.Errorf("got peer=%q groups=%q tu=%q consumed=%v", peer, groups, tu, consumed)
 	}
-	if _, _, _, _, _, err := d.ConsumeToken(ctx, "tokL"); err != nil {
+	if _, _, _, _, err := d.ConsumeToken(ctx, "tokL"); err != nil {
 		t.Fatalf("ConsumeToken: %v", err)
 	}
-	peer, groups, _, _, consumed, err = d.LookupToken(ctx, "tokL")
+	peer, groups, _, consumed, err = d.LookupToken(ctx, "tokL")
 	if err != nil {
 		t.Fatalf("LookupToken consumed: %v", err)
 	}
@@ -342,7 +342,7 @@ func TestLookupToken(t *testing.T) {
 func TestConsumeTokenRace(t *testing.T) {
 	ctx := t.Context()
 	d := newTestDB(t)
-	if err := d.InsertToken(ctx, "race", "p", "g"); err != nil {
+	if err := d.InsertToken(ctx, "race", "p", "g", "", nil); err != nil {
 		t.Fatalf("InsertToken: %v", err)
 	}
 	const n = 10
@@ -356,7 +356,7 @@ func TestConsumeTokenRace(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			_, _, _, _, _, err := d.ConsumeToken(ctx, "race")
+			_, _, _, _, err := d.ConsumeToken(ctx, "race")
 			switch {
 			case err == nil:
 				atomic.AddInt64(&success, 1)
@@ -381,26 +381,26 @@ func TestConsumeTokenRace(t *testing.T) {
 	}
 }
 
-func TestInsertPeerLegacyDefaultsToRoot(t *testing.T) {
+func TestInsertPeerDefaultsTargetUserEmpty(t *testing.T) {
 	ctx := t.Context()
 	d := newTestDB(t)
-	if err := d.InsertPeer(ctx, "legacy", 1, "fp", []byte("k")); err != nil {
+	if err := d.InsertPeer(ctx, "fresh", 1, "fp", []byte("k"), ""); err != nil {
 		t.Fatalf("InsertPeer: %v", err)
 	}
-	p, err := d.GetPeer(ctx, "legacy")
+	p, err := d.GetPeer(ctx, "fresh")
 	if err != nil {
 		t.Fatalf("GetPeer: %v", err)
 	}
-	if p.Mode != "root" || p.TargetUser != "" {
-		t.Errorf("legacy peer should default to mode=root tu=\"\"; got mode=%q tu=%q", p.Mode, p.TargetUser)
+	if p.TargetUser != "" {
+		t.Errorf("unredeemed peer should have empty target_user; got %q", p.TargetUser)
 	}
 }
 
 func TestSetPeerTargetUser(t *testing.T) {
 	ctx := t.Context()
 	d := newTestDB(t)
-	if err := d.InsertPeerWithMode(ctx, "vmU", 1, "fp", []byte("k"), ModeUser, "", 1); err != nil {
-		t.Fatalf("InsertPeerWithMode: %v", err)
+	if err := d.InsertPeer(ctx, "vmU", 1, "fp", []byte("k"), ""); err != nil {
+		t.Fatalf("InsertPeer: %v", err)
 	}
 	if err := d.SetPeerTargetUser(ctx, "vmU", "carol"); err != nil {
 		t.Fatalf("SetPeerTargetUser: %v", err)
@@ -431,7 +431,7 @@ func TestDialHost(t *testing.T) {
 func TestSetPeerAddress(t *testing.T) {
 	ctx := t.Context()
 	d := newTestDB(t)
-	if err := d.InsertPeer(ctx, "app1", 1, "fp", []byte("k")); err != nil {
+	if err := d.InsertPeer(ctx, "app1", 1, "fp", []byte("k"), ""); err != nil {
 		t.Fatalf("InsertPeer: %v", err)
 	}
 	if p, _ := d.GetPeer(ctx, "app1"); p.Address != "" {
@@ -458,7 +458,7 @@ func TestSetPeerAddress(t *testing.T) {
 func TestSetPeerAddressIfEmpty(t *testing.T) {
 	ctx := t.Context()
 	d := newTestDB(t)
-	if err := d.InsertPeer(ctx, "app1", 1, "fp", []byte("k")); err != nil {
+	if err := d.InsertPeer(ctx, "app1", 1, "fp", []byte("k"), ""); err != nil {
 		t.Fatalf("InsertPeer: %v", err)
 	}
 
@@ -488,7 +488,7 @@ func TestTxSetPeerAddress(t *testing.T) {
 	ctx := t.Context()
 	d := newTestDB(t)
 	err := d.WithTx(ctx, func(tx *Tx) error {
-		if err := tx.InsertPeerWithMode(ctx, "app1", 1, "fp", []byte("k"), ModeRoot, "", 1); err != nil {
+		if err := tx.InsertPeer(ctx, "app1", 1, "fp", []byte("k"), ""); err != nil {
 			return err
 		}
 		return tx.SetPeerAddress(ctx, "app1", "10.0.0.5")
@@ -505,47 +505,25 @@ func TestTxSetPeerAddress(t *testing.T) {
 	}
 }
 
-func TestInsertPeerWithMode(t *testing.T) {
+func TestInsertPeerRoundTrips(t *testing.T) {
 	ctx := t.Context()
 	d := newTestDB(t)
-	if err := d.InsertPeerWithMode(ctx, "vm", 1, "fp", []byte("k"), ModeUser, "alice", 1); err != nil {
-		t.Fatalf("InsertPeerWithMode: %v", err)
+	if err := d.InsertPeer(ctx, "vm", 1, "fp", []byte("k"), "alice"); err != nil {
+		t.Fatalf("InsertPeer: %v", err)
 	}
 	p, err := d.GetPeer(ctx, "vm")
 	if err != nil {
 		t.Fatalf("GetPeer: %v", err)
 	}
-	if p.Mode != ModeUser || p.TargetUser != "alice" {
-		t.Errorf("got mode=%q tu=%q", p.Mode, p.TargetUser)
+	if p.TargetUser != "alice" {
+		t.Errorf("got tu=%q, want alice", p.TargetUser)
 	}
 	ps, err := d.ListPeers(ctx)
 	if err != nil {
 		t.Fatalf("ListPeers: %v", err)
 	}
-	if len(ps) != 1 || ps[0].Mode != ModeUser || ps[0].TargetUser != "alice" {
-		t.Errorf("ListPeers populated mode/target_user wrong: %+v", ps)
-	}
-}
-
-func TestInsertPeerWithModeRoundTripsLayoutVersion(t *testing.T) {
-	ctx := t.Context()
-	d := newTestDB(t)
-	if err := d.InsertPeerWithMode(ctx, "lv", 1, "fp", []byte("k"), ModeRoot, "", 1); err != nil {
-		t.Fatalf("InsertPeerWithMode: %v", err)
-	}
-	p, err := d.GetPeer(ctx, "lv")
-	if err != nil {
-		t.Fatalf("GetPeer: %v", err)
-	}
-	if p.LayoutVersion != 1 {
-		t.Errorf("LayoutVersion = %d, want 1", p.LayoutVersion)
-	}
-	ps, err := d.ListPeers(ctx)
-	if err != nil {
-		t.Fatalf("ListPeers: %v", err)
-	}
-	if len(ps) != 1 || ps[0].LayoutVersion != 1 {
-		t.Errorf("ListPeers LayoutVersion wrong: %+v", ps)
+	if len(ps) != 1 || ps[0].TargetUser != "alice" {
+		t.Errorf("ListPeers populated target_user wrong: %+v", ps)
 	}
 }
 
@@ -554,10 +532,10 @@ func TestWithTxCommitsAtomically(t *testing.T) {
 	d := newTestDB(t)
 
 	err := d.WithTx(ctx, func(tx *Tx) error {
-		if err := tx.InsertTokenWithMode(ctx, "tokA", "vmA", "infra", ModeRoot, "", []byte("tar")); err != nil {
+		if err := tx.InsertToken(ctx, "tokA", "vmA", "infra", "", []byte("tar")); err != nil {
 			return err
 		}
-		if err := tx.InsertPeerWithMode(ctx, "vmA", 7, "fp", []byte("k"), ModeRoot, "", 1); err != nil {
+		if err := tx.InsertPeer(ctx, "vmA", 7, "fp", []byte("k"), ""); err != nil {
 			return err
 		}
 		if err := tx.EnsureGroup(ctx, "infra"); err != nil {
@@ -572,7 +550,7 @@ func TestWithTxCommitsAtomically(t *testing.T) {
 		t.Fatalf("WithTx: %v", err)
 	}
 
-	if _, _, _, _, _, err := d.LookupToken(ctx, "tokA"); err != nil {
+	if _, _, _, _, err := d.LookupToken(ctx, "tokA"); err != nil {
 		t.Fatalf("token row missing after committed tx: %v", err)
 	}
 	if _, err := d.GetPeer(ctx, "vmA"); err != nil {
@@ -595,21 +573,21 @@ func TestWithTxRollsBackOrphanedToken(t *testing.T) {
 	ctx := t.Context()
 	d := newTestDB(t)
 
-	if err := d.InsertPeerWithMode(ctx, "dup", 1, "fp", []byte("k"), ModeRoot, "", 1); err != nil {
+	if err := d.InsertPeer(ctx, "dup", 1, "fp", []byte("k"), ""); err != nil {
 		t.Fatalf("seed peer: %v", err)
 	}
 
 	err := d.WithTx(ctx, func(tx *Tx) error {
-		if err := tx.InsertTokenWithMode(ctx, "orphan-tok", "dup", "infra", ModeRoot, "", []byte("tar")); err != nil {
+		if err := tx.InsertToken(ctx, "orphan-tok", "dup", "infra", "", []byte("tar")); err != nil {
 			return err
 		}
-		return tx.InsertPeerWithMode(ctx, "dup", 2, "fp2", []byte("k2"), ModeRoot, "", 1)
+		return tx.InsertPeer(ctx, "dup", 2, "fp2", []byte("k2"), "")
 	})
 	if err == nil {
 		t.Fatal("expected duplicate peer insert to fail the tx")
 	}
 
-	if _, _, _, _, _, lerr := d.LookupToken(ctx, "orphan-tok"); !errors.Is(lerr, ErrTokenNotFound) {
+	if _, _, _, _, lerr := d.LookupToken(ctx, "orphan-tok"); !errors.Is(lerr, ErrTokenNotFound) {
 		t.Fatalf("token row survived a rolled-back tx (orphaned): err=%v", lerr)
 	}
 }

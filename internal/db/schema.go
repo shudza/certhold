@@ -5,16 +5,19 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 5
+const schemaVersion = 6
 
 // The peers table extends PLAN.md with authorized_key BLOB and created_at TIMESTAMP.
 // We persist the peer's pubkey so certhold can re-sign certs on update/rekey without
 // round-tripping to the peer to ask for it again.
 //
-// The base CREATE TABLE statements omit the T15 mode/target_user columns; they are
-// added by addModeColumns() so a pre-T15 db file (schema_version=1) migrates without
-// data loss. The DEFAULT 'root' on those columns means any rows that pre-date the
-// migration retain the v1 on-disk layout, matching the existing /etc/ssh files there.
+// The base CREATE TABLE statements plus the incremental add*Column migrations bring
+// ANY db file (fresh or old) up to the historical schema_version=5 shape (all columns
+// present). dropDeadColumns() then rebuilds peers/tokens to physically remove the
+// vestigial mode/layout_version/last_krl_version columns and the dead krl_version
+// table, leaving the clean single-user-mode schema (schema_version=6). Running the
+// add* steps before the drop keeps the migration correct for both fresh and pre-existing
+// databases without rewriting the base CREATE statements.
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY,
@@ -82,6 +85,9 @@ func (db *DB) migrate(ctx context.Context) error {
 		return err
 	}
 	if err := db.addAddressColumn(ctx); err != nil {
+		return err
+	}
+	if err := db.dropDeadColumns(ctx); err != nil {
 		return err
 	}
 	if _, err := db.sql.ExecContext(ctx,
@@ -153,6 +159,89 @@ func (db *DB) addAddressColumn(ctx context.Context) error {
 			`ALTER TABLE peers ADD COLUMN address TEXT NOT NULL DEFAULT ''`); err != nil {
 			return fmt.Errorf("alter peers add address: %w", err)
 		}
+	}
+	return nil
+}
+
+// dropDeadColumns physically removes the vestigial mode/layout_version/last_krl_version
+// columns and the dead krl_version table left behind by the v1/root + KRL removal
+// (T07/T08). SQLite cannot drop columns in place, so each table is rebuilt with the
+// final schema. It is idempotent: once peers.mode is gone the whole step no-ops.
+//
+// Foreign keys (peer_groups/peer_allowed_groups -> peers(name)) are preserved by
+// toggling PRAGMA foreign_keys OFF around the rebuild — a DROP TABLE peers with FKs
+// enforced would otherwise be rejected or cascade. The pragma must be set outside any
+// transaction (SQLite ignores it mid-transaction); MaxOpenConns(1) keeps it on the one
+// connection. A post-rebuild foreign_key_check confirms membership rows still resolve.
+func (db *DB) dropDeadColumns(ctx context.Context) error {
+	peerCols, err := db.tableHasColumns(ctx, "peers")
+	if err != nil {
+		return err
+	}
+	if !peerCols["mode"] && !peerCols["layout_version"] && !peerCols["last_krl_version"] {
+		return nil
+	}
+
+	if _, err := db.sql.ExecContext(ctx, `PRAGMA foreign_keys=OFF`); err != nil {
+		return fmt.Errorf("disable foreign_keys: %w", err)
+	}
+	defer func() { _, _ = db.sql.ExecContext(ctx, `PRAGMA foreign_keys=ON`) }()
+
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin drop dead columns: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `
+CREATE TABLE peers_new (
+  name TEXT PRIMARY KEY,
+  cert_serial INTEGER NOT NULL,
+  pubkey_fingerprint TEXT NOT NULL,
+  authorized_key BLOB NOT NULL,
+  revoked INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMP NOT NULL,
+  target_user TEXT NOT NULL DEFAULT '',
+  address TEXT NOT NULL DEFAULT ''
+);
+INSERT INTO peers_new(name, cert_serial, pubkey_fingerprint, authorized_key, revoked, created_at, target_user, address)
+  SELECT name, cert_serial, pubkey_fingerprint, authorized_key, revoked, created_at, target_user, address FROM peers;
+DROP TABLE peers;
+ALTER TABLE peers_new RENAME TO peers;
+
+CREATE TABLE tokens_new (
+  token TEXT PRIMARY KEY,
+  peer_name TEXT NOT NULL,
+  groups TEXT NOT NULL,
+  tarball BLOB,
+  consumed INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMP NOT NULL,
+  target_user TEXT NOT NULL DEFAULT ''
+);
+INSERT INTO tokens_new(token, peer_name, groups, tarball, consumed, created_at, target_user)
+  SELECT token, peer_name, groups, tarball, consumed, created_at, target_user FROM tokens;
+DROP TABLE tokens;
+ALTER TABLE tokens_new RENAME TO tokens;
+
+DROP TABLE IF EXISTS krl_version;
+`); err != nil {
+		return fmt.Errorf("rebuild tables dropping dead columns: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit drop dead columns: %w", err)
+	}
+
+	rows, err := db.sql.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	if err != nil {
+		return fmt.Errorf("foreign_key_check: %w", err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		return fmt.Errorf("foreign_key_check found violations after dropping dead columns")
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iter foreign_key_check: %w", err)
 	}
 	return nil
 }

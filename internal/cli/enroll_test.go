@@ -58,7 +58,7 @@ func consumeTokenTarball(t *testing.T, dbPath, tok string) []byte {
 		t.Fatalf("reopen db: %v", err)
 	}
 	defer d.Close()
-	_, _, _, _, tb, err := d.ConsumeToken(context.Background(), tok)
+	_, _, _, tb, err := d.ConsumeToken(context.Background(), tok)
 	if err != nil {
 		t.Fatalf("ConsumeToken: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestEnrollSuccess(t *testing.T) {
 	}
 	defer d.Close()
 
-	peer, groups, mode, tu, _, err := d.ConsumeToken(context.Background(), tok)
+	peer, groups, tu, _, err := d.ConsumeToken(context.Background(), tok)
 	if err != nil {
 		t.Fatalf("ConsumeToken: %v", err)
 	}
@@ -147,9 +147,6 @@ func TestEnrollSuccess(t *testing.T) {
 	}
 	if groups != "a,b" {
 		t.Errorf("groups = %q, want a,b", groups)
-	}
-	if mode != db.ModeUser {
-		t.Errorf("default mode = %q, want %q", mode, db.ModeUser)
 	}
 	if tu != "" {
 		t.Errorf("default target_user = %q, want empty", tu)
@@ -216,12 +213,9 @@ func TestEnrollDefaultUserEmpty(t *testing.T) {
 		t.Fatalf("reopen db: %v", err)
 	}
 	defer d.Close()
-	_, _, mode, tu, _, err := d.ConsumeToken(context.Background(), tok)
+	_, _, tu, _, err := d.ConsumeToken(context.Background(), tok)
 	if err != nil {
 		t.Fatalf("ConsumeToken: %v", err)
-	}
-	if mode != db.ModeUser {
-		t.Errorf("mode = %q, want %q", mode, db.ModeUser)
 	}
 	if tu != "" {
 		t.Errorf("target_user = %q, want empty when --user is omitted", tu)
@@ -240,7 +234,7 @@ func TestEnrollExplicitUserAlice(t *testing.T) {
 		t.Fatalf("reopen db: %v", err)
 	}
 	defer d.Close()
-	_, _, _, tu, _, err := d.ConsumeToken(context.Background(), tok)
+	_, _, tu, _, err := d.ConsumeToken(context.Background(), tok)
 	if err != nil {
 		t.Fatalf("ConsumeToken: %v", err)
 	}
@@ -263,12 +257,9 @@ func TestEnrollRootUser(t *testing.T) {
 		t.Fatalf("reopen db: %v", err)
 	}
 	defer d.Close()
-	_, _, mode, tu, _, err := d.ConsumeToken(context.Background(), tok)
+	_, _, tu, _, err := d.ConsumeToken(context.Background(), tok)
 	if err != nil {
 		t.Fatalf("ConsumeToken: %v", err)
-	}
-	if mode != db.ModeUser {
-		t.Errorf("mode = %q, want %q", mode, db.ModeUser)
 	}
 	if tu != "root" {
 		t.Errorf("target_user = %q, want root", tu)
@@ -287,12 +278,12 @@ func TestEnrollExplicitUser(t *testing.T) {
 		t.Fatalf("reopen db: %v", err)
 	}
 	defer d.Close()
-	_, _, mode, tu, _, err := d.ConsumeToken(context.Background(), tok)
+	_, _, tu, _, err := d.ConsumeToken(context.Background(), tok)
 	if err != nil {
 		t.Fatalf("ConsumeToken: %v", err)
 	}
-	if mode != db.ModeUser || tu != "alice" {
-		t.Errorf("mode=%q user=%q", mode, tu)
+	if tu != "alice" {
+		t.Errorf("user=%q, want alice", tu)
 	}
 }
 
@@ -311,7 +302,7 @@ func TestEnrollDuplicateName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
-	if err := d.InsertPeer(context.Background(), "new-vm", 1, "fp", []byte("k")); err != nil {
+	if err := d.InsertPeer(context.Background(), "new-vm", 1, "fp", []byte("k"), ""); err != nil {
 		t.Fatalf("InsertPeer setup: %v", err)
 	}
 	if err := d.Close(); err != nil {
@@ -336,7 +327,7 @@ func TestEnrollGroupsDedupeAndTrim(t *testing.T) {
 		t.Fatalf("reopen db: %v", err)
 	}
 	defer d.Close()
-	_, groups, _, _, _, err := d.ConsumeToken(context.Background(), tok)
+	_, groups, _, _, err := d.ConsumeToken(context.Background(), tok)
 	if err != nil {
 		t.Fatalf("ConsumeToken: %v", err)
 	}
@@ -508,9 +499,6 @@ func TestEnrollBuildsRootTarball(t *testing.T) {
 	if p.Serial != cert.Serial {
 		t.Errorf("peer serial %d != cert serial %d", p.Serial, cert.Serial)
 	}
-	if p.LayoutVersion != 2 {
-		t.Errorf("peer layout = %d, want 2", p.LayoutVersion)
-	}
 }
 
 func TestEnrollBuildsUserTarball(t *testing.T) {
@@ -544,8 +532,8 @@ func TestEnrollBuildsUserTarball(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetPeer: %v", err)
 	}
-	if p.LayoutVersion != 2 {
-		t.Errorf("peer layout = %d, want 2", p.LayoutVersion)
+	if p.TargetUser != "alice" {
+		t.Errorf("peer target_user = %q, want alice", p.TargetUser)
 	}
 }
 

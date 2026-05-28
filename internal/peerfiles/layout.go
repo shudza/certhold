@@ -2,10 +2,7 @@ package peerfiles
 
 import "fmt"
 
-const (
-	LayoutV2      = 2
-	CurrentLayout = LayoutV2
-)
+const LayoutV2 = 2
 
 // BeginSentinel returns the begin marker for an instance's spliced block. The
 // per-instance key is embedded before the version so the key is matched while

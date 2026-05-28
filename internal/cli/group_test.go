@@ -205,8 +205,8 @@ func seedGroupDB(t *testing.T, allowed []string) (dataDir, dbPath string) {
 	}
 	defer d.Close()
 	ctx := context.Background()
-	if err := d.InsertPeerWithMode(ctx, "peer1", 1, "fp", []byte("k"), db.ModeUser, "alice", 2); err != nil {
-		t.Fatalf("InsertPeerWithMode: %v", err)
+	if err := d.InsertPeer(ctx, "peer1", 1, "fp", []byte("k"), "alice"); err != nil {
+		t.Fatalf("InsertPeer: %v", err)
 	}
 	for _, g := range allowed {
 		if err := d.EnsureGroup(ctx, g); err != nil {
@@ -413,8 +413,8 @@ func TestGroupSSHOptionsPathsMatchInitLayout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
-	if err := d.InsertPeerWithMode(context.Background(), "peer1", 1, "fp", []byte("k"), db.ModeUser, "alice", 2); err != nil {
-		t.Fatalf("InsertPeerWithMode: %v", err)
+	if err := d.InsertPeer(context.Background(), "peer1", 1, "fp", []byte("k"), "alice"); err != nil {
+		t.Fatalf("InsertPeer: %v", err)
 	}
 	key, _, _ := d.GetMeta(context.Background(), db.MetaInstanceKey)
 	d.Close()
@@ -455,8 +455,8 @@ func setupGroupUserModeDB(t *testing.T, peerName, targetUser string, allowed []s
 		t.Fatalf("db.Open: %v", err)
 	}
 	defer d.Close()
-	if err := d.InsertPeerWithMode(context.Background(), peerName, 1, "fp", []byte("k"), db.ModeUser, targetUser, 2); err != nil {
-		t.Fatalf("InsertPeerWithMode: %v", err)
+	if err := d.InsertPeer(context.Background(), peerName, 1, "fp", []byte("k"), targetUser); err != nil {
+		t.Fatalf("InsertPeer: %v", err)
 	}
 	for _, g := range allowed {
 		if err := d.EnsureGroup(context.Background(), g); err != nil {
@@ -553,8 +553,8 @@ func TestGroupAllow_UserMode_EncryptedCA_NoCAPassphrase(t *testing.T) {
 		t.Fatalf("db.Open: %v", err)
 	}
 	ctx := context.Background()
-	if err := d.InsertPeerWithMode(ctx, "vmU", 1, "fp", []byte("k"), db.ModeUser, "alice", 2); err != nil {
-		t.Fatalf("InsertPeerWithMode: %v", err)
+	if err := d.InsertPeer(ctx, "vmU", 1, "fp", []byte("k"), "alice"); err != nil {
+		t.Fatalf("InsertPeer: %v", err)
 	}
 	if err := d.EnsureGroup(ctx, "infra"); err != nil {
 		t.Fatalf("EnsureGroup: %v", err)
@@ -606,8 +606,8 @@ func TestGroupAllow_RootUser_RewritesAuthorizedKeys_NoReload(t *testing.T) {
 		t.Fatalf("db.Open: %v", err)
 	}
 	ctx := context.Background()
-	if err := d.InsertPeerWithMode(ctx, "vmRoot", 1, "fp", []byte("k"), db.ModeUser, "root", 2); err != nil {
-		t.Fatalf("InsertPeerWithMode: %v", err)
+	if err := d.InsertPeer(ctx, "vmRoot", 1, "fp", []byte("k"), "root"); err != nil {
+		t.Fatalf("InsertPeer: %v", err)
 	}
 	if err := d.EnsureGroup(ctx, "infra"); err != nil {
 		t.Fatalf("EnsureGroup: %v", err)

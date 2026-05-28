@@ -60,7 +60,7 @@ func scriptHandler(database *db.DB) func(http.ResponseWriter, *http.Request, str
 			writeErr(w, http.StatusBadRequest, "missing token")
 			return
 		}
-		_, _, _, _, consumed, err := database.LookupToken(r.Context(), token)
+		_, _, _, consumed, err := database.LookupToken(r.Context(), token)
 		if err != nil {
 			if errors.Is(err, db.ErrTokenNotFound) {
 				writeErr(w, http.StatusNotFound, "token not found")
@@ -157,7 +157,7 @@ func enrollHandler(database *db.DB) http.HandlerFunc {
 		// concurrent consume is acceptable: token is the secret; admin can re-issue.
 		// queryUser may be "root" (a --user root enrollment), which validUsername
 		// accepts and which targets /root/.ssh.
-		_, _, _, preTargetUser, preConsumed, err := database.LookupToken(ctx, token)
+		_, _, preTargetUser, preConsumed, err := database.LookupToken(ctx, token)
 		if err != nil {
 			if errors.Is(err, db.ErrTokenNotFound) {
 				writeErr(w, http.StatusNotFound, "token not found")
@@ -181,7 +181,7 @@ func enrollHandler(database *db.DB) http.HandlerFunc {
 			}
 		}
 
-		peerName, _, _, _, tarball, err := database.ConsumeToken(ctx, token)
+		peerName, _, _, tarball, err := database.ConsumeToken(ctx, token)
 		if err != nil {
 			switch {
 			case errors.Is(err, db.ErrTokenNotFound):
