@@ -1115,6 +1115,447 @@ func TestGroupDelete_StragglerKeepsGroup(t *testing.T) {
 	}
 }
 
+// seedRenameDB sets up a CA + DB pre-populated with the requested groups and
+// peers, including memberships and allow-lists. Each peer gets a fresh
+// authorized_key so SignCert can re-issue against it.
+func seedRenameDB(t *testing.T) (dataDir, dbPath string) {
+	t.Helper()
+	dataDir = t.TempDir()
+	if _, err := ca.Generate(filepath.Join(dataDir, "ca")); err != nil {
+		t.Fatalf("ca.Generate: %v", err)
+	}
+	dbPath = filepath.Join(dataDir, "state.db")
+	return dataDir, dbPath
+}
+
+func TestGroupRename_Success(t *testing.T) {
+	dataDir, dbPath := seedRenameDB(t)
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	ctx := context.Background()
+	if err := d.EnsureGroup(ctx, "web"); err != nil {
+		t.Fatalf("EnsureGroup web: %v", err)
+	}
+	alphaKey := freshPeerKey(t)
+	betaKey := freshPeerKey(t)
+	gammaKey := freshPeerKey(t)
+	if err := d.InsertPeer(ctx, "alpha", 1, "fp-a", alphaKey, "alice"); err != nil {
+		t.Fatalf("InsertPeer alpha: %v", err)
+	}
+	if err := d.InsertPeer(ctx, "beta", 1, "fp-b", betaKey, "bob"); err != nil {
+		t.Fatalf("InsertPeer beta: %v", err)
+	}
+	if err := d.InsertPeer(ctx, "gamma", 1, "fp-g", gammaKey, "carol"); err != nil {
+		t.Fatalf("InsertPeer gamma: %v", err)
+	}
+	if err := d.SetPeerGroups(ctx, "alpha", []string{"web"}); err != nil {
+		t.Fatalf("SetPeerGroups alpha: %v", err)
+	}
+	if err := d.SetPeerGroups(ctx, "beta", []string{"web"}); err != nil {
+		t.Fatalf("SetPeerGroups beta: %v", err)
+	}
+	if err := d.SetPeerAllowedGroups(ctx, "gamma", []string{"web"}); err != nil {
+		t.Fatalf("SetPeerAllowedGroups gamma: %v", err)
+	}
+	d.Close()
+
+	fp := &fakePusher{readData: map[string][]byte{
+		"/home/carol/.ssh/authorized_keys": caLineFor(t, dataDir, "manager", "web"),
+	}}
+	installFakePusherFor(t, fp)
+
+	out, err := runGroupCmd(t, dataDir, dbPath, "rename", "web", "public")
+	if err != nil {
+		t.Fatalf("rename: err=%v out=%s", err, out)
+	}
+	if !strings.Contains(out, "renamed") || !strings.Contains(out, "public") {
+		t.Errorf("output = %q, want 'renamed' and 'public'", out)
+	}
+
+	d, err = db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open after: %v", err)
+	}
+	defer d.Close()
+	if ok, _ := d.GroupExists(ctx, "web"); ok {
+		t.Error("group 'web' should no longer exist")
+	}
+	if ok, _ := d.GroupExists(ctx, "public"); !ok {
+		t.Error("group 'public' should exist after rename")
+	}
+	for _, name := range []string{"alpha", "beta"} {
+		got, err := d.GetPeerGroups(ctx, name)
+		if err != nil {
+			t.Fatalf("GetPeerGroups %s: %v", name, err)
+		}
+		if !reflect.DeepEqual(got, []string{"public"}) {
+			t.Errorf("GetPeerGroups(%s) = %v, want [public]", name, got)
+		}
+	}
+	gammaAllowed, err := d.GetPeerAllowedGroups(ctx, "gamma")
+	if err != nil {
+		t.Fatalf("GetPeerAllowedGroups gamma: %v", err)
+	}
+	if !reflect.DeepEqual(gammaAllowed, []string{"public"}) {
+		t.Errorf("gamma allowed = %v, want [public]", gammaAllowed)
+	}
+
+	calls := fp.Calls()
+	var certWrites, akWrites int
+	var akContent []byte
+	for _, c := range calls {
+		switch {
+		case c.op == "write" && strings.HasSuffix(c.path, "-cert.pub"):
+			certWrites++
+		case c.op == "write" && strings.HasSuffix(c.path, "/authorized_keys"):
+			akWrites++
+			akContent = c.content
+		}
+	}
+	if certWrites != 2 {
+		t.Errorf("cert writes = %d, want 2 (alpha+beta). calls=%+v", certWrites, calls)
+	}
+	if akWrites != 1 {
+		t.Errorf("authorized_keys writes = %d, want 1 (gamma)", akWrites)
+	}
+	if !strings.Contains(string(akContent), `principals="manager,public"`) {
+		t.Errorf("rewritten authorized_keys = %q, want it to contain 'principals=\"manager,public\"' (and no 'web')", akContent)
+	}
+	if strings.Contains(string(akContent), "web") {
+		t.Errorf("rewritten authorized_keys still contains 'web': %q", akContent)
+	}
+}
+
+func TestGroupRename_TargetExists(t *testing.T) {
+	dataDir, dbPath := seedRenameDB(t)
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	ctx := context.Background()
+	if err := d.EnsureGroup(ctx, "web"); err != nil {
+		t.Fatalf("EnsureGroup web: %v", err)
+	}
+	if err := d.EnsureGroup(ctx, "public"); err != nil {
+		t.Fatalf("EnsureGroup public: %v", err)
+	}
+	alphaKey := freshPeerKey(t)
+	if err := d.InsertPeer(ctx, "alpha", 1, "fp-a", alphaKey, "alice"); err != nil {
+		t.Fatalf("InsertPeer alpha: %v", err)
+	}
+	if err := d.SetPeerGroups(ctx, "alpha", []string{"web"}); err != nil {
+		t.Fatalf("SetPeerGroups alpha: %v", err)
+	}
+	d.Close()
+
+	fp := &fakePusher{}
+	installFakePusherFor(t, fp)
+
+	_, err = runGroupCmd(t, dataDir, dbPath, "rename", "web", "public")
+	if err == nil {
+		t.Fatal("expected error when target exists")
+	}
+	if !strings.Contains(err.Error(), "already exists") {
+		t.Errorf("error = %q, want it to mention 'already exists'", err)
+	}
+	if len(fp.Calls()) != 0 {
+		t.Errorf("expected no pusher calls, got %d: %+v", len(fp.Calls()), fp.Calls())
+	}
+
+	d, err = db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open after: %v", err)
+	}
+	defer d.Close()
+	if ok, _ := d.GroupExists(ctx, "web"); !ok {
+		t.Error("group 'web' should still exist after rejected rename")
+	}
+	got, err := d.GetPeerGroups(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetPeerGroups alpha: %v", err)
+	}
+	if !reflect.DeepEqual(got, []string{"web"}) {
+		t.Errorf("GetPeerGroups(alpha) = %v, want [web]", got)
+	}
+}
+
+func TestGroupRename_SourceMissing(t *testing.T) {
+	dataDir, dbPath := freshGroupDB(t)
+	fp := &fakePusher{}
+	installFakePusherFor(t, fp)
+
+	_, err := runGroupCmd(t, dataDir, dbPath, "rename", "web", "public")
+	if err == nil {
+		t.Fatal("expected error for missing source group")
+	}
+	if !strings.Contains(err.Error(), "does not exist") {
+		t.Errorf("error = %q, want it to mention 'does not exist'", err)
+	}
+	if len(fp.Calls()) != 0 {
+		t.Errorf("expected no pusher calls, got %d", len(fp.Calls()))
+	}
+}
+
+func TestGroupRename_InvalidNewName(t *testing.T) {
+	dataDir, dbPath := freshGroupDB(t)
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	if err := d.EnsureGroup(context.Background(), "web"); err != nil {
+		t.Fatalf("EnsureGroup web: %v", err)
+	}
+	d.Close()
+
+	fp := &fakePusher{}
+	installFakePusherFor(t, fp)
+
+	_, err = runGroupCmd(t, dataDir, dbPath, "rename", "web", "   ")
+	if err == nil {
+		t.Fatal("expected error for invalid (whitespace) new name")
+	}
+	if !strings.Contains(err.Error(), "invalid group name") {
+		t.Errorf("error = %q, want it to mention 'invalid group name'", err)
+	}
+	if len(fp.Calls()) != 0 {
+		t.Errorf("expected no pusher calls, got %d", len(fp.Calls()))
+	}
+
+	d, err = db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open after: %v", err)
+	}
+	defer d.Close()
+	if ok, _ := d.GroupExists(context.Background(), "web"); !ok {
+		t.Error("group 'web' should still exist after rejected rename")
+	}
+}
+
+func TestGroupRename_ReservedFromOrTo(t *testing.T) {
+	for _, tc := range []struct {
+		name, oldName, newName string
+	}{
+		{"reserved-from", "manager", "x"},
+		{"reserved-to", "x", "manager"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dataDir, dbPath := freshGroupDB(t)
+			d, err := db.Open(dbPath)
+			if err != nil {
+				t.Fatalf("db.Open: %v", err)
+			}
+			if err := d.EnsureGroup(context.Background(), "x"); err != nil {
+				t.Fatalf("EnsureGroup x: %v", err)
+			}
+			before, err := d.ListGroupsWithPeerCount(context.Background())
+			if err != nil {
+				t.Fatalf("ListGroupsWithPeerCount: %v", err)
+			}
+			d.Close()
+
+			fp := &fakePusher{}
+			installFakePusherFor(t, fp)
+
+			_, err = runGroupCmd(t, dataDir, dbPath, "rename", tc.oldName, tc.newName)
+			if err == nil {
+				t.Fatal("expected error for reserved rename")
+			}
+			if !strings.Contains(err.Error(), "reserved") {
+				t.Errorf("error = %q, want it to mention 'reserved'", err)
+			}
+			if len(fp.Calls()) != 0 {
+				t.Errorf("expected no pusher calls, got %d", len(fp.Calls()))
+			}
+
+			d, err = db.Open(dbPath)
+			if err != nil {
+				t.Fatalf("db.Open after: %v", err)
+			}
+			after, err := d.ListGroupsWithPeerCount(context.Background())
+			if err != nil {
+				t.Fatalf("ListGroupsWithPeerCount after: %v", err)
+			}
+			d.Close()
+			if !reflect.DeepEqual(before, after) {
+				t.Errorf("groups changed: before=%v after=%v", before, after)
+			}
+		})
+	}
+}
+
+func TestGroupRename_NoOpSameName(t *testing.T) {
+	dataDir, dbPath := seedRenameDB(t)
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	ctx := context.Background()
+	if err := d.EnsureGroup(ctx, "web"); err != nil {
+		t.Fatalf("EnsureGroup web: %v", err)
+	}
+	alphaKey := freshPeerKey(t)
+	if err := d.InsertPeer(ctx, "alpha", 1, "fp-a", alphaKey, "alice"); err != nil {
+		t.Fatalf("InsertPeer alpha: %v", err)
+	}
+	if err := d.SetPeerGroups(ctx, "alpha", []string{"web"}); err != nil {
+		t.Fatalf("SetPeerGroups alpha: %v", err)
+	}
+	d.Close()
+
+	fp := &fakePusher{}
+	installFakePusherFor(t, fp)
+
+	out, err := runGroupCmd(t, dataDir, dbPath, "rename", "web", "web")
+	if err != nil {
+		t.Fatalf("rename web→web: err=%v out=%s", err, out)
+	}
+	if len(fp.Calls()) != 0 {
+		t.Errorf("expected no pusher calls for same-name rename, got %d: %+v", len(fp.Calls()), fp.Calls())
+	}
+
+	d, err = db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open after: %v", err)
+	}
+	defer d.Close()
+	if ok, _ := d.GroupExists(ctx, "web"); !ok {
+		t.Error("group 'web' should still exist after same-name rename")
+	}
+	got, err := d.GetPeerGroups(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetPeerGroups alpha: %v", err)
+	}
+	if !reflect.DeepEqual(got, []string{"web"}) {
+		t.Errorf("alpha groups = %v, want [web]", got)
+	}
+}
+
+func TestGroupRename_StragglerKeepsRenameCommitted(t *testing.T) {
+	dataDir, dbPath := seedRenameDB(t)
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	ctx := context.Background()
+	if err := d.EnsureGroup(ctx, "web"); err != nil {
+		t.Fatalf("EnsureGroup web: %v", err)
+	}
+	alphaKey := freshPeerKey(t)
+	if err := d.InsertPeer(ctx, "alpha", 1, "fp-a", alphaKey, "alice"); err != nil {
+		t.Fatalf("InsertPeer alpha: %v", err)
+	}
+	if err := d.SetPeerGroups(ctx, "alpha", []string{"web"}); err != nil {
+		t.Fatalf("SetPeerGroups alpha: %v", err)
+	}
+	d.Close()
+
+	fp := &fakePusher{errOn: "verify"}
+	installFakePusherFor(t, fp)
+
+	_, err = runGroupCmd(t, dataDir, dbPath, "rename", "web", "public")
+	if err == nil {
+		t.Fatal("expected straggler error")
+	}
+	if !strings.Contains(err.Error(), "straggler") {
+		t.Errorf("error = %q, want it to mention 'straggler'", err)
+	}
+
+	d, err = db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open after: %v", err)
+	}
+	defer d.Close()
+	if ok, _ := d.GroupExists(ctx, "web"); ok {
+		t.Error("group 'web' should NOT exist (rename stays committed)")
+	}
+	if ok, _ := d.GroupExists(ctx, "public"); !ok {
+		t.Error("group 'public' should exist (rename stays committed)")
+	}
+	got, err := d.GetPeerGroups(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetPeerGroups alpha: %v", err)
+	}
+	if !reflect.DeepEqual(got, []string{"public"}) {
+		t.Errorf("alpha groups = %v, want [public]", got)
+	}
+}
+
+func TestGroupRename_SkipsRevokedPeers(t *testing.T) {
+	dataDir, dbPath := seedRenameDB(t)
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	ctx := context.Background()
+	if err := d.EnsureGroup(ctx, "web"); err != nil {
+		t.Fatalf("EnsureGroup web: %v", err)
+	}
+	aliveKey := freshPeerKey(t)
+	deadKey := freshPeerKey(t)
+	if err := d.InsertPeer(ctx, "alive", 1, "fp-l", aliveKey, "alice"); err != nil {
+		t.Fatalf("InsertPeer alive: %v", err)
+	}
+	if err := d.InsertPeer(ctx, "dead", 1, "fp-d", deadKey, "bob"); err != nil {
+		t.Fatalf("InsertPeer dead: %v", err)
+	}
+	if err := d.SetPeerGroups(ctx, "alive", []string{"web"}); err != nil {
+		t.Fatalf("SetPeerGroups alive: %v", err)
+	}
+	if err := d.SetPeerGroups(ctx, "dead", []string{"web"}); err != nil {
+		t.Fatalf("SetPeerGroups dead: %v", err)
+	}
+	if err := d.SetPeerRevoked(ctx, "dead"); err != nil {
+		t.Fatalf("SetPeerRevoked dead: %v", err)
+	}
+	d.Close()
+
+	var dialedHosts []string
+	fp := &fakePusher{}
+	prev := groupDial
+	groupDial = func(ctx context.Context, host string, opts sshpush.Options) (sshpush.Pusher, error) {
+		dialedHosts = append(dialedHosts, host)
+		return fp, nil
+	}
+	t.Cleanup(func() { groupDial = prev })
+
+	out, err := runGroupCmd(t, dataDir, dbPath, "rename", "web", "public")
+	if err != nil {
+		t.Fatalf("rename: err=%v out=%s", err, out)
+	}
+
+	for _, h := range dialedHosts {
+		if h == "dead" {
+			t.Errorf("revoked peer 'dead' was dialed: %v", dialedHosts)
+		}
+	}
+	if len(dialedHosts) != 1 || dialedHosts[0] != "alive" {
+		t.Errorf("dialedHosts = %v, want [alive]", dialedHosts)
+	}
+
+	d, err = db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open after: %v", err)
+	}
+	defer d.Close()
+	for _, name := range []string{"alive", "dead"} {
+		got, err := d.GetPeerGroups(ctx, name)
+		if err != nil {
+			t.Fatalf("GetPeerGroups %s: %v", name, err)
+		}
+		if !reflect.DeepEqual(got, []string{"public"}) {
+			t.Errorf("GetPeerGroups(%s) = %v, want [public] (RenameGroup updates all rows)", name, got)
+		}
+	}
+	if ok, _ := d.GroupExists(ctx, "web"); ok {
+		t.Error("group 'web' should not exist")
+	}
+	if ok, _ := d.GroupExists(ctx, "public"); !ok {
+		t.Error("group 'public' should exist")
+	}
+}
+
 func TestGroupDelete_SkipsRevokedPeers(t *testing.T) {
 	dataDir := t.TempDir()
 	if _, err := ca.Generate(filepath.Join(dataDir, "ca")); err != nil {
