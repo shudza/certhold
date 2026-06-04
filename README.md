@@ -70,9 +70,12 @@ certhold init                 # generate the CA, self-enroll, pick the interface
 certhold serve --addr :8443   # run the enroll endpoint over HTTPS (self-signed). Leave it running.
 ```
 
-**2. Enroll two peers** from the manager, both in the `infra` group:
+**2. Enroll two peers** from the manager, both in the `infra` group. Groups are
+created explicitly — `init` bootstraps `manager`, every other group is
+operator-created:
 
 ```bash
+certhold group create infra
 certhold enroll app1 --groups infra
 # → curl -kfsSL https://192.168.1.10:8443/enroll/<token>.sh | bash
 certhold enroll app2 --groups infra
@@ -108,9 +111,13 @@ Day-to-day operations, all run on the manager:
 
 ```bash
 certhold list                              # peers, their group membership, and who may connect in
+certhold group create web                  # create a group (required before any enroll/update/allow that references it)
+certhold group show web                    # who's in "web" and who allows it inbound
 certhold update app1 --groups infra,web    # change a peer's group membership (reissues its cert)
 certhold group allow web --on app2         # let "web" members SSH into app2
 certhold group disallow web --on app2      # …and take it back
+certhold group rename web frontend         # rename a group; cascades to every member's cert and every allow-list peer
+certhold group delete web                  # delete a group; cascades to every member's cert and every allow-list peer
 certhold revoke app1                       # cut app1 off the network
 certhold rekey                             # rotate the CA (e.g. after a suspected key leak)
 ```

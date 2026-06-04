@@ -68,8 +68,10 @@ CREATE TABLE peer_allowed_groups (  -- inbound: groups this peer ACCEPTS from
 );
 ```
 
-`groups` is the set of known group names, populated lazily as groups are
-referenced. The two join tables encode a real, independent distinction:
+`groups` is the set of known group names. Operators populate it explicitly with
+`certhold group create`; `certhold init` lazily creates the reserved `manager`
+group during manager bootstrap. The two join tables encode a real, independent
+distinction:
 
 - **`peer_groups`** — the groups a peer belongs to. Drives the principals on
   **its own certificate**.
@@ -78,9 +80,15 @@ referenced. The two join tables encode a real, independent distinction:
   `authorized_keys` `cert-authority` line).
 
 `enroll` initializes both to the requested `--groups`, so a fresh peer starts
-symmetric (and same-group peers can reach each other immediately). They diverge
-afterward: `update` changes membership, while `group allow`/`disallow` edits only
-the allowed set.
+symmetric (and same-group peers can reach each other immediately). The peer's
+own `peer_groups` / `peer_allowed_groups` rows are still created automatically,
+but each named group must already exist in `groups` — `enroll`, `update`, and
+`group allow` error if it does not. The sets diverge afterward: `update` changes
+membership, while `group allow`/`disallow` edits only the allowed set.
+
+`certhold group delete` removes the group row and every `peer_groups` /
+`peer_allowed_groups` row referencing it (atomically). `certhold group rename`
+updates all three tables atomically.
 
 ### `tokens`
 
