@@ -5,6 +5,7 @@ import (
 	"context"
 	"io/fs"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -216,6 +217,7 @@ func TestUpdateDialsTargetUserForUserModePeer(t *testing.T) {
 
 func TestUpdateDialsRootForRootTargetPeer(t *testing.T) {
 	dataDir, dbPath, _ := setupUpdateEnv(t, "peer1", []string{"oldA"}, false)
+	preCreateGroups(t, dbPath, "newA")
 	var gotUser string
 	withMockPusherCapturingUser(t, &gotUser)
 	if _, stderr, err := runUpdate(t, dataDir, dbPath, "peer1", "--groups", "newA"); err != nil {
@@ -228,6 +230,7 @@ func TestUpdateDialsRootForRootTargetPeer(t *testing.T) {
 
 func TestUpdateDialsAddressWhenNoHostFlag(t *testing.T) {
 	dataDir, dbPath, _ := setupUpdateEnv(t, "peer1", []string{"oldA"}, false)
+	preCreateGroups(t, dbPath, "newA")
 	d, err := db.Open(dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
@@ -249,6 +252,7 @@ func TestUpdateDialsAddressWhenNoHostFlag(t *testing.T) {
 
 func TestUpdateHostFlagBeatsAddress(t *testing.T) {
 	dataDir, dbPath, _ := setupUpdateEnv(t, "peer1", []string{"oldA"}, false)
+	preCreateGroups(t, dbPath, "newA")
 	d, err := db.Open(dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
@@ -270,6 +274,7 @@ func TestUpdateHostFlagBeatsAddress(t *testing.T) {
 
 func TestUpdateDialsNameWhenNoAddress(t *testing.T) {
 	dataDir, dbPath, _ := setupUpdateEnv(t, "peer1", []string{"oldA"}, false)
+	preCreateGroups(t, dbPath, "newA")
 	var gotHost string
 	withMockPusherCapturingHost(t, &gotHost)
 	if _, stderr, err := runUpdate(t, dataDir, dbPath, "peer1", "--groups", "newA"); err != nil {
@@ -282,6 +287,7 @@ func TestUpdateDialsNameWhenNoAddress(t *testing.T) {
 
 func TestUpdateSuccess(t *testing.T) {
 	dataDir, dbPath, oldSerial := setupUpdateEnv(t, "peer1", []string{"oldA"}, false)
+	preCreateGroups(t, dbPath, "newA", "newB")
 	mp := withMockPusher(t)
 
 	stdout, stderr, err := runUpdate(t, dataDir, dbPath, "peer1", "--groups", "newA,newB")
@@ -391,6 +397,7 @@ func setupUpdateUserPeer(t *testing.T, peerName, targetUser string) (dataDir, db
 
 func TestUpdateUserMode_NoReload(t *testing.T) {
 	dataDir, dbPath, key := setupUpdateUserPeer(t, "vmU", "alice")
+	preCreateGroups(t, dbPath, "infra")
 	mp := withMockPusher(t)
 	stdout, stderr, err := runUpdate(t, dataDir, dbPath, "vmU", "--groups", "infra")
 	if err != nil {
@@ -446,6 +453,7 @@ func setupUpdateV2Peer(t *testing.T, peerName, targetUser string) (dataDir, dbPa
 
 func TestUpdateV2Root_NamespacedCert_NoReload(t *testing.T) {
 	dataDir, dbPath, key := setupUpdateV2Peer(t, "vmV2", "root")
+	preCreateGroups(t, dbPath, "infra")
 	mp := withMockPusher(t)
 	if _, _, err := runUpdate(t, dataDir, dbPath, "vmV2", "--groups", "infra"); err != nil {
 		t.Fatalf("update v2 root: %v", err)
@@ -473,6 +481,7 @@ func TestUpdateV2Root_NamespacedCert_NoReload(t *testing.T) {
 
 func TestUpdateUserMode_RootUserHomeIsSlashRoot(t *testing.T) {
 	dataDir, dbPath, key := setupUpdateUserPeer(t, "vmR", "root")
+	preCreateGroups(t, dbPath, "infra")
 	mp := withMockPusher(t)
 	if _, _, err := runUpdate(t, dataDir, dbPath, "vmR", "--groups", "infra"); err != nil {
 		t.Fatalf("update: %v", err)
@@ -533,9 +542,42 @@ func setupUpdateEncryptedCAEnv(t *testing.T, peerName string, initialGroups []st
 	return dataDir, dbPath, serial
 }
 
+// TestUpdate_FailsWhenGroupDoesNotExist verifies update errors when --groups
+// references a missing group and leaves the peer's existing groups untouched.
+func TestUpdate_FailsWhenGroupDoesNotExist(t *testing.T) {
+	dataDir, dbPath, _ := setupUpdateEnv(t, "alpha", []string{"oldA"}, false)
+	withMockPusher(t)
+
+	_, stderr, err := runUpdate(t, dataDir, dbPath, "alpha", "--groups", "newgrp")
+	if err == nil {
+		t.Fatal("expected update to fail for nonexistent group, got nil")
+	}
+	msg := err.Error() + stderr
+	if !strings.Contains(msg, "newgrp") {
+		t.Errorf("error %q does not mention group name", msg)
+	}
+	if !strings.Contains(msg, "group create") {
+		t.Errorf("error %q does not guide user to `group create`", msg)
+	}
+
+	d, dbErr := db.Open(dbPath)
+	if dbErr != nil {
+		t.Fatalf("reopen db: %v", dbErr)
+	}
+	defer d.Close()
+	groups, gerr := d.GetPeerGroups(context.Background(), "alpha")
+	if gerr != nil {
+		t.Fatalf("GetPeerGroups: %v", gerr)
+	}
+	if len(groups) != 1 || groups[0] != "oldA" {
+		t.Errorf("peer groups = %v, want [oldA] (unchanged)", groups)
+	}
+}
+
 func TestUpdateEncryptedCAViaEnv(t *testing.T) {
 	const caPW = "ca-secret"
 	dataDir, dbPath, oldSerial := setupUpdateEncryptedCAEnv(t, "peerEnc", []string{"oldA"}, caPW)
+	preCreateGroups(t, dbPath, "newA", "newB")
 	mp := withMockPusher(t)
 
 	t.Setenv("CERTHOLD_CA_PASSPHRASE", caPW)

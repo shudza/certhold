@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -47,6 +48,20 @@ func setupDB(t *testing.T) string {
 		t.Fatalf("ca.Generate: %v", err)
 	}
 	return dbPath
+}
+
+func preCreateGroups(t *testing.T, dbPath string, groups ...string) {
+	t.Helper()
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("preCreateGroups open: %v", err)
+	}
+	defer d.Close()
+	for _, g := range groups {
+		if err := d.EnsureGroup(context.Background(), g); err != nil {
+			t.Fatalf("preCreateGroups EnsureGroup %q: %v", g, err)
+		}
+	}
 }
 
 // extractTokenTarball pulls the stored tarball blob for a token row directly via
@@ -123,6 +138,7 @@ func extractToken(t *testing.T, stdout, baseURL string) string {
 
 func TestEnrollSuccess(t *testing.T) {
 	dbPath := setupDB(t)
+	preCreateGroups(t, dbPath, "a", "b")
 	stdout, stderr, err := runEnroll(t, dbPath, "new-vm", "--groups", "a,b")
 	if err != nil {
 		t.Fatalf("enroll: err=%v stderr=%s", err, stderr)
@@ -155,6 +171,7 @@ func TestEnrollSuccess(t *testing.T) {
 
 func TestEnrollAddressStoredOnPeerRow(t *testing.T) {
 	dbPath := setupDB(t)
+	preCreateGroups(t, dbPath, "infra")
 	stdout, stderr, err := runEnroll(t, dbPath, "app1", "--groups", "infra", "--address", "10.0.0.5")
 	if err != nil {
 		t.Fatalf("enroll: err=%v stderr=%s", err, stderr)
@@ -181,6 +198,7 @@ func TestEnrollAddressStoredOnPeerRow(t *testing.T) {
 
 func TestEnrollNoAddressLeavesEmpty(t *testing.T) {
 	dbPath := setupDB(t)
+	preCreateGroups(t, dbPath, "infra")
 	if _, stderr, err := runEnroll(t, dbPath, "app2", "--groups", "infra"); err != nil {
 		t.Fatalf("enroll: err=%v stderr=%s", err, stderr)
 	}
@@ -203,6 +221,7 @@ func TestEnrollNoAddressLeavesEmpty(t *testing.T) {
 
 func TestEnrollDefaultUserEmpty(t *testing.T) {
 	dbPath := setupDB(t)
+	preCreateGroups(t, dbPath, "infra")
 	stdout, stderr, err := runEnroll(t, dbPath, "vm1", "--groups", "infra")
 	if err != nil {
 		t.Fatalf("enroll: err=%v stderr=%s", err, stderr)
@@ -224,6 +243,7 @@ func TestEnrollDefaultUserEmpty(t *testing.T) {
 
 func TestEnrollExplicitUserAlice(t *testing.T) {
 	dbPath := setupDB(t)
+	preCreateGroups(t, dbPath, "infra")
 	stdout, stderr, err := runEnroll(t, dbPath, "vm1", "--groups", "infra", "--user", "alice")
 	if err != nil {
 		t.Fatalf("enroll: err=%v stderr=%s", err, stderr)
@@ -247,6 +267,7 @@ func TestEnrollExplicitUserAlice(t *testing.T) {
 // (root is reached by targeting the root user, not a removed root mode).
 func TestEnrollRootUser(t *testing.T) {
 	dbPath := setupDB(t)
+	preCreateGroups(t, dbPath, "infra")
 	stdout, stderr, err := runEnroll(t, dbPath, "rootvm", "--groups", "infra", "--user", "root")
 	if err != nil {
 		t.Fatalf("enroll: err=%v stderr=%s", err, stderr)
@@ -268,6 +289,7 @@ func TestEnrollRootUser(t *testing.T) {
 
 func TestEnrollExplicitUser(t *testing.T) {
 	dbPath := setupDB(t)
+	preCreateGroups(t, dbPath, "infra")
 	stdout, stderr, err := runEnroll(t, dbPath, "uvm", "--groups", "infra", "--user", "alice")
 	if err != nil {
 		t.Fatalf("enroll: err=%v stderr=%s", err, stderr)
@@ -316,6 +338,7 @@ func TestEnrollDuplicateName(t *testing.T) {
 
 func TestEnrollGroupsDedupeAndTrim(t *testing.T) {
 	dbPath := setupDB(t)
+	preCreateGroups(t, dbPath, "a", "b", "c")
 	stdout, stderr, err := runEnroll(t, dbPath, "vm2", "--groups", " a , b ,a, ,c")
 	if err != nil {
 		t.Fatalf("enroll: err=%v stderr=%s", err, stderr)
@@ -346,6 +369,7 @@ func TestEnrollEmptyGroups(t *testing.T) {
 func TestEnrollBaseURLFlag(t *testing.T) {
 	clearBaseURLEnv(t)
 	dbPath := setupDB(t)
+	preCreateGroups(t, dbPath, "x")
 	cmd := NewRootCmd()
 	var out bytes.Buffer
 	cmd.SetOut(&out)
@@ -363,6 +387,7 @@ func TestEnrollBaseURLFlag(t *testing.T) {
 func TestEnrollBaseURLFromPersistedFile(t *testing.T) {
 	clearBaseURLEnv(t)
 	dbPath := setupDB(t)
+	preCreateGroups(t, dbPath, "infra")
 	dataDir := filepath.Dir(dbPath)
 	if err := SaveBaseURL(dataDir, "https://192.168.1.205:8443"); err != nil {
 		t.Fatalf("SaveBaseURL: %v", err)
@@ -379,6 +404,7 @@ func TestEnrollBaseURLFromPersistedFile(t *testing.T) {
 func TestEnrollBaseURLFlagBeatsPersisted(t *testing.T) {
 	clearBaseURLEnv(t)
 	dbPath := setupDB(t)
+	preCreateGroups(t, dbPath, "x")
 	dataDir := filepath.Dir(dbPath)
 	if err := SaveBaseURL(dataDir, "https://192.168.1.205:8443"); err != nil {
 		t.Fatalf("SaveBaseURL: %v", err)
@@ -399,6 +425,7 @@ func TestEnrollBaseURLFlagBeatsPersisted(t *testing.T) {
 func TestEnrollBaseURLEnvBeatsPersistedNotFlag(t *testing.T) {
 	clearBaseURLEnv(t)
 	dbPath := setupDB(t)
+	preCreateGroups(t, dbPath, "x")
 	dataDir := filepath.Dir(dbPath)
 	if err := SaveBaseURL(dataDir, "https://192.168.1.205:8443"); err != nil {
 		t.Fatalf("SaveBaseURL: %v", err)
@@ -451,6 +478,7 @@ func instanceKeyOf(t *testing.T, dbPath string) string {
 // auth_principals/root).
 func TestEnrollBuildsRootTarball(t *testing.T) {
 	dbPath := setupDB(t)
+	preCreateGroups(t, dbPath, "infra", "databases")
 	stdout, stderr, err := runEnroll(t, dbPath, "rootvm", "--groups", "infra,databases", "--user", "root")
 	if err != nil {
 		t.Fatalf("enroll: err=%v stderr=%s", err, stderr)
@@ -503,6 +531,7 @@ func TestEnrollBuildsRootTarball(t *testing.T) {
 
 func TestEnrollBuildsUserTarball(t *testing.T) {
 	dbPath := setupDB(t)
+	preCreateGroups(t, dbPath, "infra")
 	stdout, stderr, err := runEnroll(t, dbPath, "uvm", "--groups", "infra", "--user", "alice")
 	if err != nil {
 		t.Fatalf("enroll: err=%v stderr=%s", err, stderr)
@@ -556,6 +585,7 @@ func TestEnrollEncryptedCAViaEnv(t *testing.T) {
 	if _, err := ca.GenerateWithPassphrase(filepath.Join(dataDir, "ca"), []byte("capw")); err != nil {
 		t.Fatalf("GenerateWithPassphrase: %v", err)
 	}
+	preCreateGroups(t, dbPath, "infra")
 
 	t.Setenv("CERTHOLD_CA_PASSPHRASE", "capw")
 	clearBaseURLEnv(t)
@@ -576,6 +606,33 @@ func TestEnrollEncryptedCAViaEnv(t *testing.T) {
 	entries := extractTarEntries(t, tb)
 	if _, ok := entries["id_ed25519_"+key+"-cert.pub"]; !ok {
 		t.Errorf("missing signed cert in encrypted-CA tarball (have %v)", keysOf(entries))
+	}
+}
+
+// TestEnroll_FailsWhenGroupDoesNotExist verifies that enroll errors out (and
+// does not insert the peer) when --groups references a group that has not been
+// created via `certhold group create`.
+func TestEnroll_FailsWhenGroupDoesNotExist(t *testing.T) {
+	dbPath := setupDB(t)
+	_, stderr, err := runEnroll(t, dbPath, "alpha", "--groups", "missing")
+	if err == nil {
+		t.Fatal("expected enroll to fail for nonexistent group, got nil")
+	}
+	msg := err.Error() + stderr
+	if !strings.Contains(msg, "missing") {
+		t.Errorf("error %q does not mention group name", msg)
+	}
+	if !strings.Contains(msg, "group create") {
+		t.Errorf("error %q does not guide user to `group create`", msg)
+	}
+
+	d, dbErr := db.Open(dbPath)
+	if dbErr != nil {
+		t.Fatalf("reopen db: %v", dbErr)
+	}
+	defer d.Close()
+	if _, gerr := d.GetPeer(context.Background(), "alpha"); !errors.Is(gerr, db.ErrPeerNotFound) {
+		t.Errorf("peer alpha should not exist; GetPeer err = %v, want ErrPeerNotFound", gerr)
 	}
 }
 

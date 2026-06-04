@@ -684,8 +684,12 @@ func runGroupAction(cmd *cobra.Command, group string, allow bool) error {
 	}
 
 	if allow {
-		if err := d.EnsureGroup(ctx, group); err != nil {
-			return fmt.Errorf("ensure group: %w", err)
+		exists, err := d.GroupExists(ctx, group)
+		if err != nil {
+			return fmt.Errorf("check group %q: %w", group, err)
+		}
+		if !exists {
+			return fmt.Errorf("group %q does not exist (run \"certhold group create %s\" first)", group, group)
 		}
 		if contains(current, group) {
 			fmt.Fprintf(cmd.OutOrStdout(), "group %q already allowed on %s\n", group, peerName)
