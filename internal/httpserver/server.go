@@ -131,6 +131,14 @@ func writeV2Body(sb *strings.Builder, curl, keyFile, block, instanceKey string) 
 	fmt.Fprintf(sb, "if [ -s \"$STAGE/known_hosts\" ]; then cat \"$STAGE/known_hosts\" >> \"$USER_HOME/.ssh/known_hosts\"; echo \"  ~ ~/.ssh/known_hosts                       (appended manager host key)\"; fi\n")
 	fmt.Fprintf(sb, "touch \"$USER_HOME/.ssh/authorized_keys\"\n")
 	fmt.Fprintf(sb, "chmod 600 \"$USER_HOME/.ssh/authorized_keys\"\n")
+	// CA_KEY is the 3rd whitespace token of the shipped line
+	// ("cert-authority,principals=..." <type> <base64> <comment>) — the raw CA
+	// pubkey we grep for to dedupe. Workaround: TestEnrollV2User_Script pins the
+	// canonical `if ! grep -qF "$CA_KEY" ... cat ... fi` guard line byte-for-byte,
+	// so we can't fold an "appended" echo into it. Instead we capture the same
+	// condition into APPENDED_AK with an extra identical grep first, then run the
+	// pinned guard, then echo iff APPENDED_AK=1. Cost: one extra grep per install.
+	// Removing it requires either changing the test pin or rewriting the guard.
 	fmt.Fprintf(sb, "CA_KEY=\"$(awk '{print $3}' \"$STAGE/ca_authorized_keys\")\"\n")
 	fmt.Fprintf(sb, "APPENDED_AK=0\n")
 	fmt.Fprintf(sb, "if ! grep -qF \"$CA_KEY\" \"$USER_HOME/.ssh/authorized_keys\"; then APPENDED_AK=1; fi\n")
