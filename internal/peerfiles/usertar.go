@@ -125,13 +125,13 @@ func AuthorizedKeysLine(caPub []byte, principals []string) []byte {
 }
 
 // buildAuthorizedKeysLine returns a single newline-terminated cert-authority
-// line. The principals list is prefixed with "manager" (deduped).
+// line. The principals list is prefixed with ManagerPrincipal (deduped).
 // The format is documented in PLAN.md ("User level vs root level scoping") and
 // matched by authorized.RewritePrincipals — keep this in sync with that regex.
 func buildAuthorizedKeysLine(caPub []byte, principals []string) []byte {
 	caTrim := strings.TrimRight(string(caPub), "\n")
-	all := []string{"manager"}
-	seen := map[string]struct{}{"manager": {}}
+	all := []string{ManagerPrincipal}
+	seen := map[string]struct{}{ManagerPrincipal: {}}
 	for _, p := range principals {
 		p = strings.TrimSpace(p)
 		if p == "" {

@@ -169,7 +169,7 @@ func newInitCmd() *cobra.Command {
 			certBytes, serial, err := caObj.SignCert(ca.SignOptions{
 				Pubkey:     sshPub,
 				KeyID:      hostname,
-				Principals: []string{hostname, "manager"},
+				Principals: []string{hostname, peerfiles.ManagerPrincipal},
 			})
 			if err != nil {
 				return fmt.Errorf("sign cert: %w", err)
@@ -180,10 +180,10 @@ func newInitCmd() *cobra.Command {
 			if err := database.InsertPeer(ctx, hostname, serial, fingerprint, pubAuth, targetUser); err != nil {
 				return fmt.Errorf("insert peer: %w", err)
 			}
-			if err := database.EnsureGroup(ctx, "manager"); err != nil {
+			if err := database.EnsureGroup(ctx, peerfiles.ManagerPrincipal); err != nil {
 				return fmt.Errorf("ensure group manager: %w", err)
 			}
-			if err := database.SetPeerAllowedGroups(ctx, hostname, []string{"manager"}); err != nil {
+			if err := database.SetPeerAllowedGroups(ctx, hostname, []string{peerfiles.ManagerPrincipal}); err != nil {
 				return fmt.Errorf("set allowed groups: %w", err)
 			}
 

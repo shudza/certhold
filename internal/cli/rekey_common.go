@@ -148,9 +148,9 @@ func runRekeyCore(ctx context.Context, deps rekeyDeps, exclude map[string]bool) 
 	if err != nil {
 		return abortRekey(deps.Err, fmt.Errorf("get groups for self: %w", err), updated)
 	}
-	selfPrincipals := []string{deps.Hostname, "manager"}
+	selfPrincipals := []string{deps.Hostname, peerfiles.ManagerPrincipal}
 	for _, g := range selfGroups {
-		if g != "manager" {
+		if g != peerfiles.ManagerPrincipal {
 			selfPrincipals = append(selfPrincipals, g)
 		}
 	}
@@ -323,8 +323,8 @@ func pushPeerRekey(ctx context.Context, dial func(context.Context, string, sshpu
 func userAuthorizedKeysLine(caPub []byte, principals []string) []byte {
 	// Match the format produced by peerfiles.BuildUser. Keep the dedupe rules
 	// in sync with peerfiles.RewritePrincipals: manager is always first.
-	all := []string{"manager"}
-	seen := map[string]struct{}{"manager": {}}
+	all := []string{peerfiles.ManagerPrincipal}
+	seen := map[string]struct{}{peerfiles.ManagerPrincipal: {}}
 	for _, p := range principals {
 		if _, ok := seen[p]; ok {
 			continue
