@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io/fs"
 	"path/filepath"
+	"strings"
+	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
@@ -26,8 +28,116 @@ func newGroupCmd() *cobra.Command {
 		Use:   "group",
 		Short: "Manage groups and group memberships",
 	}
-	cmd.AddCommand(newGroupAllowCmd(), newGroupDisallowCmd())
+	cmd.AddCommand(newGroupAllowCmd(), newGroupDisallowCmd(), newGroupCreateCmd(), newGroupShowCmd())
 	return cmd
+}
+
+func newGroupCreateCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "create <name>",
+		Short: "Create a new group",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runGroupCreate(cmd, args[0])
+		},
+	}
+}
+
+func newGroupShowCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "show <name>",
+		Short: "Show a group's members and the peers that allow it",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runGroupShow(cmd, args[0])
+		},
+	}
+}
+
+func runGroupCreate(cmd *cobra.Command, name string) error {
+	if name == peerfiles.ManagerPrincipal {
+		return fmt.Errorf("group %q is reserved", name)
+	}
+
+	dbPath, err := cmd.Root().PersistentFlags().GetString("db")
+	if err != nil {
+		return fmt.Errorf("get db: %w", err)
+	}
+	dbPath = expandHome(dbPath)
+
+	d, err := db.Open(dbPath)
+	if err != nil {
+		return fmt.Errorf("open db: %w", err)
+	}
+	defer d.Close()
+
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	if err := d.CreateGroup(ctx, name); err != nil {
+		switch {
+		case errors.Is(err, db.ErrGroupExists):
+			return fmt.Errorf("group %q already exists", name)
+		case errors.Is(err, db.ErrInvalidGroupName):
+			return fmt.Errorf("invalid group name %q", name)
+		default:
+			return fmt.Errorf("create group: %w", err)
+		}
+	}
+
+	fmt.Fprintf(cmd.OutOrStdout(), "group %q created\n", name)
+	return nil
+}
+
+func runGroupShow(cmd *cobra.Command, name string) error {
+	dbPath, err := cmd.Root().PersistentFlags().GetString("db")
+	if err != nil {
+		return fmt.Errorf("get db: %w", err)
+	}
+	dbPath = expandHome(dbPath)
+
+	d, err := db.Open(dbPath)
+	if err != nil {
+		return fmt.Errorf("open db: %w", err)
+	}
+	defer d.Close()
+
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	exists, err := d.GroupExists(ctx, name)
+	if err != nil {
+		return fmt.Errorf("group exists: %w", err)
+	}
+	if !exists {
+		return fmt.Errorf("group %q does not exist", name)
+	}
+
+	members, err := d.GetGroupMembers(ctx, name)
+	if err != nil {
+		return fmt.Errorf("get group members: %w", err)
+	}
+	allowedBy, err := d.GetGroupAllowedBy(ctx, name)
+	if err != nil {
+		return fmt.Errorf("get group allowed-by: %w", err)
+	}
+
+	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+	fmt.Fprintf(w, "GROUP\t%s\n", name)
+	fmt.Fprintf(w, "MEMBERS\t%s\n", joinOrNone(members))
+	fmt.Fprintf(w, "ALLOWED BY\t%s\n", joinOrNone(allowedBy))
+	return w.Flush()
+}
+
+func joinOrNone(xs []string) string {
+	if len(xs) == 0 {
+		return "(none)"
+	}
+	return strings.Join(xs, ",")
 }
 
 func newGroupAllowCmd() *cobra.Command {
