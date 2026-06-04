@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -726,11 +728,26 @@ func TestEnrollV2User_Script(t *testing.T) {
 		// Feature 3 peer-side passphrase block.
 		`if [ "${CERTHOLD_NO_PASSPHRASE:-}" != "1" ]; then`,
 		`ssh-keygen -p -f "$KEY"`,
+		// T02: per-file status lines and final success block.
+		`Changed files:`,
+		`  + ~/.ssh/id_ed25519_` + testInstanceKey + `            (installed, 0600 - private key)`,
+		`  + ~/.ssh/id_ed25519_` + testInstanceKey + `-cert.pub   (installed, 0644 - certificate)`,
+		`  ~ ~/.ssh/known_hosts                       (appended manager host key)`,
+		`  ~ ~/.ssh/authorized_keys                   (appended cert-authority line)`,
+		`  ~ ~/.ssh/config                            (replaced certhold block)`,
+		`Success`,
+		`ssh $TARGET_USER@`,
 	}
 	for _, m := range mustContain {
 		if !strings.Contains(s, m) {
 			t.Errorf("v2 user script missing %q\nfull:\n%s", m, s)
 		}
+	}
+
+	// T02: the Success block must come AFTER the file ops (install -m 644 is the
+	// last unconditional install step).
+	if iSuccess, iInstall := strings.Index(s, "Success"), strings.Index(s, "install -m 644"); iSuccess <= iInstall {
+		t.Errorf("Success line must appear AFTER install -m 644 (Success@%d, install@%d)\nfull:\n%s", iSuccess, iInstall, s)
 	}
 	// The v2 user script must NOT carry any host-level certhold directives,
 	// touch the global sshd/ssh configs, or reload sshd.
@@ -759,4 +776,131 @@ func mustRead(t *testing.T, r io.Reader) []byte {
 		t.Fatalf("read: %v", err)
 	}
 	return b
+}
+
+// TestEnrollV2Script_BashSyntax syntax-checks the rendered install script with
+// `bash -n` so a broken echo/quote regression fails CI even if no peer runs it.
+func TestEnrollV2Script_BashSyntax(t *testing.T) {
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skipf("bash not on PATH (%v); skipping syntax check", err)
+	}
+
+	script := v2Script("https://demo.example", "TOKEN123", testInstanceKey)
+	tmpFile := filepath.Join(t.TempDir(), "install.sh")
+	if err := os.WriteFile(tmpFile, []byte(script), 0o600); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	cmd := exec.Command(bashPath, "-n", tmpFile)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("bash -n failed: %v\nstderr+stdout:\n%s\nscript:\n%s", err, out, script)
+	}
+}
+
+// TestEnrollV2Script_ExecutionSmoke runs the install script against a HOME
+// tempdir, substituting a pre-built tarball for the curl/tar pipe. It asserts
+// status lines + the Success line appear on stdout, and that the
+// authorized_keys "appended" line is NOT printed on a second run (idempotency).
+func TestEnrollV2Script_ExecutionSmoke(t *testing.T) {
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skipf("bash not on PATH (%v); skipping execution smoke", err)
+	}
+
+	const baseURL = "https://demo.example"
+	const tok = "TOKEN123"
+	script := v2Script(baseURL, tok, testInstanceKey)
+	keyFile := peerfiles.V2KeyFileName(testInstanceKey)
+
+	tarDir := t.TempDir()
+	fixturePath := filepath.Join(tarDir, "peer.tgz")
+	{
+		var buf bytes.Buffer
+		gz := gzip.NewWriter(&buf)
+		tw := tar.NewWriter(gz)
+		entries := []struct {
+			name string
+			body []byte
+		}{
+			{keyFile, []byte("FAKE_PRIVKEY\n")},
+			{keyFile + "-cert.pub", []byte("ssh-ed25519-cert-v01@openssh.com FAKECERT keyid\n")},
+			{"known_hosts", []byte("manager.example ssh-ed25519 FAKEHOSTKEY\n")},
+			{"ca_authorized_keys", []byte(`cert-authority,principals="manager" ssh-ed25519 FAKECAKEY ca-comment` + "\n")},
+		}
+		for _, e := range entries {
+			if err := tw.WriteHeader(&tar.Header{Name: e.name, Mode: 0o644, Size: int64(len(e.body))}); err != nil {
+				t.Fatalf("tar header %s: %v", e.name, err)
+			}
+			if _, err := tw.Write(e.body); err != nil {
+				t.Fatalf("tar write %s: %v", e.name, err)
+			}
+		}
+		if err := tw.Close(); err != nil {
+			t.Fatalf("tar close: %v", err)
+		}
+		if err := gz.Close(); err != nil {
+			t.Fatalf("gz close: %v", err)
+		}
+		if err := os.WriteFile(fixturePath, buf.Bytes(), 0o600); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+	}
+
+	curlLine := `curl -kfsSL ` + baseURL + `/enroll/` + tok + `?user=$TARGET_USER | tar -xzC "$STAGE"`
+	replacement := `tar -xzf ` + fixturePath + ` -C "$STAGE"`
+	if !strings.Contains(script, curlLine) {
+		t.Fatalf("script missing curl line %q\nscript:\n%s", curlLine, script)
+	}
+	patched := strings.Replace(script, curlLine, replacement, 1)
+
+	home := t.TempDir()
+	scriptPath := filepath.Join(home, "install.sh")
+	if err := os.WriteFile(scriptPath, []byte(patched), 0o700); err != nil {
+		t.Fatalf("write patched script: %v", err)
+	}
+
+	runScript := func() (string, string, error) {
+		cmd := exec.Command(bashPath, scriptPath)
+		cmd.Env = append(os.Environ(),
+			"HOME="+home,
+			"CERTHOLD_NO_PASSPHRASE=1",
+		)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		err := cmd.Run()
+		return stdout.String(), stderr.String(), err
+	}
+
+	stdout1, stderr1, err := runScript()
+	if err != nil {
+		t.Fatalf("first run failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout1, stderr1)
+	}
+	mustContainStdout := []string{
+		"Changed files:",
+		"~/.ssh/" + keyFile,
+		"~/.ssh/" + keyFile + "-cert.pub",
+		"~/.ssh/known_hosts",
+		"~/.ssh/authorized_keys",
+		"~/.ssh/config",
+		"Success",
+		"ssh ",
+	}
+	for _, m := range mustContainStdout {
+		if !strings.Contains(stdout1, m) {
+			t.Errorf("first run stdout missing %q\nstdout:\n%s", m, stdout1)
+		}
+	}
+
+	stdout2, stderr2, err := runScript()
+	if err != nil {
+		t.Fatalf("second run failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout2, stderr2)
+	}
+	if strings.Contains(stdout2, "appended cert-authority line") {
+		t.Errorf("second run printed authorized_keys appended line (idempotency broken)\nstdout:\n%s", stdout2)
+	}
+	if !strings.Contains(stdout2, "Success") {
+		t.Errorf("second run stdout missing Success block\nstdout:\n%s", stdout2)
+	}
 }

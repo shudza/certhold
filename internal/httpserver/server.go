@@ -118,26 +118,38 @@ func writeV2Body(sb *strings.Builder, curl, keyFile, block, instanceKey string) 
 	fmt.Fprintf(sb, "chmod 700 \"$USER_HOME/.ssh\"\n")
 	fmt.Fprintf(sb, "STAGE=\"$(mktemp -d \"$USER_HOME/.ssh/.certhold.XXXXXX\")\"\n")
 	fmt.Fprintf(sb, "%s | tar -xzC \"$STAGE\"\n", curl)
+	fmt.Fprintf(sb, "echo \"\"\n")
+	fmt.Fprintf(sb, "echo \"Changed files:\"\n")
 	fmt.Fprintf(sb, "install -m 600 \"$STAGE/%s\" \"$USER_HOME/.ssh/%s\"\n", keyFile, keyFile)
+	fmt.Fprintf(sb, "echo \"  + ~/.ssh/%s            (installed, 0600 - private key)\"\n", keyFile)
 	fmt.Fprintf(sb, "install -m 644 \"$STAGE/%s-cert.pub\" \"$USER_HOME/.ssh/%s-cert.pub\"\n", keyFile, keyFile)
+	fmt.Fprintf(sb, "echo \"  + ~/.ssh/%s-cert.pub   (installed, 0644 - certificate)\"\n", keyFile)
 	fmt.Fprintf(sb, "KEY=\"$USER_HOME/.ssh/%s\"\n", keyFile)
 	sb.WriteString(peerPassphraseBlock)
 
 	fmt.Fprintf(sb, "touch \"$USER_HOME/.ssh/known_hosts\"\n")
-	fmt.Fprintf(sb, "if [ -s \"$STAGE/known_hosts\" ]; then cat \"$STAGE/known_hosts\" >> \"$USER_HOME/.ssh/known_hosts\"; fi\n")
+	fmt.Fprintf(sb, "if [ -s \"$STAGE/known_hosts\" ]; then cat \"$STAGE/known_hosts\" >> \"$USER_HOME/.ssh/known_hosts\"; echo \"  ~ ~/.ssh/known_hosts                       (appended manager host key)\"; fi\n")
 	fmt.Fprintf(sb, "touch \"$USER_HOME/.ssh/authorized_keys\"\n")
 	fmt.Fprintf(sb, "chmod 600 \"$USER_HOME/.ssh/authorized_keys\"\n")
-	// Append this instance's cert-authority line only if its CA pubkey isn't
-	// already trusted. The CA pubkey field is the 3rd whitespace token of the
-	// shipped line ("cert-authority,principals=..." <type> <base64> <comment>).
 	fmt.Fprintf(sb, "CA_KEY=\"$(awk '{print $3}' \"$STAGE/ca_authorized_keys\")\"\n")
+	fmt.Fprintf(sb, "APPENDED_AK=0\n")
+	fmt.Fprintf(sb, "if ! grep -qF \"$CA_KEY\" \"$USER_HOME/.ssh/authorized_keys\"; then APPENDED_AK=1; fi\n")
 	fmt.Fprintf(sb, "if ! grep -qF \"$CA_KEY\" \"$USER_HOME/.ssh/authorized_keys\"; then cat \"$STAGE/ca_authorized_keys\" >> \"$USER_HOME/.ssh/authorized_keys\"; fi\n")
+	fmt.Fprintf(sb, "if [ \"$APPENDED_AK\" = \"1\" ]; then echo \"  ~ ~/.ssh/authorized_keys                   (appended cert-authority line)\"; fi\n")
 
 	fmt.Fprintf(sb, "touch \"$USER_HOME/.ssh/config\"\n")
 	fmt.Fprintf(sb, "sed -i -E \"/^# BEGIN certhold %s( v[0-9]+)?\\$/,/^# END certhold %s( v[0-9]+)?\\$/d\" \"$USER_HOME/.ssh/config\"\n", instanceKey, instanceKey)
 	fmt.Fprintf(sb, "cat >> \"$USER_HOME/.ssh/config\" <<'CHCFG_EOF'\n%sCHCFG_EOF\n", block)
+	fmt.Fprintf(sb, "echo \"  ~ ~/.ssh/config                            (replaced certhold block)\"\n")
 
 	fmt.Fprintf(sb, "rm -rf \"$STAGE\"\n")
+
+	fmt.Fprintf(sb, "PEER_HOST=\"$(hostname -f 2>/dev/null || hostname || echo \"<your-host>\")\"\n")
+	fmt.Fprintf(sb, "[ -n \"$PEER_HOST\" ] || PEER_HOST=\"<your-host>\"\n")
+	fmt.Fprintf(sb, "echo \"\"\n")
+	fmt.Fprintf(sb, "echo \"Success. Try:  ssh $TARGET_USER@$PEER_HOST\"\n")
+	fmt.Fprintf(sb, "echo \"This address is what this peer reports for itself; if a different\"\n")
+	fmt.Fprintf(sb, "echo \"address is reachable from the manager, pass --address to certhold enroll next time.\"\n")
 }
 
 func enrollHandler(database *db.DB) http.HandlerFunc {
