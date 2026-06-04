@@ -138,6 +138,7 @@ func installFakePusherCapturingHost(t *testing.T, dataDir string, gotHost *strin
 
 func TestGroupDialsAddressWhenNoHostFlag(t *testing.T) {
 	dataDir, dbPath := seedGroupDB(t, []string{"a"})
+	preCreateGroups(t, dbPath, "c")
 	d, err := db.Open(dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
@@ -159,6 +160,7 @@ func TestGroupDialsAddressWhenNoHostFlag(t *testing.T) {
 
 func TestGroupHostFlagBeatsAddress(t *testing.T) {
 	dataDir, dbPath := seedGroupDB(t, []string{"a"})
+	preCreateGroups(t, dbPath, "c")
 	d, err := db.Open(dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
@@ -180,6 +182,7 @@ func TestGroupHostFlagBeatsAddress(t *testing.T) {
 
 func TestGroupDialsNameWhenNoAddress(t *testing.T) {
 	dataDir, dbPath := seedGroupDB(t, []string{"a"})
+	preCreateGroups(t, dbPath, "c")
 	var gotHost string
 	installFakePusherCapturingHost(t, dataDir, &gotHost)
 	if out, err := runGroupCmd(t, dataDir, dbPath, "allow", "c", "--on", "peer1"); err != nil {
@@ -264,6 +267,7 @@ func writeContent(t *testing.T, calls []fakePushCall) []byte {
 
 func TestGroupAllowAddsAndPushes(t *testing.T) {
 	dataDir, dbPath := seedGroupDB(t, []string{"a", "b"})
+	preCreateGroups(t, dbPath, "c")
 	fp := installFakePusher(t, dataDir, caLineFor(t, dataDir, "manager", "a", "b"))
 
 	out, err := runGroupCmd(t, dataDir, dbPath, "allow", "c", "--on", "peer1")
@@ -363,6 +367,7 @@ func TestGroupDisallowMissingIsNoop(t *testing.T) {
 
 func TestGroupContentAlwaysStartsWithManager(t *testing.T) {
 	dataDir, dbPath := seedGroupDB(t, nil)
+	preCreateGroups(t, dbPath, "x")
 	fp := installFakePusher(t, dataDir, caLineFor(t, dataDir, "manager"))
 
 	if _, err := runGroupCmd(t, dataDir, dbPath, "allow", "x", "--on", "peer1"); err != nil {
@@ -418,6 +423,7 @@ func TestGroupSSHOptionsPathsMatchInitLayout(t *testing.T) {
 	}
 	key, _, _ := d.GetMeta(context.Background(), db.MetaInstanceKey)
 	d.Close()
+	preCreateGroups(t, dbPath, "g")
 
 	var captured sshpush.Options
 	fp := installFakePusherCapturingOpts(t, &captured)
@@ -483,6 +489,7 @@ func runGroupUserModeCmd(t *testing.T, dataDir, dbPath string, args ...string) (
 
 func TestGroupAllow_UserMode_RewritesAuthorizedKeys_NoReload(t *testing.T) {
 	dataDir, dbPath := setupGroupUserModeDB(t, "vmU", "alice", []string{"infra"})
+	preCreateGroups(t, dbPath, "db")
 
 	caObj, err := ca.Load(filepath.Join(dataDir, "ca"))
 	if err != nil {
@@ -559,6 +566,9 @@ func TestGroupAllow_UserMode_EncryptedCA_NoCAPassphrase(t *testing.T) {
 	if err := d.EnsureGroup(ctx, "infra"); err != nil {
 		t.Fatalf("EnsureGroup: %v", err)
 	}
+	if err := d.EnsureGroup(ctx, "db"); err != nil {
+		t.Fatalf("EnsureGroup db: %v", err)
+	}
 	if err := d.SetPeerAllowedGroups(ctx, "vmU", []string{"infra"}); err != nil {
 		t.Fatalf("SetPeerAllowedGroups: %v", err)
 	}
@@ -612,6 +622,9 @@ func TestGroupAllow_RootUser_RewritesAuthorizedKeys_NoReload(t *testing.T) {
 	if err := d.EnsureGroup(ctx, "infra"); err != nil {
 		t.Fatalf("EnsureGroup: %v", err)
 	}
+	if err := d.EnsureGroup(ctx, "db"); err != nil {
+		t.Fatalf("EnsureGroup db: %v", err)
+	}
 	if err := d.SetPeerAllowedGroups(ctx, "vmRoot", []string{"infra"}); err != nil {
 		t.Fatalf("SetPeerAllowedGroups: %v", err)
 	}
@@ -658,6 +671,39 @@ func TestGroupAllowRequiresOnFlag(t *testing.T) {
 	installFakePusher(t, dataDir, nil)
 	if _, err := runGroupCmd(t, dataDir, dbPath, "allow", "g"); err == nil {
 		t.Fatal("expected error when --on is missing")
+	}
+}
+
+// TestGroupAllow_FailsWhenGroupDoesNotExist asserts the allow path rejects an
+// unknown group, never dials a pusher, and leaves the peer's allowed list
+// untouched.
+func TestGroupAllow_FailsWhenGroupDoesNotExist(t *testing.T) {
+	dataDir, dbPath := seedGroupDB(t, []string{"a"})
+	dialCount := 0
+	prev := groupDial
+	groupDial = func(ctx context.Context, host string, opts sshpush.Options) (sshpush.Pusher, error) {
+		dialCount++
+		return &fakePusher{}, nil
+	}
+	t.Cleanup(func() { groupDial = prev })
+
+	out, err := runGroupCmd(t, dataDir, dbPath, "allow", "nonexistent", "--on", "peer1")
+	if err == nil {
+		t.Fatal("expected allow to fail for nonexistent group, got nil")
+	}
+	msg := err.Error() + out
+	if !strings.Contains(msg, "nonexistent") {
+		t.Errorf("error %q does not mention group name", msg)
+	}
+	if !strings.Contains(msg, "group create") {
+		t.Errorf("error %q does not guide user to `group create`", msg)
+	}
+	if dialCount != 0 {
+		t.Errorf("expected no pusher dials, got %d", dialCount)
+	}
+	got := getAllowed(t, dbPath)
+	if !reflect.DeepEqual(got, []string{"a"}) {
+		t.Errorf("allowed = %v, want [a] (unchanged)", got)
 	}
 }
 

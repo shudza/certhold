@@ -103,8 +103,12 @@ func newUpdateCmd() *cobra.Command {
 			}
 
 			for _, g := range groups {
-				if err := d.EnsureGroup(ctx, g); err != nil {
-					return err
+				exists, err := d.GroupExists(ctx, g)
+				if err != nil {
+					return fmt.Errorf("check group %q: %w", g, err)
+				}
+				if !exists {
+					return fmt.Errorf("group %q does not exist (run \"certhold group create %s\" first)", g, g)
 				}
 			}
 			if err := d.SetPeerGroups(ctx, name, groups); err != nil {

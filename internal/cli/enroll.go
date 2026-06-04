@@ -137,8 +137,12 @@ func newEnrollCmd() *cobra.Command {
 					}
 				}
 				for _, g := range groups {
-					if err := tx.EnsureGroup(ctx, g); err != nil {
-						return err
+					exists, err := tx.GroupExists(ctx, g)
+					if err != nil {
+						return fmt.Errorf("check group %q: %w", g, err)
+					}
+					if !exists {
+						return fmt.Errorf("group %q does not exist (run \"certhold group create %s\" first)", g, g)
 					}
 				}
 				if err := tx.SetPeerGroups(ctx, name, groups); err != nil {
