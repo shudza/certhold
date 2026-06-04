@@ -16,7 +16,7 @@ var (
 
 // RewritePrincipals scans `existing` for an authorized_keys line whose options
 // include `cert-authority`, whose key payload matches caPubKey, and rewrites
-// its `principals="..."` substring. "manager" is always prepended (deduped).
+// its `principals="..."` substring. ManagerPrincipal is always prepended (deduped).
 // Other lines are preserved verbatim.
 func RewritePrincipals(existing []byte, caPubKey ssh.PublicKey, principals []string) ([]byte, error) {
 	caMarshalled := caPubKey.Marshal()
@@ -95,8 +95,8 @@ func ReplaceCALine(existing []byte, oldCAPubKey ssh.PublicKey, newLine []byte) [
 }
 
 func dedupPrincipals(principals []string) []string {
-	all := []string{"manager"}
-	seen := map[string]struct{}{"manager": {}}
+	all := []string{ManagerPrincipal}
+	seen := map[string]struct{}{ManagerPrincipal: {}}
 	for _, p := range principals {
 		p = strings.TrimSpace(p)
 		if p == "" {
