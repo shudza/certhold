@@ -3,8 +3,25 @@ package db
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"strings"
 )
+
+var (
+	ErrGroupExists      = errors.New("group already exists")
+	ErrGroupNotFound    = errors.New("group not found")
+	ErrInvalidGroupName = errors.New("invalid group name")
+)
+
+// txCtx is the minimal interface satisfied by *sql.DB, *sql.Tx, and *sql.Conn
+// for the read/write operations the group CRUD helpers need. It lets the *DB
+// and *Tx variants share a single implementation.
+type txCtx interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
 
 type GroupCount struct {
 	Name      string
@@ -88,6 +105,151 @@ func setPeerGroupsTableTx(ctx context.Context, tx *sql.Tx, table, peer string, g
 		}
 	}
 	return nil
+}
+
+// CreateGroup inserts a new group and returns ErrGroupExists if the name is
+// already taken, or ErrInvalidGroupName for an empty/whitespace name.
+func (db *DB) CreateGroup(ctx context.Context, name string) error {
+	return createGroupTx(ctx, db.sql, name)
+}
+
+func createGroupTx(ctx context.Context, q txCtx, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ErrInvalidGroupName
+	}
+	exists, err := groupExistsTx(ctx, q, name)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return ErrGroupExists
+	}
+	if _, err := q.ExecContext(ctx, `INSERT INTO groups(name) VALUES (?)`, name); err != nil {
+		if strings.Contains(err.Error(), "UNIQUE") {
+			return ErrGroupExists
+		}
+		return fmt.Errorf("create group: %w", err)
+	}
+	return nil
+}
+
+// DeleteGroup removes a group and its membership rows from peer_groups and
+// peer_allowed_groups atomically. Returns ErrGroupNotFound if the group does
+// not exist.
+func (db *DB) DeleteGroup(ctx context.Context, name string) error {
+	return db.WithTx(ctx, func(tx *Tx) error {
+		return deleteGroupTx(ctx, tx.tx, name)
+	})
+}
+
+func deleteGroupTx(ctx context.Context, q txCtx, name string) error {
+	exists, err := groupExistsTx(ctx, q, name)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrGroupNotFound
+	}
+	if _, err := q.ExecContext(ctx, `DELETE FROM peer_groups WHERE group_name = ?`, name); err != nil {
+		return fmt.Errorf("delete group memberships: %w", err)
+	}
+	if _, err := q.ExecContext(ctx, `DELETE FROM peer_allowed_groups WHERE group_name = ?`, name); err != nil {
+		return fmt.Errorf("delete group allowed memberships: %w", err)
+	}
+	if _, err := q.ExecContext(ctx, `DELETE FROM groups WHERE name = ?`, name); err != nil {
+		return fmt.Errorf("delete group: %w", err)
+	}
+	return nil
+}
+
+// RenameGroup atomically retargets every membership row from oldName to
+// newName. Returns ErrGroupNotFound if oldName is missing, ErrGroupExists if
+// newName is already taken, or ErrInvalidGroupName for an empty newName.
+func (db *DB) RenameGroup(ctx context.Context, oldName, newName string) error {
+	return db.WithTx(ctx, func(tx *Tx) error {
+		return renameGroupTx(ctx, tx.tx, oldName, newName)
+	})
+}
+
+func renameGroupTx(ctx context.Context, q txCtx, oldName, newName string) error {
+	oldName = strings.TrimSpace(oldName)
+	newName = strings.TrimSpace(newName)
+	if newName == "" {
+		return ErrInvalidGroupName
+	}
+	oldExists, err := groupExistsTx(ctx, q, oldName)
+	if err != nil {
+		return err
+	}
+	if !oldExists {
+		return ErrGroupNotFound
+	}
+	if oldName != newName {
+		newExists, err := groupExistsTx(ctx, q, newName)
+		if err != nil {
+			return err
+		}
+		if newExists {
+			return ErrGroupExists
+		}
+	}
+	if _, err := q.ExecContext(ctx, `INSERT OR IGNORE INTO groups(name) VALUES (?)`, newName); err != nil {
+		return fmt.Errorf("rename insert new group: %w", err)
+	}
+	if _, err := q.ExecContext(ctx, `UPDATE peer_groups SET group_name = ? WHERE group_name = ?`, newName, oldName); err != nil {
+		return fmt.Errorf("rename update peer_groups: %w", err)
+	}
+	if _, err := q.ExecContext(ctx, `UPDATE peer_allowed_groups SET group_name = ? WHERE group_name = ?`, newName, oldName); err != nil {
+		return fmt.Errorf("rename update peer_allowed_groups: %w", err)
+	}
+	if oldName != newName {
+		if _, err := q.ExecContext(ctx, `DELETE FROM groups WHERE name = ?`, oldName); err != nil {
+			return fmt.Errorf("rename delete old group: %w", err)
+		}
+	}
+	return nil
+}
+
+func (db *DB) GroupExists(ctx context.Context, name string) (bool, error) {
+	return groupExistsTx(ctx, db.sql, name)
+}
+
+func groupExistsTx(ctx context.Context, q txCtx, name string) (bool, error) {
+	var n int
+	if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM groups WHERE name = ?`, name).Scan(&n); err != nil {
+		return false, fmt.Errorf("group exists: %w", err)
+	}
+	return n > 0, nil
+}
+
+func (db *DB) GetGroupMembers(ctx context.Context, name string) ([]string, error) {
+	return getGroupPeersTx(ctx, db.sql, "peer_groups", name)
+}
+
+func (db *DB) GetGroupAllowedBy(ctx context.Context, name string) ([]string, error) {
+	return getGroupPeersTx(ctx, db.sql, "peer_allowed_groups", name)
+}
+
+func getGroupPeersTx(ctx context.Context, q txCtx, table, name string) ([]string, error) {
+	rows, err := q.QueryContext(ctx,
+		fmt.Sprintf(`SELECT peer_name FROM %s WHERE group_name = ? ORDER BY peer_name`, table), name)
+	if err != nil {
+		return nil, fmt.Errorf("query %s: %w", table, err)
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, fmt.Errorf("scan %s: %w", table, err)
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iter %s: %w", table, err)
+	}
+	return out, nil
 }
 
 func (db *DB) getPeerGroupsTable(ctx context.Context, table, peer string) ([]string, error) {

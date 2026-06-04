@@ -93,3 +93,27 @@ func (t *Tx) SetPeerGroups(ctx context.Context, peer string, groups []string) er
 func (t *Tx) SetPeerAllowedGroups(ctx context.Context, peer string, groups []string) error {
 	return setPeerGroupsTableTx(ctx, t.tx, "peer_allowed_groups", peer, groups)
 }
+
+func (t *Tx) CreateGroup(ctx context.Context, name string) error {
+	return createGroupTx(ctx, t.tx, name)
+}
+
+func (t *Tx) DeleteGroup(ctx context.Context, name string) error {
+	return deleteGroupTx(ctx, t.tx, name)
+}
+
+func (t *Tx) RenameGroup(ctx context.Context, oldName, newName string) error {
+	return renameGroupTx(ctx, t.tx, oldName, newName)
+}
+
+func (t *Tx) GroupExists(ctx context.Context, name string) (bool, error) {
+	return groupExistsTx(ctx, t.tx, name)
+}
+
+func (t *Tx) GetGroupMembers(ctx context.Context, name string) ([]string, error) {
+	return getGroupPeersTx(ctx, t.tx, "peer_groups", name)
+}
+
+func (t *Tx) GetGroupAllowedBy(ctx context.Context, name string) ([]string, error) {
+	return getGroupPeersTx(ctx, t.tx, "peer_allowed_groups", name)
+}
