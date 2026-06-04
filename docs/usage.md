@@ -48,9 +48,13 @@ cert for ordinary `ssh` from it), copy the contents of
 ## Onboarding a peer
 
 Onboarding is two commands. Run `enroll` on the manager to mint a token; it
-prints a single one-liner:
+prints a single one-liner. The referenced groups must exist beforehand — `init`
+bootstraps `manager` automatically, but everything else is operator-created with
+`certhold group create`:
 
 ```
+$ certhold group create infra
+$ certhold group create databases
 $ certhold enroll app1 --groups infra,databases
 curl -kfsSL https://192.168.1.10:8443/enroll/<token>.sh | bash
 ```
@@ -174,8 +178,9 @@ certhold enroll <name> --groups <a,b,c> [--base-url URL]
 
 Mints a one-time token, signs the peer cert (sign-at-mint), builds and stores the
 install tarball, records the peer, and prints the onboarding one-liner. Errors if
-a peer of that name already exists. No SSH push — the peer pulls its tarball from
-`serve`.
+a peer of that name already exists. Every group named in `--groups` must already
+exist — create them up front with [`group create`](#group-create); there is no
+implicit creation. No SSH push — the peer pulls its tarball from `serve`.
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -208,7 +213,9 @@ certhold update <name> --groups <a,b,d> [--host HOST]
 
 Reissues the peer's cert with a new group set, then SSHes in (as the peer's
 `target_user`) and pushes the new cert. No `sshd` reload. Runs a post-push health
-check. Errors if the peer is unknown or revoked.
+check. Errors if the peer is unknown or revoked. Every group named in `--groups`
+must already exist — create them up front with [`group create`](#group-create);
+there is no implicit creation.
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -228,7 +235,9 @@ Changes which groups may **connect into** a peer (its inbound allow-list),
 without reissuing the peer's cert. `allow` adds, `disallow` removes; both rewrite
 the `principals="…"` value on the peer's `authorized_keys` `cert-authority` line,
 push it, and run a health check (no `sshd` reload). Idempotent — a no-op exits
-without pushing. `manager` is always implicit and cannot be removed.
+without pushing. `manager` is always implicit and cannot be removed. The group
+named on `allow` must already exist — create it up front with
+[`group create`](#group-create); there is no implicit creation.
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -236,6 +245,77 @@ without pushing. `manager` is always implicit and cannot be removed.
 | `--host` | value of `--on` | SSH host to connect to. |
 
 Unlocks the manager peer key only (no CA signing).
+
+### `group create`
+
+```
+certhold group create <name>
+```
+
+Creates a new empty group. Refuses to create the reserved `manager` group.
+Errors if the group already exists (no silent dedup, so typos surface).
+Local-only — no push, no CA, no manager-key prompt.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| (none) | — | Takes only the positional `<name>`. |
+
+Unlocks nothing — no CA, no manager peer key.
+
+### `group show`
+
+```
+certhold group show <name>
+```
+
+Prints the group's members (peers whose cert names it) and the peers that allow
+it inbound. Read-only.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| (none) | — | Takes only the positional `<name>`. |
+
+Unlocks nothing — read-only.
+
+### `group delete`
+
+```
+certhold group delete <name>
+```
+
+Removes a group from every peer's membership and inbound allow-list across the
+fleet, then deletes the group row. Reissues certs for members and rewrites
+`authorized_keys` for allow-list peers, pushing both. Refuses `manager`. Skips
+revoked peers. If any peer cannot be reached, the group row is preserved and the
+command exits non-zero so the operator can re-run after the straggler is
+recovered; per-peer pushes that already succeeded remain committed.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| (none) | — | Takes only the positional `<name>`. |
+
+Unlocks the manager peer key (to push) and the CA key (to reissue member
+certs) — the CA prompt is skipped if the group has no members.
+
+### `group rename`
+
+```
+certhold group rename <old> <new>
+```
+
+Atomically renames a group across the DB and the fleet. Reissues every member's
+cert and rewrites every allow-list peer's `authorized_keys` so they carry the
+new name. Refuses to/from `manager`. A same-name rename is a no-op. If any push
+fails, the DB rename stays committed and the command exits non-zero; reconcile
+stragglers with a subsequent `update` (for member-only stragglers) or a no-op
+`group allow` (for allow-list stragglers).
+
+| Flag | Default | Meaning |
+|---|---|---|
+| (none) | — | Takes only the positional `<old>` and `<new>`. |
+
+Unlocks the manager peer key (to push) and the CA key (to reissue member
+certs) — the CA prompt is skipped if the group has no members.
 
 ### `revoke`
 
