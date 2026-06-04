@@ -856,3 +856,334 @@ func TestGroupCreate_RoundTripsToShow(t *testing.T) {
 		t.Errorf("expected MEMBERS and ALLOWED BY both '(none)'; got %q", out)
 	}
 }
+
+// installFakePusherFor installs a fake group dialer that returns the same
+// pusher for every dial. readData is shared across dials so per-peer
+// authorized_keys content can be pre-seeded by path.
+func installFakePusherFor(t *testing.T, fp *fakePusher) {
+	t.Helper()
+	prev := groupDial
+	groupDial = func(ctx context.Context, host string, opts sshpush.Options) (sshpush.Pusher, error) {
+		return fp, nil
+	}
+	t.Cleanup(func() { groupDial = prev })
+}
+
+// freshPeerKey mints an ssh-ed25519 keypair and returns the authorized_key
+// bytes suitable for db.InsertPeer's authorizedKey argument.
+func freshPeerKey(t *testing.T) []byte {
+	t.Helper()
+	_, pubAK, _, err := ca.GeneratePeerKey()
+	if err != nil {
+		t.Fatalf("GeneratePeerKey: %v", err)
+	}
+	return pubAK
+}
+
+func TestGroupDelete_NoAffectedPeers(t *testing.T) {
+	dataDir, dbPath := freshGroupDB(t)
+	if _, err := runGroupCmd(t, dataDir, dbPath, "create", "x"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	fp := &fakePusher{}
+	installFakePusherFor(t, fp)
+
+	out, err := runGroupCmd(t, dataDir, dbPath, "delete", "x")
+	if err != nil {
+		t.Fatalf("delete: err=%v out=%s", err, out)
+	}
+	if !strings.Contains(out, "no peers affected") {
+		t.Errorf("output = %q, want it to contain 'no peers affected'", out)
+	}
+	if len(fp.Calls()) != 0 {
+		t.Errorf("expected no pusher calls, got %d: %+v", len(fp.Calls()), fp.Calls())
+	}
+
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer d.Close()
+	if ok, _ := d.GroupExists(context.Background(), "x"); ok {
+		t.Error("group 'x' should no longer exist")
+	}
+}
+
+func TestGroupDelete_Reserved(t *testing.T) {
+	dataDir, dbPath := freshGroupDB(t)
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	if err := d.CreateGroup(context.Background(), "infra"); err != nil {
+		t.Fatalf("CreateGroup: %v", err)
+	}
+	d.Close()
+
+	fp := &fakePusher{}
+	installFakePusherFor(t, fp)
+
+	_, err = runGroupCmd(t, dataDir, dbPath, "delete", "manager")
+	if err == nil {
+		t.Fatal("expected error deleting reserved 'manager' group")
+	}
+	if !strings.Contains(err.Error(), "reserved") {
+		t.Errorf("error = %q, want it to mention 'reserved'", err)
+	}
+	if len(fp.Calls()) != 0 {
+		t.Errorf("expected no pusher calls, got %d", len(fp.Calls()))
+	}
+
+	d, err = db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer d.Close()
+	if ok, _ := d.GroupExists(context.Background(), "infra"); !ok {
+		t.Error("untouched group 'infra' should still exist")
+	}
+}
+
+func TestGroupDelete_NotFound(t *testing.T) {
+	dataDir, dbPath := freshGroupDB(t)
+
+	fp := &fakePusher{}
+	installFakePusherFor(t, fp)
+
+	_, err := runGroupCmd(t, dataDir, dbPath, "delete", "nope")
+	if err == nil {
+		t.Fatal("expected error deleting nonexistent group")
+	}
+	if !strings.Contains(err.Error(), "does not exist") {
+		t.Errorf("error = %q, want it to mention 'does not exist'", err)
+	}
+	if len(fp.Calls()) != 0 {
+		t.Errorf("expected no pusher calls, got %d", len(fp.Calls()))
+	}
+}
+
+func TestGroupDelete_CascadesMembershipAndAllowList(t *testing.T) {
+	dataDir := t.TempDir()
+	if _, err := ca.Generate(filepath.Join(dataDir, "ca")); err != nil {
+		t.Fatalf("ca.Generate: %v", err)
+	}
+	dbPath := filepath.Join(dataDir, "state.db")
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	ctx := context.Background()
+	for _, g := range []string{"web", "infra"} {
+		if err := d.EnsureGroup(ctx, g); err != nil {
+			t.Fatalf("EnsureGroup %s: %v", g, err)
+		}
+	}
+	alphaKey := freshPeerKey(t)
+	betaKey := freshPeerKey(t)
+	gammaKey := freshPeerKey(t)
+	if err := d.InsertPeer(ctx, "alpha", 1, "fp-a", alphaKey, "alice"); err != nil {
+		t.Fatalf("InsertPeer alpha: %v", err)
+	}
+	if err := d.InsertPeer(ctx, "beta", 1, "fp-b", betaKey, "bob"); err != nil {
+		t.Fatalf("InsertPeer beta: %v", err)
+	}
+	if err := d.InsertPeer(ctx, "gamma", 1, "fp-g", gammaKey, "carol"); err != nil {
+		t.Fatalf("InsertPeer gamma: %v", err)
+	}
+	if err := d.SetPeerGroups(ctx, "alpha", []string{"web", "infra"}); err != nil {
+		t.Fatalf("SetPeerGroups alpha: %v", err)
+	}
+	if err := d.SetPeerGroups(ctx, "beta", []string{"web", "infra"}); err != nil {
+		t.Fatalf("SetPeerGroups beta: %v", err)
+	}
+	if err := d.SetPeerAllowedGroups(ctx, "gamma", []string{"web", "infra"}); err != nil {
+		t.Fatalf("SetPeerAllowedGroups gamma: %v", err)
+	}
+	d.Close()
+
+	fp := &fakePusher{readData: map[string][]byte{
+		"/home/carol/.ssh/authorized_keys": caLineFor(t, dataDir, "manager", "web", "infra"),
+	}}
+	installFakePusherFor(t, fp)
+
+	out, err := runGroupCmd(t, dataDir, dbPath, "delete", "web")
+	if err != nil {
+		t.Fatalf("delete: err=%v out=%s", err, out)
+	}
+	if !strings.Contains(out, "affected peers:") {
+		t.Errorf("output = %q, want it to mention 'affected peers:'", out)
+	}
+
+	d, err = db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer d.Close()
+	if ok, _ := d.GroupExists(ctx, "web"); ok {
+		t.Error("group 'web' should no longer exist")
+	}
+	for _, name := range []string{"alpha", "beta"} {
+		got, err := d.GetPeerGroups(ctx, name)
+		if err != nil {
+			t.Fatalf("GetPeerGroups %s: %v", name, err)
+		}
+		want := []string{"infra"}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("GetPeerGroups(%s) = %v, want %v", name, got, want)
+		}
+	}
+	gammaAllowed, err := d.GetPeerAllowedGroups(ctx, "gamma")
+	if err != nil {
+		t.Fatalf("GetPeerAllowedGroups gamma: %v", err)
+	}
+	if !reflect.DeepEqual(gammaAllowed, []string{"infra"}) {
+		t.Errorf("gamma allowed = %v, want [infra]", gammaAllowed)
+	}
+
+	calls := fp.Calls()
+	var certWrites, akWrites, verifies int
+	for _, c := range calls {
+		switch {
+		case c.op == "write" && strings.HasSuffix(c.path, "-cert.pub"):
+			certWrites++
+		case c.op == "write" && strings.HasSuffix(c.path, "/authorized_keys"):
+			akWrites++
+		case c.op == "verify":
+			verifies++
+		}
+	}
+	if certWrites < 2 {
+		t.Errorf("want >=2 cert writes (alpha+beta), got %d. calls=%+v", certWrites, calls)
+	}
+	if akWrites < 1 {
+		t.Errorf("want >=1 authorized_keys write (gamma), got %d. calls=%+v", akWrites, calls)
+	}
+	if verifies < 3 {
+		t.Errorf("want 3 verify calls (one per peer), got %d", verifies)
+	}
+}
+
+func TestGroupDelete_StragglerKeepsGroup(t *testing.T) {
+	dataDir := t.TempDir()
+	if _, err := ca.Generate(filepath.Join(dataDir, "ca")); err != nil {
+		t.Fatalf("ca.Generate: %v", err)
+	}
+	dbPath := filepath.Join(dataDir, "state.db")
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	ctx := context.Background()
+	if err := d.EnsureGroup(ctx, "web"); err != nil {
+		t.Fatalf("EnsureGroup web: %v", err)
+	}
+	alphaKey := freshPeerKey(t)
+	if err := d.InsertPeer(ctx, "alpha", 1, "fp-a", alphaKey, "alice"); err != nil {
+		t.Fatalf("InsertPeer alpha: %v", err)
+	}
+	if err := d.SetPeerGroups(ctx, "alpha", []string{"web"}); err != nil {
+		t.Fatalf("SetPeerGroups alpha: %v", err)
+	}
+	d.Close()
+
+	fp := &fakePusher{errOn: "verify"}
+	installFakePusherFor(t, fp)
+
+	_, err = runGroupCmd(t, dataDir, dbPath, "delete", "web")
+	if err == nil {
+		t.Fatal("expected straggler error")
+	}
+	if !strings.Contains(err.Error(), "straggler") {
+		t.Errorf("error = %q, want it to mention 'straggler'", err)
+	}
+
+	d, err = db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer d.Close()
+	if ok, _ := d.GroupExists(ctx, "web"); !ok {
+		t.Error("group 'web' should still exist after straggler")
+	}
+	got, err := d.GetPeerGroups(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetPeerGroups alpha: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("GetPeerGroups(alpha) = %v, want [] (DB updated for attempted peer)", got)
+	}
+}
+
+func TestGroupDelete_SkipsRevokedPeers(t *testing.T) {
+	dataDir := t.TempDir()
+	if _, err := ca.Generate(filepath.Join(dataDir, "ca")); err != nil {
+		t.Fatalf("ca.Generate: %v", err)
+	}
+	dbPath := filepath.Join(dataDir, "state.db")
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	ctx := context.Background()
+	if err := d.EnsureGroup(ctx, "web"); err != nil {
+		t.Fatalf("EnsureGroup web: %v", err)
+	}
+	aliveKey := freshPeerKey(t)
+	deadKey := freshPeerKey(t)
+	if err := d.InsertPeer(ctx, "alive", 1, "fp-l", aliveKey, "alice"); err != nil {
+		t.Fatalf("InsertPeer alive: %v", err)
+	}
+	if err := d.InsertPeer(ctx, "dead", 1, "fp-d", deadKey, "bob"); err != nil {
+		t.Fatalf("InsertPeer dead: %v", err)
+	}
+	if err := d.SetPeerGroups(ctx, "alive", []string{"web"}); err != nil {
+		t.Fatalf("SetPeerGroups alive: %v", err)
+	}
+	if err := d.SetPeerGroups(ctx, "dead", []string{"web"}); err != nil {
+		t.Fatalf("SetPeerGroups dead: %v", err)
+	}
+	if err := d.SetPeerRevoked(ctx, "dead"); err != nil {
+		t.Fatalf("SetPeerRevoked dead: %v", err)
+	}
+	d.Close()
+
+	var dialedHosts []string
+	fp := &fakePusher{}
+	prev := groupDial
+	groupDial = func(ctx context.Context, host string, opts sshpush.Options) (sshpush.Pusher, error) {
+		dialedHosts = append(dialedHosts, host)
+		return fp, nil
+	}
+	t.Cleanup(func() { groupDial = prev })
+
+	out, err := runGroupCmd(t, dataDir, dbPath, "delete", "web")
+	if err != nil {
+		t.Fatalf("delete: err=%v out=%s", err, out)
+	}
+
+	for _, h := range dialedHosts {
+		if h == "dead" {
+			t.Errorf("revoked peer 'dead' was dialed: %v", dialedHosts)
+		}
+	}
+	if len(dialedHosts) != 1 || dialedHosts[0] != "alive" {
+		t.Errorf("dialedHosts = %v, want [alive]", dialedHosts)
+	}
+
+	d, err = db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer d.Close()
+	got, err := d.GetPeerGroups(ctx, "alive")
+	if err != nil {
+		t.Fatalf("GetPeerGroups alive: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("alive groups = %v, want []", got)
+	}
+	if ok, _ := d.GroupExists(ctx, "web"); ok {
+		t.Error("group 'web' should be deleted")
+	}
+}
