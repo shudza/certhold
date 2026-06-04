@@ -21,6 +21,12 @@ func EndSentinel(instanceKey string) string {
 // instances coexist on the same peer.
 func V2SshClientBlock(instanceKey string) string {
 	return BeginSentinel(instanceKey) + `
+# This block is managed by certhold -- auto-generated, do not edit by hand.
+# It makes the local ssh client present the certhold-issued certificate
+# (CertificateFile + IdentityFile below) on every outbound ssh connection.
+# The instance key in the sentinel lines namespaces this block so multiple
+# certhold installs can coexist on the same host without clobbering each other.
+# To refresh, re-run the enroll one-liner; it idempotently replaces this range.
 Host *
     CertificateFile ~/.ssh/id_ed25519_` + instanceKey + `-cert.pub
     IdentityFile ~/.ssh/id_ed25519_` + instanceKey + `
