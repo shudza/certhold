@@ -1,6 +1,7 @@
 package peerfiles
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -55,6 +56,58 @@ func TestPathsForNoEtcSsh(t *testing.T) {
 			if strings.Contains(path, "/etc/ssh") {
 				t.Errorf("PathsFor(%q) produced /etc/ssh path: %q", user, path)
 			}
+		}
+	}
+}
+
+// TestV2SshClientBlockCarriesExplanatoryComments asserts the load-bearing
+// phrases that tell a human reading ~/.ssh/config why this block exists.
+func TestV2SshClientBlockCarriesExplanatoryComments(t *testing.T) {
+	block := V2SshClientBlock("KEY")
+	for _, want := range []string{
+		"# This block is managed by certhold",
+		"do not edit by hand",
+		"re-run the enroll one-liner",
+		"namespaces this block",
+	} {
+		if !strings.Contains(block, want) {
+			t.Errorf("V2SshClientBlock missing phrase %q\nfull block:\n%s", want, block)
+		}
+	}
+}
+
+// TestV2SshClientBlockFullyScrubbedBySedRange is the re-enrollment invariant:
+// the exact regex range used by the install script at
+// internal/httpserver/server.go must delete every line of the block, including
+// the new explanatory comments. Otherwise re-enrollment would leak stale
+// comment lines into ~/.ssh/config.
+func TestV2SshClientBlockFullyScrubbedBySedRange(t *testing.T) {
+	const key = "KEY"
+	beginRe := regexp.MustCompile(`^# BEGIN certhold ` + key + `( v[0-9]+)?$`)
+	endRe := regexp.MustCompile(`^# END certhold ` + key + `( v[0-9]+)?$`)
+
+	block := V2SshClientBlock(key)
+	lines := strings.Split(block, "\n")
+
+	inRange := false
+	var remaining []string
+	for _, ln := range lines {
+		if !inRange && beginRe.MatchString(ln) {
+			inRange = true
+			continue
+		}
+		if inRange {
+			if endRe.MatchString(ln) {
+				inRange = false
+			}
+			continue
+		}
+		remaining = append(remaining, ln)
+	}
+
+	for _, ln := range remaining {
+		if strings.TrimSpace(ln) != "" {
+			t.Errorf("sed-range scrub left non-empty line %q; remaining=%q", ln, remaining)
 		}
 	}
 }
