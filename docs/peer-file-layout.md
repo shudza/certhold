@@ -62,6 +62,8 @@ install script splices it into `<home>/.ssh/config`:
 
 ```
 # BEGIN certhold <key> v2
+# <6-line comment header: managed-by note, what the block does, why the key
+#  namespaces it, and how to refresh via the enroll one-liner>
 Host *
     CertificateFile ~/.ssh/id_ed25519_<key>-cert.pub
     IdentityFile ~/.ssh/id_ed25519_<key>
@@ -69,8 +71,10 @@ Host *
 # END certhold <key> v2
 ```
 
-The key precedes the version so the install splice uses a **per-instance,
-version-agnostic** `sed`:
+The comment header is part of the spliced block (see `V2SshClientBlock` in
+`internal/peerfiles/layout.go`), so a human inspecting `~/.ssh/config` sees who
+owns the range and how to refresh it. The key precedes the version so the
+install splice uses a **per-instance, version-agnostic** `sed`:
 
 ```
 sed -i -E "/^# BEGIN certhold <key>( v[0-9]+)?$/,/^# END certhold <key>( v[0-9]+)?$/d" <home>/.ssh/config

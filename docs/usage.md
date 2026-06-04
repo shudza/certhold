@@ -63,6 +63,30 @@ Paste that one-liner on the new peer, as the user who should own the SSH files.
 That is the entire peer-side onboarding — the peer contacts no other peer, and
 existing peers need no update (they already trust anything the CA signed).
 
+Running it prints a per-file summary and a final `ssh` hint:
+
+```
+$ curl -kfsSL https://192.168.1.10:8443/enroll/<token>.sh | bash
+
+Changed files:
+  + ~/.ssh/id_ed25519_<instance>            (installed, 0600 - private key)
+  + ~/.ssh/id_ed25519_<instance>-cert.pub   (installed, 0644 - certificate)
+  ~ ~/.ssh/known_hosts                       (appended manager host key)
+  ~ ~/.ssh/authorized_keys                   (appended cert-authority line)
+  ~ ~/.ssh/config                            (replaced certhold block)
+
+Success. Try:  ssh app1@app1.lan
+This address is what this peer reports for itself; if a different
+address is reachable from the manager, pass --address to certhold enroll next time.
+```
+
+`+` marks files certhold installs whole; `~` marks files it edits in place
+(`known_hosts` and `authorized_keys` lines are only printed if this install
+actually appended them, so a re-run on an already-trusted peer shows fewer
+lines). The host in the `Success` line comes from the peer's own
+`hostname -f`; if that isn't the address reachable from the manager, pass
+`enroll --address <host-or-ip>` next time.
+
 What happens under the hood:
 
 - `enroll` (on the manager) validates inputs, loads and unlocks the CA, generates
