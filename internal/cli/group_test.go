@@ -660,3 +660,199 @@ func TestGroupAllowRequiresOnFlag(t *testing.T) {
 		t.Fatal("expected error when --on is missing")
 	}
 }
+
+// freshGroupDB makes an empty data-dir + db with no peers/groups.
+func freshGroupDB(t *testing.T) (dataDir, dbPath string) {
+	t.Helper()
+	dataDir = t.TempDir()
+	dbPath = filepath.Join(dataDir, "state.db")
+	return dataDir, dbPath
+}
+
+func TestGroupCreate_Success(t *testing.T) {
+	dataDir, dbPath := freshGroupDB(t)
+	out, err := runGroupCmd(t, dataDir, dbPath, "create", "infra")
+	if err != nil {
+		t.Fatalf("create: err=%v out=%s", err, out)
+	}
+	if !strings.Contains(out, `group "infra" created`) {
+		t.Errorf("output = %q, want it to contain 'group \"infra\" created'", out)
+	}
+
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer d.Close()
+	ok, err := d.GroupExists(context.Background(), "infra")
+	if err != nil {
+		t.Fatalf("GroupExists: %v", err)
+	}
+	if !ok {
+		t.Error("expected group 'infra' to exist after create")
+	}
+}
+
+func TestGroupCreate_Duplicate(t *testing.T) {
+	dataDir, dbPath := freshGroupDB(t)
+	if _, err := runGroupCmd(t, dataDir, dbPath, "create", "infra"); err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+	_, err := runGroupCmd(t, dataDir, dbPath, "create", "infra")
+	if err == nil {
+		t.Fatal("expected error on duplicate create")
+	}
+	if !strings.Contains(err.Error(), "already exists") {
+		t.Errorf("error = %q, want it to mention 'already exists'", err)
+	}
+}
+
+func TestGroupCreate_Reserved(t *testing.T) {
+	dataDir, dbPath := freshGroupDB(t)
+
+	// Open the DB before to capture baseline state, then close.
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	before, err := d.ListGroupsWithPeerCount(context.Background())
+	if err != nil {
+		t.Fatalf("ListGroupsWithPeerCount: %v", err)
+	}
+	d.Close()
+
+	_, err = runGroupCmd(t, dataDir, dbPath, "create", "manager")
+	if err == nil {
+		t.Fatal("expected error creating reserved 'manager' group")
+	}
+	if !strings.Contains(err.Error(), "reserved") {
+		t.Errorf("error = %q, want it to mention 'reserved'", err)
+	}
+
+	d, err = db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open after: %v", err)
+	}
+	defer d.Close()
+	after, err := d.ListGroupsWithPeerCount(context.Background())
+	if err != nil {
+		t.Fatalf("ListGroupsWithPeerCount after: %v", err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Errorf("groups changed: before=%v after=%v", before, after)
+	}
+	if ok, _ := d.GroupExists(context.Background(), "manager"); ok {
+		t.Error("manager group should not exist after rejected create")
+	}
+}
+
+func TestGroupShow_Missing(t *testing.T) {
+	dataDir, dbPath := freshGroupDB(t)
+	_, err := runGroupCmd(t, dataDir, dbPath, "show", "nope")
+	if err == nil {
+		t.Fatal("expected error for missing group")
+	}
+	if !strings.Contains(err.Error(), "does not exist") {
+		t.Errorf("error = %q, want it to mention 'does not exist'", err)
+	}
+}
+
+func TestGroupShow_HappyPath(t *testing.T) {
+	dataDir, dbPath := freshGroupDB(t)
+
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	ctx := context.Background()
+	if err := d.CreateGroup(ctx, "infra"); err != nil {
+		t.Fatalf("CreateGroup: %v", err)
+	}
+	if err := d.InsertPeer(ctx, "alpha", 1, "fp1", []byte("k"), "alice"); err != nil {
+		t.Fatalf("InsertPeer alpha: %v", err)
+	}
+	if err := d.InsertPeer(ctx, "beta", 1, "fp2", []byte("k"), "bob"); err != nil {
+		t.Fatalf("InsertPeer beta: %v", err)
+	}
+	if err := d.SetPeerGroups(ctx, "alpha", []string{"infra"}); err != nil {
+		t.Fatalf("SetPeerGroups alpha: %v", err)
+	}
+	if err := d.SetPeerAllowedGroups(ctx, "beta", []string{"infra"}); err != nil {
+		t.Fatalf("SetPeerAllowedGroups beta: %v", err)
+	}
+	d.Close()
+
+	out, err := runGroupCmd(t, dataDir, dbPath, "show", "infra")
+	if err != nil {
+		t.Fatalf("show: err=%v out=%s", err, out)
+	}
+	if !strings.Contains(out, "GROUP") || !strings.Contains(out, "infra") {
+		t.Errorf("output missing GROUP/infra: %q", out)
+	}
+	lines := strings.Split(out, "\n")
+	var membersLine, allowedLine string
+	for _, ln := range lines {
+		switch {
+		case strings.HasPrefix(ln, "MEMBERS"):
+			membersLine = ln
+		case strings.HasPrefix(ln, "ALLOWED BY"):
+			allowedLine = ln
+		}
+	}
+	if !strings.Contains(membersLine, "alpha") {
+		t.Errorf("MEMBERS line = %q, want it to include 'alpha'", membersLine)
+	}
+	if !strings.Contains(allowedLine, "beta") {
+		t.Errorf("ALLOWED BY line = %q, want it to include 'beta'", allowedLine)
+	}
+}
+
+func TestGroupShow_NoMembers(t *testing.T) {
+	dataDir, dbPath := freshGroupDB(t)
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	if err := d.CreateGroup(context.Background(), "lonely"); err != nil {
+		t.Fatalf("CreateGroup: %v", err)
+	}
+	d.Close()
+
+	out, err := runGroupCmd(t, dataDir, dbPath, "show", "lonely")
+	if err != nil {
+		t.Fatalf("show: err=%v out=%s", err, out)
+	}
+	lines := strings.Split(out, "\n")
+	var membersLine, allowedLine string
+	for _, ln := range lines {
+		switch {
+		case strings.HasPrefix(ln, "MEMBERS"):
+			membersLine = ln
+		case strings.HasPrefix(ln, "ALLOWED BY"):
+			allowedLine = ln
+		}
+	}
+	if !strings.Contains(membersLine, "(none)") {
+		t.Errorf("MEMBERS line = %q, want '(none)'", membersLine)
+	}
+	if !strings.Contains(allowedLine, "(none)") {
+		t.Errorf("ALLOWED BY line = %q, want '(none)'", allowedLine)
+	}
+}
+
+func TestGroupCreate_RoundTripsToShow(t *testing.T) {
+	dataDir, dbPath := freshGroupDB(t)
+	if _, err := runGroupCmd(t, dataDir, dbPath, "create", "x"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	out, err := runGroupCmd(t, dataDir, dbPath, "show", "x")
+	if err != nil {
+		t.Fatalf("show: err=%v out=%s", err, out)
+	}
+	if !strings.Contains(out, "GROUP") || !strings.Contains(out, "x") {
+		t.Errorf("output missing GROUP/x: %q", out)
+	}
+	if strings.Count(out, "(none)") < 2 {
+		t.Errorf("expected MEMBERS and ALLOWED BY both '(none)'; got %q", out)
+	}
+}
