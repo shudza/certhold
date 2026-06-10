@@ -1,4 +1,4 @@
-.PHONY: build test vet e2e static clean
+.PHONY: build test vet e2e e2e-systemd static clean
 
 build:
 	go build -o ./bin/certhold ./cmd/certhold
@@ -11,6 +11,11 @@ test:
 # tests are gated behind the `e2e` build tag so plain `make test` never runs them.
 e2e:
 	go test -tags e2e -count=1 -timeout 20m ./test/e2e/...
+
+# Host-level install e2e: requires systemd + passwordless sudo and MUTATES the
+# host (installs/removes certhold.service). Gated behind the e2e_systemd tag.
+e2e-systemd:
+	go test -tags e2e_systemd -count=1 -timeout 5m ./test/e2e/...
 
 vet:
 	go vet ./...
