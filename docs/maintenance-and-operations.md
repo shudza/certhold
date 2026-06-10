@@ -8,7 +8,9 @@ heaviest operations, **revocation** and **rekey**. Command flags are in
 
 ## The push model
 
-Certhold has no agent on the peer. For push-managed (`inbound`) peers, every
+Certhold runs no daemon on the peer — nothing resident, only files (plus
+`certhold-cli`, a small bash CLI run on demand). For push-managed (`inbound`)
+peers, every
 state change — a reissued cert, an updated principals list, a rotated CA — is
 delivered by SSHing into the peer and writing files. (Client-style peers are
 never dialed; they get [the pull channel](#the-pull-channel-client-style-peers)

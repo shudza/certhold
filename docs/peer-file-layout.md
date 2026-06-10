@@ -64,8 +64,9 @@ what grants root logins.
 
 ## `config` — the keyed client block
 
-The keyed sentinel block is **not** a tarball file you drop in whole — the
-install script splices it into `<home>/.ssh/config`:
+The keyed sentinel block ships as the tarball `config` entry, but it is **not**
+installed as a standalone file — the install script splices the staged entry
+into `<home>/.ssh/config`:
 
 ```
 # BEGIN certhold <key> v2
@@ -90,7 +91,9 @@ user; either line is omitted when unknown, and a stanza whose address *and* user
 are both unknown is skipped entirely. The aliases are what make `ssh app1` work
 by name. They sit before the catch-all `Host *` stanza, inside the sentinel
 range, so every re-splice (re-enroll, push, or `certhold-cli refresh`) replaces
-them — they reflect fleet state **as of the last delivery**, not live state.
+them — they reflect fleet state **as of the last delivery**, not live state (for
+an enroll's install, as of the tarball's mint; later pushes and refreshes
+self-correct any enroll-to-install drift).
 
 The comment header is part of the spliced block (see `V2SshClientBlockWithHosts`
 in `internal/peerfiles/layout.go`), so a human inspecting `~/.ssh/config` sees
@@ -166,7 +169,11 @@ Under `set -e`, the install script:
    CA pubkey isn't already trusted (grep-guarded), so other instances survive —
    skipped entirely for a client-style bundle, which stages no
    `ca_authorized_keys`;
-5. splices the keyed `config` block (per-instance `sed` delete + append);
+5. splices the keyed `config` block: the per-instance `sed` delete, then an
+   append of the **staged tarball `config` entry** — the hosts-bearing block
+   built at mint, so `Host` aliases land at install (guarded by
+   `[ -f "$STAGE/config" ]`, falling back to an inline hosts-less block for a
+   tarball without the entry);
 6. installs `certhold-cli` into `~/.local/bin/` (`0755`, with a `PATH` hint when
    needed) and `certhold_<key>.conf` into `<home>/.ssh/` (`0600`), then removes
    the staging dir.
