@@ -52,33 +52,37 @@ go test -tags e2e -v -count=1 -timeout 20m ./test/e2e/...
 
 ## Topology
 
-Four services on one user-defined bridge network (service names double as DNS
+Six services on one user-defined bridge network (service names double as DNS
 names); compose project name `certhold-e2e`:
 
 ```
-                     chnet (bridge)
-   ┌──────────┬──────────┬──────────┬───────────┐
-   │ manager  │  peer1   │  peer2   │   peer3    │
-   │ certhold │  sshd    │  sshd    │   sshd     │
-   │ serve    │  (web01) │  (db01)  │  (rootbox) │
-   │          │  deploy  │  deploy  │   root     │
-   └──────────┴──────────┴──────────┴───────────┘
+                              chnet (bridge)
+   ┌──────────┬──────────┬──────────┬───────────┬──────────┬───────────┐
+   │ manager  │  peer1   │  peer2   │   peer3    │  peer4   │  peer5    │
+   │ certhold │  sshd    │  sshd    │   sshd     │  sshd    │  sshd     │
+   │ serve    │  (web01) │  (db01)  │  (rootbox) │  (app01) │  (laptop) │
+   │          │  deploy  │  deploy  │   root     │  deploy  │  deploy   │
+   └──────────┴──────────┴──────────┴───────────┴──────────┴───────────┘
 ```
 
 - **manager** — multi-stage image: builds `./cmd/certhold` in `golang:1.25-alpine`,
   runs it in `alpine:3.20`. Pushes use Go's `x/crypto/ssh` (no `sshd` needed); it
   also carries `openssh-client` so the harness can `ssh-keyscan` the peers.
-- **peer1 / peer2 / peer3** — `alpine:3.20` + `bash curl tar openssh openssh-client`,
+- **peer1 … peer5** — `alpine:3.20` + `bash curl tar openssh openssh-client`,
   a `deploy` user, host keys via `ssh-keygen -A`, and `sshd -D -e` in the
   foreground. **`sshd_config` is never modified** — user-mode trust lives
   entirely in the target user's `~/.ssh/authorized_keys`, which stock OpenSSH
   honors. peer1/peer2 are managed as `deploy`; **peer3 is the
   root-via-`--user root` scenario** — its `root` account is password-unlocked
   (`passwd -d root`) so cert auth is accepted (see caveat 2 below).
+  **peer4/peer5 carry the client-peer flow** (step 10): peer4 hosts the
+  host-style peer `app01` (a normal push target), peer5 hosts the client-style
+  peer `laptop` (`enroll --client`: no inbound trust line; updates arrive only
+  via `certhold-cli refresh` over the `/pull/<token>` channel).
 
 The peers are enrolled under **names decoupled from their addresses** (`web01`
-@ `peer1`, `db01` @ `peer2`, `rootbox` @ `peer3`) to also exercise the per-peer
-`address` feature.
+@ `peer1`, `db01` @ `peer2`, `rootbox` @ `peer3`, `app01` @ `peer4`, `laptop`
+@ `peer5`) to also exercise the per-peer `address` feature.
 
 ## Environment variables (set in `docker-compose.yml`)
 
@@ -87,7 +91,7 @@ The peers are enrolled under **names decoupled from their addresses** (`web01`
 | manager | `CERTHOLD_BASE_URL` | `https://manager:8443` | The enroll one-liner must point peers at the `manager` DNS name. |
 | manager | `CERTHOLD_CA_PASSPHRASE` | `e2e-ca-pass` | Non-interactive CA passphrase for `init`/`enroll`/`update`/`group`/`revoke`/`rekey`. |
 | manager | `CERTHOLD_PEER_PASSPHRASE` | `e2e-ca-pass` | Manager peer-key passphrase for pushes. Same value: `init`'s default branch reuses the CA passphrase for the manager peer key. |
-| peer1/2/3 | `CERTHOLD_NO_PASSPHRASE` | `1` | Leave each installed peer key **unencrypted** so peer→peer `ssh` is non-interactive (an encrypted key would prompt at `/dev/tty`). |
+| peer1-5 | `CERTHOLD_NO_PASSPHRASE` | `1` | Leave each installed peer key **unencrypted** so peer→peer `ssh` is non-interactive (an encrypted key would prompt at `/dev/tty`). |
 
 ## Scenario sequence (assertions are live `ssh` exit codes)
 
@@ -102,6 +106,7 @@ The single ordered `TestE2E` shares state across `t.Run` steps:
 7. **`revoke db01`** (partial CA rekey) — peer1(new-CA cert)→peer2(db01, still old CA) is non-zero; `update db01` errors.
 8. **`rekey`** — `update web01` still exits 0; bonus: an SSH presenting web01's **stashed pre-rekey cert** into peer1 (which rotated to the new CA) fails, proving old certs die.
 9. **enroll rootbox `--user root` → install AS ROOT on peer3** — the headline root-via-user-mode scenario. The install one-liner runs as root (`docker compose exec` without `-u`), so `$HOME`/`id -un` target **`/root/.ssh`**; assert the namespaced files, the `cert-authority` line and the keyed `v2` block all landed there. Then `update rootbox` exits 0 (manager cert-auth into **`root@peer3`**, since `update` dials `pushUser(peer)=="root"`), and a real cert SSH as `root@peer3` (peer3 loopback, principal `infra`) succeeds.
+10. **client-peer flow** (`clientpeer_test.go`, issue #97) — enroll `app01` @ peer4 (host-style) and `laptop` @ peer5 with `--client`; assert on peer5: **no** `cert-authority` line, `certhold-cli` at `~/.local/bin` (0755), `certhold_<key>.conf` (0600); the first `certhold-cli refresh` delivers the reachable-host aliases via the pull channel (the install-time block has none), after which `ssh app01` from peer5 succeeds **by bare Host alias** (HostName/User resolved from the keyed block, pinned via `ssh -G`); peer4→peer5 ssh is rejected (no inbound trust on a client); a group move (`update laptop --groups lap` + `group allow lap`/`disallow app` on `app01`) prints the **pending-refresh notice**, closes access until `certhold-cli refresh` (status flips `stale` → `up-to-date`) pulls the re-signed cert; `rekey` invalidates laptop's old-CA cert against app01 until another `refresh`; finally a doctored `certhold-cli` **self-updates** back to pristine from the bundle, exiting 0.
 
 ## Important runtime caveats (read before running `make e2e`)
 
