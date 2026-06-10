@@ -832,3 +832,53 @@ func TestMigrateV6AddsClientPeerColumns(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 }
+
+// TestReopenPreservesClientPeerColumns is a regression test: re-opening an
+// up-to-date database must not re-run the legacy add/drop migration steps,
+// which rebuilt the peers table and silently wiped inbound/pull_token/cert.
+func TestReopenPreservesClientPeerColumns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "reopen.sqlite")
+	ctx := context.Background()
+
+	d, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := d.InsertPeer(ctx, "cvm", 11, "SHA256:zzz", []byte("ssh-ed25519 AAAA-cvm"), "alice", false, "standing-token"); err != nil {
+		t.Fatalf("InsertPeer: %v", err)
+	}
+	if err := d.SetPeerCert(ctx, "cvm", []byte("CERTBYTES"), 11); err != nil {
+		t.Fatalf("SetPeerCert: %v", err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	d2, err := Open(path)
+	if err != nil {
+		t.Fatalf("re-Open: %v", err)
+	}
+	defer d2.Close()
+	p, err := d2.GetPeer(ctx, "cvm")
+	if err != nil {
+		t.Fatalf("GetPeer after reopen: %v", err)
+	}
+	if p.Inbound {
+		t.Error("Inbound flipped back to true after reopen")
+	}
+	if p.PullToken != "standing-token" {
+		t.Errorf("PullToken = %q after reopen, want standing-token", p.PullToken)
+	}
+	if string(p.Cert) != "CERTBYTES" {
+		t.Errorf("Cert = %q after reopen, want CERTBYTES", p.Cert)
+	}
+
+	var n int
+	if err := d2.sql.QueryRowContext(ctx,
+		`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='krl_version'`).Scan(&n); err != nil {
+		t.Fatalf("query sqlite_master: %v", err)
+	}
+	if n != 0 {
+		t.Error("krl_version table present after reopen")
+	}
+}

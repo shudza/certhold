@@ -735,6 +735,15 @@ func TestEnrollV2User_Script(t *testing.T) {
 		`  ~ ~/.ssh/known_hosts                       (appended manager host key)`,
 		`  ~ ~/.ssh/authorized_keys                   (appended cert-authority line)`,
 		`  ~ ~/.ssh/config                            (replaced certhold block)`,
+		// T04: optional staged files — authorized_keys append guarded for client
+		// bundles, certhold-cli into ~/.local/bin with a PATH hint, keyed conf.
+		`if [ -f "$STAGE/ca_authorized_keys" ]; then`,
+		`if [ -f "$STAGE/certhold-cli" ]; then`,
+		`mkdir -p "$HOME/.local/bin"`,
+		`install -m 0755 "$STAGE/certhold-cli" "$HOME/.local/bin/certhold-cli"`,
+		`case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) echo "hint: ~/.local/bin is not on your PATH; add it to run certhold-cli by name" ;; esac`,
+		`if [ -f "$STAGE/certhold_` + testInstanceKey + `.conf" ]; then`,
+		`install -m 0600 "$STAGE/certhold_` + testInstanceKey + `.conf" "$USER_HOME/.ssh/certhold_` + testInstanceKey + `.conf"`,
 		`Success`,
 		`ssh $TARGET_USER@`,
 	}
@@ -813,39 +822,14 @@ func TestEnrollV2Script_ExecutionSmoke(t *testing.T) {
 	script := v2Script(baseURL, tok, testInstanceKey)
 	keyFile := peerfiles.V2KeyFileName(testInstanceKey)
 
-	tarDir := t.TempDir()
-	fixturePath := filepath.Join(tarDir, "peer.tgz")
-	{
-		var buf bytes.Buffer
-		gz := gzip.NewWriter(&buf)
-		tw := tar.NewWriter(gz)
-		entries := []struct {
-			name string
-			body []byte
-		}{
-			{keyFile, []byte("FAKE_PRIVKEY\n")},
-			{keyFile + "-cert.pub", []byte("ssh-ed25519-cert-v01@openssh.com FAKECERT keyid\n")},
-			{"known_hosts", []byte("manager.example ssh-ed25519 FAKEHOSTKEY\n")},
-			{"ca_authorized_keys", []byte(`cert-authority,principals="manager" ssh-ed25519 FAKECAKEY ca-comment` + "\n")},
-		}
-		for _, e := range entries {
-			if err := tw.WriteHeader(&tar.Header{Name: e.name, Mode: 0o644, Size: int64(len(e.body))}); err != nil {
-				t.Fatalf("tar header %s: %v", e.name, err)
-			}
-			if _, err := tw.Write(e.body); err != nil {
-				t.Fatalf("tar write %s: %v", e.name, err)
-			}
-		}
-		if err := tw.Close(); err != nil {
-			t.Fatalf("tar close: %v", err)
-		}
-		if err := gz.Close(); err != nil {
-			t.Fatalf("gz close: %v", err)
-		}
-		if err := os.WriteFile(fixturePath, buf.Bytes(), 0o600); err != nil {
-			t.Fatalf("write fixture: %v", err)
-		}
-	}
+	fixturePath := writeFixtureTarball(t, []fixtureEntry{
+		{keyFile, []byte("FAKE_PRIVKEY\n")},
+		{keyFile + "-cert.pub", []byte("ssh-ed25519-cert-v01@openssh.com FAKECERT keyid\n")},
+		{"known_hosts", []byte("manager.example ssh-ed25519 FAKEHOSTKEY\n")},
+		{"ca_authorized_keys", []byte(`cert-authority,principals="manager" ssh-ed25519 FAKECAKEY ca-comment` + "\n")},
+		{"certhold-cli", []byte("#!/usr/bin/env bash\necho certhold-cli stub\n")},
+		{"certhold_" + testInstanceKey + ".conf", []byte("BASE_URL=" + baseURL + "\nPULL_TOKEN=pt\nINSTANCE_KEY=" + testInstanceKey + "\nPEER_NAME=vm\nLAST_REV=0\n")},
+	})
 
 	curlLine := `curl -kfsSL ` + baseURL + `/enroll/` + tok + `?user=$TARGET_USER | tar -xzC "$STAGE"`
 	replacement := `tar -xzf ` + fixturePath + ` -C "$STAGE"`
@@ -884,6 +868,8 @@ func TestEnrollV2Script_ExecutionSmoke(t *testing.T) {
 		"~/.ssh/known_hosts",
 		"~/.ssh/authorized_keys",
 		"~/.ssh/config",
+		"~/.local/bin/certhold-cli",
+		"~/.ssh/certhold_" + testInstanceKey + ".conf",
 		"Success",
 		"ssh ",
 	}
@@ -892,6 +878,8 @@ func TestEnrollV2Script_ExecutionSmoke(t *testing.T) {
 			t.Errorf("first run stdout missing %q\nstdout:\n%s", m, stdout1)
 		}
 	}
+	assertFileMode(t, filepath.Join(home, ".local", "bin", "certhold-cli"), 0o755)
+	assertFileMode(t, filepath.Join(home, ".ssh", "certhold_"+testInstanceKey+".conf"), 0o600)
 
 	stdout2, stderr2, err := runScript()
 	if err != nil {
@@ -902,5 +890,139 @@ func TestEnrollV2Script_ExecutionSmoke(t *testing.T) {
 	}
 	if !strings.Contains(stdout2, "Success") {
 		t.Errorf("second run stdout missing Success block\nstdout:\n%s", stdout2)
+	}
+}
+
+type fixtureEntry struct {
+	name string
+	body []byte
+}
+
+func writeFixtureTarball(t *testing.T, entries []fixtureEntry) string {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	for _, e := range entries {
+		if err := tw.WriteHeader(&tar.Header{Name: e.name, Mode: 0o644, Size: int64(len(e.body))}); err != nil {
+			t.Fatalf("tar header %s: %v", e.name, err)
+		}
+		if _, err := tw.Write(e.body); err != nil {
+			t.Fatalf("tar write %s: %v", e.name, err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("tar close: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("gz close: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "peer.tgz")
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	return path
+}
+
+func assertFileMode(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Errorf("stat %s: %v", path, err)
+		return
+	}
+	if got := fi.Mode().Perm(); got != want {
+		t.Errorf("%s mode = %o, want %o", path, got, want)
+	}
+}
+
+// TestEnrollV2Script_ExecutionSmoke_ClientBundle runs the install script
+// against a client-style bundle (no ca_authorized_keys, certhold-cli + keyed
+// conf staged): it must complete without error, never touch authorized_keys,
+// install the cli into ~/.local/bin (0755) and the conf into ~/.ssh (0600),
+// and print the PATH hint only when ~/.local/bin is not on PATH.
+func TestEnrollV2Script_ExecutionSmoke_ClientBundle(t *testing.T) {
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skipf("bash not on PATH (%v); skipping execution smoke", err)
+	}
+
+	const baseURL = "https://demo.example"
+	const tok = "TOKEN456"
+	script := v2Script(baseURL, tok, testInstanceKey)
+	keyFile := peerfiles.V2KeyFileName(testInstanceKey)
+
+	confName := "certhold_" + testInstanceKey + ".conf"
+	confBody := "BASE_URL=" + baseURL + "\nPULL_TOKEN=pt\nINSTANCE_KEY=" + testInstanceKey + "\nPEER_NAME=cvm\nLAST_REV=0\n"
+	fixturePath := writeFixtureTarball(t, []fixtureEntry{
+		{keyFile, []byte("FAKE_PRIVKEY\n")},
+		{keyFile + "-cert.pub", []byte("ssh-ed25519-cert-v01@openssh.com FAKECERT keyid\n")},
+		{"known_hosts", []byte("manager.example ssh-ed25519 FAKEHOSTKEY\n")},
+		{"certhold-cli", []byte("#!/usr/bin/env bash\necho certhold-cli stub\n")},
+		{confName, []byte(confBody)},
+	})
+
+	curlLine := `curl -kfsSL ` + baseURL + `/enroll/` + tok + `?user=$TARGET_USER | tar -xzC "$STAGE"`
+	if !strings.Contains(script, curlLine) {
+		t.Fatalf("script missing curl line %q\nscript:\n%s", curlLine, script)
+	}
+	patched := strings.Replace(script, curlLine, `tar -xzf `+fixturePath+` -C "$STAGE"`, 1)
+
+	home := t.TempDir()
+	scriptPath := filepath.Join(home, "install.sh")
+	if err := os.WriteFile(scriptPath, []byte(patched), 0o700); err != nil {
+		t.Fatalf("write patched script: %v", err)
+	}
+
+	runScript := func(extraPath string) (string, string, error) {
+		cmd := exec.Command(bashPath, scriptPath)
+		cmd.Env = append(os.Environ(),
+			"HOME="+home,
+			"CERTHOLD_NO_PASSPHRASE=1",
+		)
+		if extraPath != "" {
+			cmd.Env = append(cmd.Env, "PATH="+extraPath+":"+os.Getenv("PATH"))
+		}
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		err := cmd.Run()
+		return stdout.String(), stderr.String(), err
+	}
+
+	stdout1, stderr1, err := runScript("")
+	if err != nil {
+		t.Fatalf("client-bundle run failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout1, stderr1)
+	}
+	for _, m := range []string{
+		"Changed files:",
+		"~/.ssh/" + keyFile,
+		"~/.local/bin/certhold-cli",
+		"~/.ssh/" + confName,
+		"hint: ~/.local/bin is not on your PATH",
+		"Success",
+	} {
+		if !strings.Contains(stdout1, m) {
+			t.Errorf("client-bundle stdout missing %q\nstdout:\n%s", m, stdout1)
+		}
+	}
+	if strings.Contains(stdout1, "appended cert-authority line") {
+		t.Errorf("client bundle must not append authorized_keys\nstdout:\n%s", stdout1)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".ssh", "authorized_keys")); !os.IsNotExist(err) {
+		t.Errorf("client bundle must not create ~/.ssh/authorized_keys (stat err = %v)", err)
+	}
+	assertFileMode(t, filepath.Join(home, ".local", "bin", "certhold-cli"), 0o755)
+	assertFileMode(t, filepath.Join(home, ".ssh", confName), 0o600)
+	if got, err := os.ReadFile(filepath.Join(home, ".ssh", confName)); err != nil || string(got) != confBody {
+		t.Errorf("installed conf = %q (err=%v), want %q", got, err, confBody)
+	}
+
+	stdout2, stderr2, err := runScript(filepath.Join(home, ".local", "bin"))
+	if err != nil {
+		t.Fatalf("second run failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout2, stderr2)
+	}
+	if strings.Contains(stdout2, "hint: ~/.local/bin is not on your PATH") {
+		t.Errorf("PATH hint printed although ~/.local/bin is on PATH\nstdout:\n%s", stdout2)
 	}
 }

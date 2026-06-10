@@ -129,6 +129,9 @@ func writeV2Body(sb *strings.Builder, curl, keyFile, block, instanceKey string) 
 
 	fmt.Fprintf(sb, "touch \"$USER_HOME/.ssh/known_hosts\"\n")
 	fmt.Fprintf(sb, "if [ -s \"$STAGE/known_hosts\" ]; then cat \"$STAGE/known_hosts\" >> \"$USER_HOME/.ssh/known_hosts\"; echo \"  ~ ~/.ssh/known_hosts                       (appended manager host key)\"; fi\n")
+	// Client bundles ship no ca_authorized_keys (NoInbound), so the whole
+	// authorized_keys append step is guarded on the staged file existing.
+	fmt.Fprintf(sb, "if [ -f \"$STAGE/ca_authorized_keys\" ]; then\n")
 	fmt.Fprintf(sb, "touch \"$USER_HOME/.ssh/authorized_keys\"\n")
 	fmt.Fprintf(sb, "chmod 600 \"$USER_HOME/.ssh/authorized_keys\"\n")
 	// CA_KEY is the 3rd whitespace token of the shipped line
@@ -144,11 +147,23 @@ func writeV2Body(sb *strings.Builder, curl, keyFile, block, instanceKey string) 
 	fmt.Fprintf(sb, "if ! grep -qF \"$CA_KEY\" \"$USER_HOME/.ssh/authorized_keys\"; then APPENDED_AK=1; fi\n")
 	fmt.Fprintf(sb, "if ! grep -qF \"$CA_KEY\" \"$USER_HOME/.ssh/authorized_keys\"; then cat \"$STAGE/ca_authorized_keys\" >> \"$USER_HOME/.ssh/authorized_keys\"; fi\n")
 	fmt.Fprintf(sb, "if [ \"$APPENDED_AK\" = \"1\" ]; then echo \"  ~ ~/.ssh/authorized_keys                   (appended cert-authority line)\"; fi\n")
+	fmt.Fprintf(sb, "fi\n")
 
 	fmt.Fprintf(sb, "touch \"$USER_HOME/.ssh/config\"\n")
 	fmt.Fprintf(sb, "sed -i -E \"/^# BEGIN certhold %s( v[0-9]+)?\\$/,/^# END certhold %s( v[0-9]+)?\\$/d\" \"$USER_HOME/.ssh/config\"\n", instanceKey, instanceKey)
 	fmt.Fprintf(sb, "cat >> \"$USER_HOME/.ssh/config\" <<'CHCFG_EOF'\n%sCHCFG_EOF\n", block)
 	fmt.Fprintf(sb, "echo \"  ~ ~/.ssh/config                            (replaced certhold block)\"\n")
+
+	fmt.Fprintf(sb, "if [ -f \"$STAGE/certhold-cli\" ]; then\n")
+	fmt.Fprintf(sb, "mkdir -p \"$HOME/.local/bin\"\n")
+	fmt.Fprintf(sb, "install -m 0755 \"$STAGE/certhold-cli\" \"$HOME/.local/bin/certhold-cli\"\n")
+	fmt.Fprintf(sb, "echo \"  + ~/.local/bin/certhold-cli               (installed, 0755 - client CLI)\"\n")
+	fmt.Fprintf(sb, "case \":$PATH:\" in *\":$HOME/.local/bin:\"*) ;; *) echo \"hint: ~/.local/bin is not on your PATH; add it to run certhold-cli by name\" ;; esac\n")
+	fmt.Fprintf(sb, "fi\n")
+	fmt.Fprintf(sb, "if [ -f \"$STAGE/certhold_%s.conf\" ]; then\n", instanceKey)
+	fmt.Fprintf(sb, "install -m 0600 \"$STAGE/certhold_%s.conf\" \"$USER_HOME/.ssh/certhold_%s.conf\"\n", instanceKey, instanceKey)
+	fmt.Fprintf(sb, "echo \"  + ~/.ssh/certhold_%s.conf   (installed, 0600 - client conf)\"\n", instanceKey)
+	fmt.Fprintf(sb, "fi\n")
 
 	fmt.Fprintf(sb, "rm -rf \"$STAGE\"\n")
 
