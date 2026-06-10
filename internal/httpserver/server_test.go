@@ -723,6 +723,10 @@ func TestEnrollV2User_Script(t *testing.T) {
 		`if ! grep -qF "$CA_KEY" "$USER_HOME/.ssh/authorized_keys"; then cat "$STAGE/ca_authorized_keys" >> "$USER_HOME/.ssh/authorized_keys"; fi`,
 		// keyed, version-agnostic sed splice of ~/.ssh/config.
 		`sed -i -E "/^# BEGIN certhold ` + testInstanceKey + `( v[0-9]+)?\$/,/^# END certhold ` + testInstanceKey + `( v[0-9]+)?\$/d" "$USER_HOME/.ssh/config"`,
+		// T09: the staged hosts-bearing config entry is spliced at install;
+		// the inline hosts-less block is only the fallback.
+		`if [ -f "$STAGE/config" ]; then`,
+		`cat "$STAGE/config" >> "$USER_HOME/.ssh/config"`,
 		"# BEGIN certhold " + testInstanceKey + " v2",
 		"# END certhold " + testInstanceKey + " v2",
 		// Feature 3 peer-side passphrase block.
@@ -822,11 +826,17 @@ func TestEnrollV2Script_ExecutionSmoke(t *testing.T) {
 	script := v2Script(baseURL, tok, testInstanceKey)
 	keyFile := peerfiles.V2KeyFileName(testInstanceKey)
 
+	// The staged config carries a Host alias, exactly like a tarball minted
+	// while a reachable peer existed (peerfiles.BuildUser is the producer).
+	hostsBlock := peerfiles.V2SshClientBlockWithHosts(testInstanceKey, []peerfiles.HostEntry{
+		{Name: "app1", Address: "10.0.0.7", User: "alice"},
+	})
 	fixturePath := writeFixtureTarball(t, []fixtureEntry{
 		{keyFile, []byte("FAKE_PRIVKEY\n")},
 		{keyFile + "-cert.pub", []byte("ssh-ed25519-cert-v01@openssh.com FAKECERT keyid\n")},
 		{"known_hosts", []byte("manager.example ssh-ed25519 FAKEHOSTKEY\n")},
 		{"ca_authorized_keys", []byte(`cert-authority,principals="manager" ssh-ed25519 FAKECAKEY ca-comment` + "\n")},
+		{"config", []byte(hostsBlock)},
 		{"certhold-cli", []byte("#!/usr/bin/env bash\necho certhold-cli stub\n")},
 		{"certhold_" + testInstanceKey + ".conf", []byte("BASE_URL=" + baseURL + "\nPULL_TOKEN=pt\nINSTANCE_KEY=" + testInstanceKey + "\nPEER_NAME=vm\nLAST_REV=0\n")},
 	})
@@ -880,6 +890,8 @@ func TestEnrollV2Script_ExecutionSmoke(t *testing.T) {
 	}
 	assertFileMode(t, filepath.Join(home, ".local", "bin", "certhold-cli"), 0o755)
 	assertFileMode(t, filepath.Join(home, ".ssh", "certhold_"+testInstanceKey+".conf"), 0o600)
+	// T09: the Host alias from the staged config must land at install time.
+	assertInstalledConfigHasAlias(t, home, "Host app1\n    HostName 10.0.0.7\n    User alice\n")
 
 	stdout2, stderr2, err := runScript()
 	if err != nil {
@@ -890,6 +902,25 @@ func TestEnrollV2Script_ExecutionSmoke(t *testing.T) {
 	}
 	if !strings.Contains(stdout2, "Success") {
 		t.Errorf("second run stdout missing Success block\nstdout:\n%s", stdout2)
+	}
+	// Re-enroll must preserve the alias (sed-delete + staged splice, not wipe).
+	assertInstalledConfigHasAlias(t, home, "Host app1\n    HostName 10.0.0.7\n    User alice\n")
+}
+
+// assertInstalledConfigHasAlias asserts <home>/.ssh/config carries exactly one
+// keyed certhold block and that the given Host stanza is inside it.
+func assertInstalledConfigHasAlias(t *testing.T, home, stanza string) {
+	t.Helper()
+	cfg, err := os.ReadFile(filepath.Join(home, ".ssh", "config"))
+	if err != nil {
+		t.Fatalf("read installed config: %v", err)
+	}
+	s := string(cfg)
+	if got := strings.Count(s, peerfiles.BeginSentinel(testInstanceKey)); got != 1 {
+		t.Errorf("installed config has %d keyed blocks, want exactly 1\nconfig:\n%s", got, s)
+	}
+	if !strings.Contains(s, stanza) {
+		t.Errorf("installed config missing Host stanza %q\nconfig:\n%s", stanza, s)
 	}
 }
 
@@ -954,10 +985,15 @@ func TestEnrollV2Script_ExecutionSmoke_ClientBundle(t *testing.T) {
 
 	confName := "certhold_" + testInstanceKey + ".conf"
 	confBody := "BASE_URL=" + baseURL + "\nPULL_TOKEN=pt\nINSTANCE_KEY=" + testInstanceKey + "\nPEER_NAME=cvm\nLAST_REV=0\n"
+	// Client bundles also carry the hosts-bearing config entry at mint.
+	hostsBlock := peerfiles.V2SshClientBlockWithHosts(testInstanceKey, []peerfiles.HostEntry{
+		{Name: "app1", Address: "peer4", User: "deploy"},
+	})
 	fixturePath := writeFixtureTarball(t, []fixtureEntry{
 		{keyFile, []byte("FAKE_PRIVKEY\n")},
 		{keyFile + "-cert.pub", []byte("ssh-ed25519-cert-v01@openssh.com FAKECERT keyid\n")},
 		{"known_hosts", []byte("manager.example ssh-ed25519 FAKEHOSTKEY\n")},
+		{"config", []byte(hostsBlock)},
 		{"certhold-cli", []byte("#!/usr/bin/env bash\necho certhold-cli stub\n")},
 		{confName, []byte(confBody)},
 	})
@@ -1017,6 +1053,8 @@ func TestEnrollV2Script_ExecutionSmoke_ClientBundle(t *testing.T) {
 	if got, err := os.ReadFile(filepath.Join(home, ".ssh", confName)); err != nil || string(got) != confBody {
 		t.Errorf("installed conf = %q (err=%v), want %q", got, err, confBody)
 	}
+	// T09: client bundles get their Host aliases at install time too.
+	assertInstalledConfigHasAlias(t, home, "Host app1\n    HostName peer4\n    User deploy\n")
 
 	stdout2, stderr2, err := runScript(filepath.Join(home, ".local", "bin"))
 	if err != nil {
@@ -1024,5 +1062,63 @@ func TestEnrollV2Script_ExecutionSmoke_ClientBundle(t *testing.T) {
 	}
 	if strings.Contains(stdout2, "hint: ~/.local/bin is not on your PATH") {
 		t.Errorf("PATH hint printed although ~/.local/bin is on PATH\nstdout:\n%s", stdout2)
+	}
+	// Re-enroll preserves the alias for client bundles as well.
+	assertInstalledConfigHasAlias(t, home, "Host app1\n    HostName peer4\n    User deploy\n")
+}
+
+// TestEnrollV2Script_ExecutionSmoke_NoStagedConfig exercises the fallback
+// branch: a tarball without a config entry (not minted by this codebase) must
+// still install the hosts-less inline keyed block instead of dying under
+// set -e on the missing staged file.
+func TestEnrollV2Script_ExecutionSmoke_NoStagedConfig(t *testing.T) {
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skipf("bash not on PATH (%v); skipping execution smoke", err)
+	}
+
+	const baseURL = "https://demo.example"
+	const tok = "TOKEN789"
+	script := v2Script(baseURL, tok, testInstanceKey)
+	keyFile := peerfiles.V2KeyFileName(testInstanceKey)
+
+	fixturePath := writeFixtureTarball(t, []fixtureEntry{
+		{keyFile, []byte("FAKE_PRIVKEY\n")},
+		{keyFile + "-cert.pub", []byte("ssh-ed25519-cert-v01@openssh.com FAKECERT keyid\n")},
+		{"known_hosts", []byte("manager.example ssh-ed25519 FAKEHOSTKEY\n")},
+		{"ca_authorized_keys", []byte(`cert-authority,principals="manager" ssh-ed25519 FAKECAKEY ca-comment` + "\n")},
+	})
+
+	curlLine := `curl -kfsSL ` + baseURL + `/enroll/` + tok + `?user=$TARGET_USER | tar -xzC "$STAGE"`
+	if !strings.Contains(script, curlLine) {
+		t.Fatalf("script missing curl line %q\nscript:\n%s", curlLine, script)
+	}
+	patched := strings.Replace(script, curlLine, `tar -xzf `+fixturePath+` -C "$STAGE"`, 1)
+
+	home := t.TempDir()
+	scriptPath := filepath.Join(home, "install.sh")
+	if err := os.WriteFile(scriptPath, []byte(patched), 0o700); err != nil {
+		t.Fatalf("write patched script: %v", err)
+	}
+
+	cmd := exec.Command(bashPath, scriptPath)
+	cmd.Env = append(os.Environ(), "HOME="+home, "CERTHOLD_NO_PASSPHRASE=1")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("fallback run failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+
+	cfg, err := os.ReadFile(filepath.Join(home, ".ssh", "config"))
+	if err != nil {
+		t.Fatalf("read installed config: %v", err)
+	}
+	want := peerfiles.V2SshClientBlock(testInstanceKey)
+	if !strings.Contains(string(cfg), want) {
+		t.Errorf("fallback config missing inline keyed block\nconfig:\n%s", cfg)
+	}
+	if strings.Contains(string(cfg), "Host app1") {
+		t.Errorf("fallback config unexpectedly carries a Host alias\nconfig:\n%s", cfg)
 	}
 }

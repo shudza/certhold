@@ -164,11 +164,25 @@ func runClientPeerFlow(ctx context.Context, t *testing.T, instanceKey string) {
 	})
 
 	t.Run("03_client_to_host_ssh_via_alias", func(t *testing.T) {
-		// The install-time block carries no Host stanzas; clients receive the
-		// reachable-host aliases via the pull channel, so the first refresh
-		// must deliver the app01 alias (HostName+User) into the keyed block.
-		cliRefreshOK(ctx, t, clientPeerSvc)
+		// T09: the install script splices the staged hosts-bearing config, so
+		// the app01 alias (app01 is enrolled before laptop, hence reachable at
+		// laptop's mint) must be present at install time, BEFORE any refresh.
 		cfg := composeExec(ctx, t, targetUser, clientPeerSvc, "cat "+sshDir+"/config")
+		for _, want := range []string{
+			"Host " + hostPeerName,
+			"HostName " + hostPeerSvc,
+			"User " + targetUser,
+		} {
+			if !strings.Contains(cfg.out, want) {
+				t.Fatalf("%s: ~/.ssh/config missing %q at install time (before first refresh):\n%s",
+					clientPeerSvc, want, cfg.out)
+			}
+		}
+
+		// The refresh must keep the alias (and baselines the client's LAST_REV
+		// for step 05's staleness attribution).
+		cliRefreshOK(ctx, t, clientPeerSvc)
+		cfg = composeExec(ctx, t, targetUser, clientPeerSvc, "cat "+sshDir+"/config")
 		for _, want := range []string{
 			"# BEGIN certhold " + instanceKey + " v2",
 			"Host " + hostPeerName,
