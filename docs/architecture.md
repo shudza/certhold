@@ -19,26 +19,30 @@ Three ideas cover the whole system:
   therefore requires an explicit revocation or a CA rotation, never a wait —
   see [revocation](maintenance-and-operations.md#revocation). (Cert TTLs are a
   possible future addition; nothing issues time-bounded certs today.)
-- **No agents.** Peers run no certhold software. The only runtime dependencies
-  on a peer are OpenSSH and `curl` (used once, at onboarding). After onboarding,
-  a peer is just files plus stock `sshd`; all later changes are pushed in by
-  certhold over SSH.
+- **Nothing resident on peers.** No certhold daemon or service runs on a peer;
+  the only runtime dependencies are OpenSSH and `curl`. After onboarding, a
+  push-managed peer is just files plus stock `sshd`, with all later changes
+  pushed in by certhold over SSH. A [client-style peer](#client-style-peers-and-the-pull-channel)
+  additionally keeps `certhold-cli`, a small bash script run on demand (never
+  resident) to pull refreshed material from `serve`.
 
 ### Certhold is a peer
 
 Certhold has no bespoke authentication mechanism to its peers. At `init` it
 self-enrolls and obtains an ordinary CA-signed certificate that additionally
-carries a privileged **`manager`** principal. Every peer is configured to accept
-`manager` as a root-equivalent principal, so certhold authenticates to peers
-exactly the way peers authenticate to each other: by presenting a CA-signed cert
-with a matching principal.
+carries a privileged **`manager`** principal. Every push-managed peer is
+configured to accept `manager` as a root-equivalent principal, so certhold
+authenticates to peers exactly the way peers authenticate to each other: by
+presenting a CA-signed cert with a matching principal. (Client-style peers
+install no inbound trust line at all, so they accept neither `manager` nor any
+group — see [below](#client-style-peers-and-the-pull-channel).)
 
 `manager` is exclusive to certhold's own self-cert — peer certs carry only the
 peer's name plus its groups, never `manager`. On the peer side, `manager` is
 always listed first in the inbound trust list (the `principals="…"` value on the
 `authorized_keys` `cert-authority` line) and cannot be edited away by a group
-change. That standing access is what lets certhold SSH into any enrolled peer to
-push updates. The blast radius of this arrangement is discussed in
+change. That standing access is what lets certhold SSH into any push-managed
+peer to push updates. The blast radius of this arrangement is discussed in
 [security.md](security.md).
 
 Every certhold-issued certificate also carries the five standard OpenSSH
@@ -68,7 +72,7 @@ The system is two parts: the **certhold** binary on one machine, and the
                                 │  └────────────────┘  │          │
                                 └────────┬────────────┬┴──────────┘
                                          │            │
-                          ssh (own cert) │            │ https (one-time tokens)
+                          ssh (own cert) │            │ https (enroll + pull tokens)
                                          │            │
                 ┌────────────────────────┴────────────┴──────────────┐
                 │                                                    │
@@ -84,17 +88,22 @@ The system is two parts: the **certhold** binary on one machine, and the
 - An **administrative CLI** for every operation an operator runs — bootstrapping
   the CA, minting peer credentials, editing groups, and pushing state to peers
   over SSH. See [usage.md](usage.md).
-- An **HTTP enroll endpoint** (`GET /enroll/<token>`), exposed only while
-  `certhold serve` is running and used by a peer exactly once during onboarding.
-  It is a CA-less byte-server: certs are signed and bundled by the `enroll` CLI
-  at mint time, so the long-running `serve` process never holds the CA key.
+- An **HTTP endpoint** exposed while `certhold serve` is running:
+  `GET /enroll/<token>` hands a peer its install bundle during onboarding, and
+  `GET /pull/<token>` (plus `GET /pull/<token>/rev`) serves refresh bundles to
+  peers that pull updates via `certhold-cli` — see
+  [the pull channel](#client-style-peers-and-the-pull-channel). It is a CA-less
+  byte-server for both routes: certs are signed by the `enroll`/`update`/`rekey`
+  CLI and stored in the database, so the long-running `serve` process never
+  holds the CA key.
 
-**Peers** are any Linux host running OpenSSH. A peer runs no certhold software;
+**Peers** are any Linux host running OpenSSH. A peer runs no certhold daemon;
 after onboarding it has a fixed set of files under the target user's `~/.ssh/`
 (see [peer-file-layout.md](peer-file-layout.md)) and needs no further
-configuration. Its only ongoing relationship with certhold is inbound: certhold
-SSHes in as `manager` to push updates when group membership or trust state
-changes.
+configuration. A push-managed peer's only ongoing relationship with certhold is
+inbound: certhold SSHes in as `manager` to push updates when group membership or
+trust state changes. A client-style peer's is outbound instead: it fetches its
+refreshed material from `serve` on demand.
 
 ### Data directory
 
@@ -115,8 +124,10 @@ The CA key and the manager's own peer key are encrypted at rest by default; see
 
 ## The trust model (single, user-level)
 
-Certhold has **one** trust model. Every peer's inbound trust lives in a single
-`cert-authority` line in the target user's `~/.ssh/authorized_keys`:
+Certhold has **one** trust model. A peer's inbound trust lives in a single
+`cert-authority` line in the target user's `~/.ssh/authorized_keys` (a
+[client-style peer](#client-style-peers-and-the-pull-channel) simply never gets
+this line — it has no inbound trust at all):
 
 ```
 cert-authority,principals="manager,<groups…>" ssh-ed25519 AAAA…CA_PUBKEY…
@@ -171,6 +182,89 @@ key-namespaced `cert-authority` line and `config` block; the install appends/
 rewrites only its own. See
 [peer-file-layout.md](peer-file-layout.md#config--the-keyed-client-block).
 
+## Client-style peers and the pull channel
+
+A **client-style peer** is a configuration of a peer, not a second kind of
+actor: it is enrolled with `enroll <name> --no-inbound` (alias `--client`) and
+is otherwise an ordinary peer — same CA-signed cert, same name + group
+principals, full outbound access to any peer that allows one of its groups. What
+the flag changes is the inbound side and the delivery channel:
+
+- **No inbound trust.** The install bundle ships no `cert-authority` line, so
+  nothing — other peers or the manager — can SSH into it. It also gets no
+  `peer_allowed_groups` rows, and `group allow … --on <client-peer>` is refused.
+- **Never dialed.** Every push path skips `inbound=0` peers and prints
+  `client peer <name>: changes pending until 'certhold-cli refresh' runs on it`.
+- **Pull instead of push.** The peer fetches its own refreshed material from
+  `serve` with `certhold-cli`, a small on-demand bash CLI installed at enroll
+  time (`~/.local/bin/certhold-cli`).
+
+This is the natural shape for laptops and workstations: machines that should
+reach the fleet but expose nothing.
+
+### Push vs pull delivery
+
+| | Push (inbound peers) | Pull (client-style peers) |
+|---|---|---|
+| Transport | manager SSHes in with its `manager` cert | peer runs `certhold-cli refresh` against `serve` |
+| Trigger | each mutating command, immediately | operator-initiated, on the peer |
+| Credential | the manager's standing cert | a standing per-peer **pull token** |
+| Material delivered | cert, `authorized_keys` line, keyed `config` block | cert + keyed `config` block (public material only) |
+
+Both channels exist for every peer: every enroll mints a pull token and ships
+`certhold-cli`, so a push-managed peer can also pull. For client-style peers the
+pull channel is the *only* delivery path.
+
+### The pull channel
+
+Every `enroll` mints a standing **pull token**, stores it on the peer's row, and
+writes it to the peer's `~/.ssh/certhold_<key>.conf` (mode `0600`).
+`certhold-cli refresh` presents it to `GET /pull/<token>` and receives a
+**refresh bundle**: the peer's latest signed certificate, the keyed `config`
+block (with its `Host` aliases), the current `certhold-cli` script (the CLI
+self-updates from it), and a manifest. The bundle contains **public material
+only** — never a private key, never a `cert-authority` line.
+
+`serve` stays CA-less on this route too: every (re)sign — `enroll`, `update`,
+the `rekey`/`revoke` loop — persists the resulting cert bytes in the database
+(`peers.cert`), and `serve` assembles the bundle from that stored, pre-signed
+cert plus DB state. Unlike enrollment tokens, pull tokens are not consumed;
+they answer until the peer is revoked:
+
+| Condition | Status |
+|---|---|
+| unknown (or empty) token | `404` |
+| peer revoked | `410` |
+| peer has no stored cert (pre-feature enrollment) | `409` — re-enroll it or run `certhold update` on the manager |
+| otherwise | `200` (`application/gzip`, `Cache-Control: no-store`) |
+
+`GET /pull/<token>/rev` (same `404`/`410` rules) returns the current **fleet
+revision** as plain text — a counter in `meta.fleet_rev` bumped once per
+successful mutating command. `certhold-cli status` compares it against the
+`LAST_REV` recorded at the peer's last refresh to render a cheap staleness
+verdict without downloading the bundle.
+
+### Serve lifecycle
+
+This changes what `serve` is for: no longer just an onboarding endpoint hit
+once per peer, it is the standing refresh source for every client-style peer.
+Keep it running — `sudo certhold install` sets it up as a systemd service
+(see [usage.md](usage.md#install)). While `serve` is down, nothing breaks
+(certs do not expire); client-style peers just cannot pick up changes.
+
+### Eventual consistency
+
+Pull delivery is operator-initiated, so client-style peers are **eventually
+consistent by design**: after a `rekey`, `revoke`, `update`, or group change,
+a client-style peer keeps acting on its old material until someone runs
+`certhold-cli refresh` on it — after a rekey that means it is locked out of the
+fleet until then (see
+[maintenance-and-operations.md](maintenance-and-operations.md#client-style-peers-under-rekey-and-revoke)).
+The same honesty applies to the `Host` alias blocks on all peers: a reachability
+change (a new peer, a changed address or allow-list) lands on each peer's config
+at its **next push or pull**, not by broadcast — only peers a command actually
+dials get the new block immediately.
+
 ## Requirements & compatibility
 
 The effective floor is **OpenSSH 6.5 (2014)**, set by ed25519 keys and certs,
@@ -198,6 +292,10 @@ calls:
 | `id`, `mkdir`, `chmod`, `install` | resolve and lock down `~/.ssh`, place the files |
 | `sed`, `cat`, `grep`, `awk` | append the `cert-authority` line and splice the keyed `config` block idempotently |
 | `ssh-keygen` | optional peer-key passphrase encryption at install |
+
+`certhold-cli` deliberately stays within the same era of tools: bash, `curl`,
+`tar` (+gzip), `sed`, `grep`, `install`, `mktemp`, `cmp`, and `ssh-keygen` (to
+print cert details in `status`).
 
 No `systemd` and no `sshd` reload are involved on a peer. The `serve` endpoint
 defaults to HTTPS with an auto-generated self-signed cert, so the install
