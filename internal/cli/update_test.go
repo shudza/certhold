@@ -47,6 +47,13 @@ func (m *mockPusher) ReadFile(ctx context.Context, remotePath string) ([]byte, e
 	return nil, nil
 }
 
+func (m *mockPusher) SpliceConfigBlock(ctx context.Context, configPath, instanceKey, block string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls = append(m.calls, mockCall{op: "splice", path: configPath, content: []byte(block)})
+	return nil
+}
+
 func (m *mockPusher) ReloadSSHD(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -321,9 +328,10 @@ func TestUpdateSuccess(t *testing.T) {
 	key := instanceKeyFromDBPkg(t, dbPath)
 	mp.mu.Lock()
 	defer mp.mu.Unlock()
-	// v2 peer: a single namespaced cert write, then verify — no sshd reload.
-	if len(mp.calls) != 2 {
-		t.Fatalf("calls = %d, want 2: %+v", len(mp.calls), mp.calls)
+	// v2 peer: a namespaced cert write, the config splice, then verify — no
+	// sshd reload.
+	if len(mp.calls) != 3 {
+		t.Fatalf("calls = %d, want 3: %+v", len(mp.calls), mp.calls)
 	}
 	if mp.calls[0].op != "write" {
 		t.Errorf("call[0] = %q, want write", mp.calls[0].op)
@@ -342,8 +350,11 @@ func TestUpdateSuccess(t *testing.T) {
 			t.Errorf("v2 update must NOT reload sshd; calls=%+v", mp.calls)
 		}
 	}
-	if mp.calls[1].op != "verify" {
-		t.Errorf("call[1] = %q, want verify", mp.calls[1].op)
+	if mp.calls[1].op != "splice" || mp.calls[1].path != "/root/.ssh/config" {
+		t.Errorf("call[1] = %q %q, want splice /root/.ssh/config", mp.calls[1].op, mp.calls[1].path)
+	}
+	if mp.calls[2].op != "verify" {
+		t.Errorf("call[2] = %q, want verify", mp.calls[2].op)
 	}
 	if !mp.closed {
 		t.Errorf("pusher was not closed")
@@ -622,5 +633,158 @@ func TestUpdateEmptyGroups(t *testing.T) {
 	withMockPusher(t)
 	if _, _, err := runUpdate(t, dataDir, dbPath, "peer1", "--groups", " , , "); err == nil {
 		t.Fatal("expected error for empty groups")
+	}
+}
+
+func TestUpdateClientPeer_SkipsDialNoticeAndPersistsCert(t *testing.T) {
+	dataDir := t.TempDir()
+	caObj, err := ca.Generate(filepath.Join(dataDir, "ca"))
+	if err != nil {
+		t.Fatalf("ca.Generate: %v", err)
+	}
+	_, pubAuth, sshPub, err := ca.GeneratePeerKey()
+	if err != nil {
+		t.Fatalf("GeneratePeerKey: %v", err)
+	}
+	dbPath := filepath.Join(dataDir, "state.db")
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	ctx := context.Background()
+	if _, err := EnsureInstanceKey(ctx, d); err != nil {
+		t.Fatalf("EnsureInstanceKey: %v", err)
+	}
+	if err := d.InsertPeer(ctx, "laptop", 1, ssh.FingerprintSHA256(sshPub), pubAuth, "alice", false, "tok-laptop"); err != nil {
+		t.Fatalf("InsertPeer: %v", err)
+	}
+	d.Close()
+	preCreateGroups(t, dbPath, "infra")
+
+	dialCount := 0
+	prev := dialFn
+	dialFn = func(ctx context.Context, host string, opts sshpush.Options) (sshpush.Pusher, error) {
+		dialCount++
+		return &mockPusher{}, nil
+	}
+	t.Cleanup(func() { dialFn = prev })
+
+	stdout, stderr, err := runUpdate(t, dataDir, dbPath, "laptop", "--groups", "infra")
+	if err != nil {
+		t.Fatalf("update client peer: err=%v stderr=%s stdout=%s", err, stderr, stdout)
+	}
+	if dialCount != 0 {
+		t.Errorf("client peer was dialed %d times, want 0", dialCount)
+	}
+	wantNotice := "client peer laptop: changes pending until 'certhold-cli refresh' runs on it"
+	if !strings.Contains(stdout, wantNotice) {
+		t.Errorf("stdout missing notice %q:\n%s", wantNotice, stdout)
+	}
+
+	d2, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer d2.Close()
+	p, err := d2.GetPeer(ctx, "laptop")
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if len(p.Cert) == 0 {
+		t.Fatal("client peer cert not stored in db")
+	}
+	pk, _, _, _, err := ssh.ParseAuthorizedKey(p.Cert)
+	if err != nil {
+		t.Fatalf("parse stored cert: %v", err)
+	}
+	cert, ok := pk.(*ssh.Certificate)
+	if !ok {
+		t.Fatalf("stored cert is %T, want *ssh.Certificate", pk)
+	}
+	caPub, _, _, _, err := ssh.ParseAuthorizedKey(caObj.PublicKeyAuthorizedKey())
+	if err != nil {
+		t.Fatalf("parse ca pub: %v", err)
+	}
+	if !bytes.Equal(cert.SignatureKey.Marshal(), caPub.Marshal()) {
+		t.Error("stored cert not signed by the CA")
+	}
+	if cert.Serial != p.Serial {
+		t.Errorf("stored cert serial %d != peer cert_serial %d", cert.Serial, p.Serial)
+	}
+	groups, err := d2.GetPeerGroups(ctx, "laptop")
+	if err != nil {
+		t.Fatalf("GetPeerGroups: %v", err)
+	}
+	if len(groups) != 1 || groups[0] != "infra" {
+		t.Errorf("groups = %v, want [infra] (DB-side change must still land)", groups)
+	}
+}
+
+func TestUpdateInboundPeer_SplicesConfigWithReachableHosts(t *testing.T) {
+	dataDir := t.TempDir()
+	if _, err := ca.Generate(filepath.Join(dataDir, "ca")); err != nil {
+		t.Fatalf("ca.Generate: %v", err)
+	}
+	_, pubAuth, sshPub, err := ca.GeneratePeerKey()
+	if err != nil {
+		t.Fatalf("GeneratePeerKey: %v", err)
+	}
+	dbPath := filepath.Join(dataDir, "state.db")
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	ctx := context.Background()
+	key, err := EnsureInstanceKey(ctx, d)
+	if err != nil {
+		t.Fatalf("EnsureInstanceKey: %v", err)
+	}
+	if err := d.InsertPeer(ctx, "web01", 1, ssh.FingerprintSHA256(sshPub), pubAuth, "alice", true, ""); err != nil {
+		t.Fatalf("InsertPeer web01: %v", err)
+	}
+	if err := d.InsertPeer(ctx, "db01", 1, "fp-db", []byte("k"), "dbadmin", true, ""); err != nil {
+		t.Fatalf("InsertPeer db01: %v", err)
+	}
+	if err := d.EnsureGroup(ctx, "infra"); err != nil {
+		t.Fatalf("EnsureGroup: %v", err)
+	}
+	if err := d.SetPeerAddress(ctx, "db01", "10.0.0.7"); err != nil {
+		t.Fatalf("SetPeerAddress: %v", err)
+	}
+	if err := d.SetPeerAllowedGroups(ctx, "db01", []string{"infra"}); err != nil {
+		t.Fatalf("SetPeerAllowedGroups: %v", err)
+	}
+	d.Close()
+
+	mp := withMockPusher(t)
+	if _, stderr, err := runUpdate(t, dataDir, dbPath, "web01", "--groups", "infra"); err != nil {
+		t.Fatalf("update: err=%v stderr=%s", err, stderr)
+	}
+
+	mp.mu.Lock()
+	defer mp.mu.Unlock()
+	var spliceCall *mockCall
+	for i := range mp.calls {
+		if mp.calls[i].op == "splice" {
+			spliceCall = &mp.calls[i]
+		}
+	}
+	if spliceCall == nil {
+		t.Fatalf("no splice call; calls=%+v", mp.calls)
+	}
+	if spliceCall.path != "/home/alice/.ssh/config" {
+		t.Errorf("splice path = %q, want /home/alice/.ssh/config", spliceCall.path)
+	}
+	block := string(spliceCall.content)
+	for _, want := range []string{
+		"# BEGIN certhold " + key,
+		"Host db01\n",
+		"    HostName 10.0.0.7\n",
+		"    User dbadmin\n",
+		"# END certhold " + key,
+	} {
+		if !strings.Contains(block, want) {
+			t.Errorf("splice block missing %q:\n%s", want, block)
+		}
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -20,6 +21,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/shudza/certhold/internal/ca"
+	"github.com/shudza/certhold/internal/peerfiles"
 )
 
 // fakeSession captures one ssh exec session for assertion.
@@ -42,6 +44,26 @@ type fakeServer struct {
 	stdoutByCmd map[string][]byte
 	stopErr     error
 	wg          sync.WaitGroup
+	execLocal   bool
+}
+
+// runLocalShell executes the session command via the local shell so splice
+// semantics (mkdir/touch/sed/append) run against a real filesystem.
+func runLocalShell(cmd string, stdin []byte, ch ssh.Channel) uint32 {
+	c := exec.Command("sh", "-c", cmd)
+	c.Stdin = bytes.NewReader(stdin)
+	out, err := c.Output()
+	if len(out) > 0 {
+		_, _ = ch.Write(out)
+	}
+	if err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			return uint32(ee.ExitCode())
+		}
+		return 127
+	}
+	return 0
 }
 
 func (s *fakeServer) setStdout(cmd string, out []byte) {
@@ -172,8 +194,12 @@ func (s *fakeServer) handleSession(ch ssh.Channel, requests <-chan *ssh.Request)
 				_, _ = ch.Write(out)
 			}
 			<-stdinDone
+			status := uint32(0)
+			if s.execLocal {
+				status = runLocalShell(cmd, stdin.Bytes(), ch)
+			}
 			s.record(fakeSession{command: cmd, stdin: stdin.Bytes()})
-			exitMsg := struct{ Status uint32 }{Status: 0}
+			exitMsg := struct{ Status uint32 }{Status: status}
 			_, _ = ch.SendRequest("exit-status", false, ssh.Marshal(&exitMsg))
 			_ = ch.Close()
 			return
@@ -594,3 +620,95 @@ func TestDialEncryptedKeyNilPassphraseFn(t *testing.T) {
 }
 
 var _ Pusher = (*Client)(nil)
+
+func dialExecLocalClient(t *testing.T) *Client {
+	t.Helper()
+	env := setupTestEnv(t)
+	srv := newFakeServer(t, env.caPubKey)
+	srv.execLocal = true
+	t.Cleanup(srv.Close)
+	cl := dialClient(t, env, srv)
+	t.Cleanup(func() { _ = cl.Close() })
+	return cl
+}
+
+func TestSpliceConfigBlock_FreshFile(t *testing.T) {
+	cl := dialExecLocalClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cfg := filepath.Join(t.TempDir(), "home", ".ssh", "config")
+	block := peerfiles.V2SshClientBlockWithHosts("k1", []peerfiles.HostEntry{{Name: "web01", Address: "10.0.0.5", User: "deploy"}})
+	if err := cl.SpliceConfigBlock(ctx, cfg, "k1", block); err != nil {
+		t.Fatalf("SpliceConfigBlock: %v", err)
+	}
+	got, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if string(got) != block {
+		t.Errorf("fresh config = %q, want exactly the block %q", got, block)
+	}
+	fi, err := os.Stat(cfg)
+	if err != nil {
+		t.Fatalf("stat config: %v", err)
+	}
+	if fi.Mode().Perm() != 0600 {
+		t.Errorf("created config mode = %o, want 0600", fi.Mode().Perm())
+	}
+}
+
+func TestSpliceConfigBlock_PreservesUserContentAndForeignBlock(t *testing.T) {
+	cl := dialExecLocalClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "config")
+	userContent := "Host personal\n    HostName example.com\n"
+	foreign := peerfiles.V2SshClientBlockWithHosts("otherkey", nil)
+	staleVersionless := "# BEGIN certhold k1\nstale line\n# END certhold k1\n"
+	if err := os.WriteFile(cfg, []byte(userContent+foreign+staleVersionless), 0644); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	block := peerfiles.V2SshClientBlockWithHosts("k1", []peerfiles.HostEntry{{Name: "db01", Address: "10.0.0.7", User: "root"}})
+	if err := cl.SpliceConfigBlock(ctx, cfg, "k1", block); err != nil {
+		t.Fatalf("SpliceConfigBlock: %v", err)
+	}
+	got, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	want := userContent + foreign + block
+	if string(got) != want {
+		t.Errorf("config after splice = %q, want %q", got, want)
+	}
+	if strings.Contains(string(got), "stale line") {
+		t.Errorf("stale versionless block survived the splice: %q", got)
+	}
+}
+
+func TestSpliceConfigBlock_Idempotent(t *testing.T) {
+	cl := dialExecLocalClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cfg := filepath.Join(t.TempDir(), "config")
+	block := peerfiles.V2SshClientBlockWithHosts("k1", []peerfiles.HostEntry{{Name: "web01", Address: "10.0.0.5", User: "deploy"}})
+	for i := 0; i < 2; i++ {
+		if err := cl.SpliceConfigBlock(ctx, cfg, "k1", block); err != nil {
+			t.Fatalf("SpliceConfigBlock #%d: %v", i+1, err)
+		}
+	}
+	got, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if string(got) != block {
+		t.Errorf("re-splice not idempotent: got %q, want %q", got, block)
+	}
+	if n := strings.Count(string(got), "# BEGIN certhold k1"); n != 1 {
+		t.Errorf("begin sentinel appears %d times, want 1", n)
+	}
+}

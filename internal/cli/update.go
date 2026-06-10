@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,13 +115,23 @@ func newUpdateCmd() *cobra.Command {
 			if err := d.SetPeerGroups(ctx, name, groups); err != nil {
 				return fmt.Errorf("set peer groups: %w", err)
 			}
-			if err := d.UpdatePeerCertSerial(ctx, name, serial); err != nil {
-				return fmt.Errorf("update peer cert serial: %w", err)
+			if err := d.SetPeerCert(ctx, name, certBytes, serial); err != nil {
+				return fmt.Errorf("set peer cert: %w", err)
 			}
 
 			instanceKey, err := EnsureInstanceKey(ctx, d)
 			if err != nil {
 				return fmt.Errorf("ensure instance key: %w", err)
+			}
+
+			if err := d.BumpFleetRev(ctx); err != nil {
+				return fmt.Errorf("bump fleet_rev: %w", err)
+			}
+
+			if !peer.Inbound {
+				clientPeerNotice(cmd.OutOrStdout(), name)
+				fmt.Fprintf(cmd.OutOrStdout(), "updated %s (serial %d)\n", name, serial)
+				return nil
 			}
 
 			pushOpts := selfPushOptions(dataDir, resolveSelfIdent(ctx, d), peerUnlock.get)
@@ -134,6 +145,9 @@ func newUpdateCmd() *cobra.Command {
 			certPath := peerCertRemotePath(peer, instanceKey)
 			if err := pusher.WriteFileAtomic(ctx, certPath, certBytes, 0644); err != nil {
 				return fmt.Errorf("write cert: %w", err)
+			}
+			if err := splicePeerConfig(ctx, pusher, d, peer, instanceKey); err != nil {
+				return fmt.Errorf("splice ssh config: %w", err)
 			}
 			if err := pusher.VerifyHealth(ctx); err != nil {
 				return fmt.Errorf("verify health: %w", err)
@@ -209,4 +223,31 @@ func peerCertRemotePath(p *db.Peer, instanceKey string) string {
 
 func peerAuthorizedKeysRemotePath(p *db.Peer) string {
 	return peerfiles.PathsFor(p.TargetUser, "").AuthorizedKeys
+}
+
+// clientPeerNotice tells the operator a client-style (inbound=0) peer was not
+// dialed: its DB-side changes land on its next pull.
+func clientPeerNotice(w io.Writer, name string) {
+	fmt.Fprintf(w, "client peer %s: changes pending until 'certhold-cli refresh' runs on it\n", name)
+}
+
+// v2ConfigBlockForHosts renders the keyed client-config block carrying one
+// Host alias stanza per reachable peer.
+func v2ConfigBlockForHosts(instanceKey string, hosts []db.ReachableHost) string {
+	entries := make([]peerfiles.HostEntry, 0, len(hosts))
+	for _, h := range hosts {
+		entries = append(entries, peerfiles.HostEntry{Name: h.Name, Address: h.Address, User: h.TargetUser})
+	}
+	return peerfiles.V2SshClientBlockWithHosts(instanceKey, entries)
+}
+
+// splicePeerConfig recomputes the peer's reachable-host config block and
+// splices it into the peer's <home>/.ssh/config over the open pusher.
+func splicePeerConfig(ctx context.Context, pusher sshpush.Pusher, d *db.DB, peer *db.Peer, instanceKey string) error {
+	hosts, err := d.ReachableHosts(ctx, peer.Name)
+	if err != nil {
+		return fmt.Errorf("reachable hosts for %s: %w", peer.Name, err)
+	}
+	block := v2ConfigBlockForHosts(instanceKey, hosts)
+	return pusher.SpliceConfigBlock(ctx, peerfiles.PathsFor(peer.TargetUser, instanceKey).ConfigTarget, instanceKey, block)
 }

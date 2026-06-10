@@ -128,17 +128,32 @@ func runRekeyCore(ctx context.Context, deps rekeyDeps, exclude map[string]bool) 
 			return abortRekey(deps.Err, fmt.Errorf("sign cert for %s: %w", p.Name, err), updated)
 		}
 
+		if !p.Inbound {
+			if err := deps.DB.SetPeerCert(ctx, p.Name, certBytes, serial); err != nil {
+				return abortRekey(deps.Err, fmt.Errorf("set peer cert %s: %w", p.Name, err), updated)
+			}
+			clientPeerNotice(deps.Out, p.Name)
+			updated = append(updated, p.Name)
+			fmt.Fprintf(deps.Out, "rekeyed %s (serial %d)\n", p.Name, serial)
+			continue
+		}
+
 		peerForPush := p
 		allowed, err := deps.DB.GetPeerAllowedGroups(ctx, p.Name)
 		if err != nil {
 			return abortRekey(deps.Err, fmt.Errorf("get allowed groups for %s: %w", p.Name, err), updated)
 		}
-		if err := pushPeerRekey(ctx, deps.Dial, &peerForPush, oldCAPub, newCAPub, instanceKey, certBytes, allowed, pushOpts); err != nil {
+		hosts, err := deps.DB.ReachableHosts(ctx, p.Name)
+		if err != nil {
+			return abortRekey(deps.Err, fmt.Errorf("reachable hosts for %s: %w", p.Name, err), updated)
+		}
+		configBlock := v2ConfigBlockForHosts(instanceKey, hosts)
+		if err := pushPeerRekey(ctx, deps.Dial, &peerForPush, oldCAPub, newCAPub, instanceKey, certBytes, allowed, configBlock, pushOpts); err != nil {
 			failed = append(failed, straggler{name: p.Name, err: err})
 			continue
 		}
-		if err := deps.DB.UpdatePeerCertSerial(ctx, p.Name, serial); err != nil {
-			return abortRekey(deps.Err, fmt.Errorf("update cert_serial %s: %w", p.Name, err), updated)
+		if err := deps.DB.SetPeerCert(ctx, p.Name, certBytes, serial); err != nil {
+			return abortRekey(deps.Err, fmt.Errorf("set peer cert %s: %w", p.Name, err), updated)
 		}
 		updated = append(updated, p.Name)
 		fmt.Fprintf(deps.Out, "rekeyed %s (serial %d)\n", p.Name, serial)
@@ -170,8 +185,8 @@ func runRekeyCore(ctx context.Context, deps rekeyDeps, exclude map[string]bool) 
 	if err := writeSelfRekey(deps.DataDir, self, oldCAPub, newCAPub, instanceKey, selfCertBytes); err != nil {
 		return abortRekey(deps.Err, fmt.Errorf("update self files: %w", err), updated)
 	}
-	if err := deps.DB.UpdatePeerCertSerial(ctx, deps.Hostname, selfSerial); err != nil {
-		return abortRekey(deps.Err, fmt.Errorf("update self cert_serial: %w", err), updated)
+	if err := deps.DB.SetPeerCert(ctx, deps.Hostname, selfCertBytes, selfSerial); err != nil {
+		return abortRekey(deps.Err, fmt.Errorf("set self peer cert: %w", err), updated)
 	}
 	updated = append(updated, deps.Hostname)
 	fmt.Fprintf(deps.Out, "rekeyed %s (serial %d)\n", deps.Hostname, selfSerial)
@@ -196,6 +211,9 @@ func runRekeyCore(ctx context.Context, deps rekeyDeps, exclude map[string]bool) 
 	}
 	if err := deps.DB.SetActiveCAVersion(ctx, newVer); err != nil {
 		return fmt.Errorf("set active ca version %d: %w", newVer, err)
+	}
+	if err := deps.DB.BumpFleetRev(ctx); err != nil {
+		return fmt.Errorf("bump fleet_rev: %w", err)
 	}
 
 	fmt.Fprintf(deps.Out, "Rekey complete: %d peers rotated, CA version %d active, old CA archived at %s\n", len(updated), newVer, oldCADir)
@@ -286,8 +304,9 @@ func caKeyEncrypted(caDir string) (bool, error) {
 
 // pushPeerRekey delivers the new CA + cert to a single peer. It swaps this
 // instance's cert-authority line in <home>/.ssh/authorized_keys (preserving any
-// other instance's lines) and pushes the namespaced cert; no reload.
-func pushPeerRekey(ctx context.Context, dial func(context.Context, string, sshpush.Options) (sshpush.Pusher, error), p *db.Peer, oldCAPub ssh.PublicKey, newCAPub []byte, instanceKey string, certBytes []byte, allowed []string, opts sshpush.Options) error {
+// other instance's lines), pushes the namespaced cert, and splices the keyed
+// client-config block; no reload.
+func pushPeerRekey(ctx context.Context, dial func(context.Context, string, sshpush.Options) (sshpush.Pusher, error), p *db.Peer, oldCAPub ssh.PublicKey, newCAPub []byte, instanceKey string, certBytes []byte, allowed []string, configBlock string, opts sshpush.Options) error {
 	if p.Name == "" {
 		return errors.New("empty host")
 	}
@@ -309,6 +328,9 @@ func pushPeerRekey(ctx context.Context, dial func(context.Context, string, sshpu
 	}
 	if err := cl.WriteFileAtomic(ctx, peerCertRemotePath(p, instanceKey), certBytes, fs.FileMode(0644)); err != nil {
 		return fmt.Errorf("write peer cert: %w", err)
+	}
+	if err := cl.SpliceConfigBlock(ctx, peerfiles.PathsFor(p.TargetUser, instanceKey).ConfigTarget, instanceKey, configBlock); err != nil {
+		return fmt.Errorf("splice ssh config: %w", err)
 	}
 	if err := cl.VerifyHealth(ctx); err != nil {
 		return fmt.Errorf("verify health: %w", err)
