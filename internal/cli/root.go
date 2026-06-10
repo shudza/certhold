@@ -34,6 +34,7 @@ func NewRootCmd() *cobra.Command {
 		newRevokeCmd(),
 		newRekeyCmd(),
 		newServeCmd(),
+		newInstallCmd(),
 	)
 
 	return cmd
