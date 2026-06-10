@@ -69,6 +69,16 @@ func (m *rekeyMockPusher) ReadFile(ctx context.Context, p string) ([]byte, error
 	return nil, nil
 }
 
+func (m *rekeyMockPusher) SpliceConfigBlock(ctx context.Context, p, instanceKey, block string) error {
+	m.rec.mu.Lock()
+	defer m.rec.mu.Unlock()
+	if err, ok := m.rec.failOn["splice:"+m.host+":"+p]; ok {
+		return err
+	}
+	m.rec.calls = append(m.rec.calls, rekeyMockCall{host: m.host, op: "splice", path: p, content: []byte(block)})
+	return nil
+}
+
 func (m *rekeyMockPusher) ReloadSSHD(ctx context.Context) error {
 	m.rec.mu.Lock()
 	defer m.rec.mu.Unlock()
@@ -213,6 +223,7 @@ func TestRekeyHappyPath(t *testing.T) {
 			{h, "read", "/root/.ssh/authorized_keys"},
 			{h, "write", "/root/.ssh/authorized_keys"},
 			{h, "write", "/root/.ssh/id_ed25519_" + key + "-cert.pub"},
+			{h, "splice", "/root/.ssh/config"},
 			{h, "verify", ""},
 		}
 		if len(evs) != len(want) {
@@ -920,5 +931,127 @@ func TestRekeyRootUserPeer_RewritesAuthorizedKeys_NoReload(t *testing.T) {
 	}
 	if gotReload {
 		t.Errorf("v2 root rekey must NOT reload sshd")
+	}
+}
+
+func TestRekeyClientPeer_NoDialNoticeAndCertStored(t *testing.T) {
+	dataDir, dbPath, hostname, rec, cleanup := setupRekeyEnv(t, nil)
+	defer cleanup()
+
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	ctx := context.Background()
+	_, pubAuth, sshPub, err := ca.GeneratePeerKey()
+	if err != nil {
+		t.Fatalf("GeneratePeerKey: %v", err)
+	}
+	if err := d.InsertPeer(ctx, "laptop", 100, ssh.FingerprintSHA256(sshPub), pubAuth, "alice", false, "tok-laptop"); err != nil {
+		t.Fatalf("InsertPeer laptop: %v", err)
+	}
+	if err := d.SetPeerGroups(ctx, "laptop", []string{"infra"}); err != nil {
+		t.Fatalf("SetPeerGroups laptop: %v", err)
+	}
+	d.Close()
+
+	stdout, stderr, err := runRekeyCmd(t, dataDir, dbPath, hostname)
+	if err != nil {
+		t.Fatalf("rekey: err=%v stderr=%s stdout=%s", err, stderr, stdout)
+	}
+
+	for _, c := range rec.snapshot() {
+		if c.host == "laptop" {
+			t.Fatalf("client peer laptop must not be dialed/pushed; got op %s", c.op)
+		}
+	}
+	wantNotice := "client peer laptop: changes pending until 'certhold-cli refresh' runs on it"
+	if !strings.Contains(stdout, wantNotice) {
+		t.Errorf("stdout missing notice %q:\n%s", wantNotice, stdout)
+	}
+	if !strings.Contains(stdout, "rekeyed laptop") {
+		t.Errorf("stdout missing 'rekeyed laptop':\n%s", stdout)
+	}
+
+	newCAPub, err := os.ReadFile(filepath.Join(dataDir, "ca", "ca.pub"))
+	if err != nil {
+		t.Fatalf("read new ca.pub: %v", err)
+	}
+	caPk, _, _, _, err := ssh.ParseAuthorizedKey(newCAPub)
+	if err != nil {
+		t.Fatalf("parse new ca pub: %v", err)
+	}
+
+	d2, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer d2.Close()
+	p, err := d2.GetPeer(ctx, "laptop")
+	if err != nil {
+		t.Fatalf("GetPeer laptop: %v", err)
+	}
+	if len(p.Cert) == 0 {
+		t.Fatal("client peer cert not stored during rekey")
+	}
+	pk, _, _, _, err := ssh.ParseAuthorizedKey(p.Cert)
+	if err != nil {
+		t.Fatalf("parse stored cert: %v", err)
+	}
+	cert, ok := pk.(*ssh.Certificate)
+	if !ok {
+		t.Fatalf("stored cert is %T, want *ssh.Certificate", pk)
+	}
+	if !bytes.Equal(cert.SignatureKey.Marshal(), caPk.Marshal()) {
+		t.Error("stored client-peer cert is not signed by the NEW CA")
+	}
+	if cert.Serial != p.Serial {
+		t.Errorf("stored cert serial %d != peer cert_serial %d", cert.Serial, p.Serial)
+	}
+}
+
+func TestRekeySplicesConfigWithReachableHosts(t *testing.T) {
+	dataDir, dbPath, hostname, rec, cleanup := setupRekeyEnv(t, nil)
+	defer cleanup()
+
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	if err := d.SetPeerAddress(context.Background(), "beta", "10.0.0.2"); err != nil {
+		t.Fatalf("SetPeerAddress beta: %v", err)
+	}
+	d.Close()
+
+	if _, stderr, err := runRekeyCmd(t, dataDir, dbPath, hostname); err != nil {
+		t.Fatalf("rekey: err=%v stderr=%s", err, stderr)
+	}
+
+	splices := map[string]string{}
+	for _, c := range rec.snapshot() {
+		if c.op == "splice" {
+			if c.path != "/root/.ssh/config" {
+				t.Errorf("splice path for %s = %q, want /root/.ssh/config", c.host, c.path)
+			}
+			splices[c.host] = string(c.content)
+		}
+	}
+	// alpha and beta are both in infra and both allow infra, so each one's
+	// block must carry a Host stanza for the other.
+	alphaBlock, ok := splices["alpha"]
+	if !ok {
+		t.Fatalf("no config splice pushed to alpha; splices=%v", splices)
+	}
+	for _, want := range []string{"Host beta\n", "    HostName 10.0.0.2\n", "    User root\n"} {
+		if !strings.Contains(alphaBlock, want) {
+			t.Errorf("alpha block missing %q:\n%s", want, alphaBlock)
+		}
+	}
+	betaBlock, ok := splices["10.0.0.2"]
+	if !ok {
+		t.Fatalf("no config splice pushed to beta (dialed via address); splices=%v", splices)
+	}
+	if !strings.Contains(betaBlock, "Host alpha\n") {
+		t.Errorf("beta block missing 'Host alpha':\n%s", betaBlock)
 	}
 }

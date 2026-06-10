@@ -121,6 +121,9 @@ func runGroupRename(cmd *cobra.Command, oldName, newName string) error {
 			return fmt.Errorf("rename group: %w", err)
 		}
 	}
+	if err := d.BumpFleetRev(ctx); err != nil {
+		return fmt.Errorf("bump fleet_rev: %w", err)
+	}
 
 	if len(affectedSet) == 0 {
 		fmt.Fprintf(cmd.OutOrStdout(), "group renamed: %q → %q (no peers affected)\n", oldName, newName)
@@ -176,6 +179,48 @@ func runGroupRename(cmd *cobra.Command, oldName, newName string) error {
 			continue
 		}
 
+		_, isMember := memberSet[peerName]
+		_, isAllow := allowedBySet[peerName]
+
+		var certBytes []byte
+		if isMember {
+			currentGroups, err := d.GetPeerGroups(ctx, peerName)
+			if err != nil {
+				return fmt.Errorf("get peer groups %q: %w", peerName, err)
+			}
+
+			pk, _, _, _, err := ssh.ParseAuthorizedKey(peer.AuthorizedKey)
+			if err != nil {
+				return fmt.Errorf("parse peer pubkey %q: %w", peerName, err)
+			}
+			principals := append([]string{peerName}, currentGroups...)
+			var serial uint64
+			certBytes, serial, err = caObj.SignCert(ca.SignOptions{
+				Pubkey:     pk,
+				KeyID:      peerName,
+				Principals: principals,
+			})
+			if err != nil {
+				return fmt.Errorf("sign cert %q: %w", peerName, err)
+			}
+			if err := d.SetPeerCert(ctx, peerName, certBytes, serial); err != nil {
+				return fmt.Errorf("set peer cert %q: %w", peerName, err)
+			}
+		}
+
+		var currentAllowed []string
+		if isAllow {
+			currentAllowed, err = d.GetPeerAllowedGroups(ctx, peerName)
+			if err != nil {
+				return fmt.Errorf("get peer allowed groups %q: %w", peerName, err)
+			}
+		}
+
+		if !peer.Inbound {
+			clientPeerNotice(cmd.OutOrStdout(), peerName)
+			continue
+		}
+
 		pushOpts := selfPushOptions(dataDir, self, peerUnlock.get)
 		pushOpts.User = pushUser(peer)
 		host := peer.DialHost()
@@ -185,33 +230,7 @@ func runGroupRename(cmd *cobra.Command, oldName, newName string) error {
 			continue
 		}
 
-		if _, isMember := memberSet[peerName]; isMember {
-			currentGroups, err := d.GetPeerGroups(ctx, peerName)
-			if err != nil {
-				pusher.Close()
-				return fmt.Errorf("get peer groups %q: %w", peerName, err)
-			}
-
-			pk, _, _, _, err := ssh.ParseAuthorizedKey(peer.AuthorizedKey)
-			if err != nil {
-				pusher.Close()
-				return fmt.Errorf("parse peer pubkey %q: %w", peerName, err)
-			}
-			principals := append([]string{peerName}, currentGroups...)
-			certBytes, serial, err := caObj.SignCert(ca.SignOptions{
-				Pubkey:     pk,
-				KeyID:      peerName,
-				Principals: principals,
-			})
-			if err != nil {
-				pusher.Close()
-				return fmt.Errorf("sign cert %q: %w", peerName, err)
-			}
-			if err := d.UpdatePeerCertSerial(ctx, peerName, serial); err != nil {
-				pusher.Close()
-				return fmt.Errorf("update cert serial %q: %w", peerName, err)
-			}
-
+		if isMember {
 			certPath := peerCertRemotePath(peer, instanceKey)
 			if err := pusher.WriteFileAtomic(ctx, certPath, certBytes, fs.FileMode(0644)); err != nil {
 				stragglers = append(stragglers, peerName)
@@ -220,12 +239,7 @@ func runGroupRename(cmd *cobra.Command, oldName, newName string) error {
 			}
 		}
 
-		if _, isAllow := allowedBySet[peerName]; isAllow {
-			currentAllowed, err := d.GetPeerAllowedGroups(ctx, peerName)
-			if err != nil {
-				pusher.Close()
-				return fmt.Errorf("get peer allowed groups %q: %w", peerName, err)
-			}
+		if isAllow {
 			remote := peerAuthorizedKeysRemotePath(peer)
 			existing, err := pusher.ReadFile(ctx, remote)
 			if err != nil {
@@ -244,6 +258,12 @@ func runGroupRename(cmd *cobra.Command, oldName, newName string) error {
 				pusher.Close()
 				continue
 			}
+		}
+
+		if err := splicePeerConfig(ctx, pusher, d, peer, instanceKey); err != nil {
+			stragglers = append(stragglers, peerName)
+			pusher.Close()
+			continue
 		}
 
 		if err := pusher.VerifyHealth(ctx); err != nil {
@@ -339,6 +359,9 @@ func runGroupDelete(cmd *cobra.Command, name string) error {
 		if err := d.DeleteGroup(ctx, name); err != nil {
 			return fmt.Errorf("delete group: %w", err)
 		}
+		if err := d.BumpFleetRev(ctx); err != nil {
+			return fmt.Errorf("bump fleet_rev: %w", err)
+		}
 		fmt.Fprintf(cmd.OutOrStdout(), "group %q deleted (no peers affected)\n", name)
 		return nil
 	}
@@ -392,6 +415,57 @@ func runGroupDelete(cmd *cobra.Command, name string) error {
 			continue
 		}
 
+		_, isMember := memberSet[peerName]
+		_, isAllow := allowedBySet[peerName]
+
+		var certBytes []byte
+		if isMember {
+			currentGroups, err := d.GetPeerGroups(ctx, peerName)
+			if err != nil {
+				return fmt.Errorf("get peer groups %q: %w", peerName, err)
+			}
+			newGroups := removeStr(currentGroups, name)
+
+			pk, _, _, _, err := ssh.ParseAuthorizedKey(peer.AuthorizedKey)
+			if err != nil {
+				return fmt.Errorf("parse peer pubkey %q: %w", peerName, err)
+			}
+			principals := append([]string{peerName}, newGroups...)
+			var serial uint64
+			certBytes, serial, err = caObj.SignCert(ca.SignOptions{
+				Pubkey:     pk,
+				KeyID:      peerName,
+				Principals: principals,
+			})
+			if err != nil {
+				return fmt.Errorf("sign cert %q: %w", peerName, err)
+			}
+
+			if err := d.SetPeerGroups(ctx, peerName, newGroups); err != nil {
+				return fmt.Errorf("set peer groups %q: %w", peerName, err)
+			}
+			if err := d.SetPeerCert(ctx, peerName, certBytes, serial); err != nil {
+				return fmt.Errorf("set peer cert %q: %w", peerName, err)
+			}
+		}
+
+		var newAllowed []string
+		if isAllow {
+			currentAllowed, err := d.GetPeerAllowedGroups(ctx, peerName)
+			if err != nil {
+				return fmt.Errorf("get peer allowed groups %q: %w", peerName, err)
+			}
+			newAllowed = removeStr(currentAllowed, name)
+			if err := d.SetPeerAllowedGroups(ctx, peerName, newAllowed); err != nil {
+				return fmt.Errorf("set peer allowed groups %q: %w", peerName, err)
+			}
+		}
+
+		if !peer.Inbound {
+			clientPeerNotice(cmd.OutOrStdout(), peerName)
+			continue
+		}
+
 		pushOpts := selfPushOptions(dataDir, self, peerUnlock.get)
 		pushOpts.User = pushUser(peer)
 		host := peer.DialHost()
@@ -401,39 +475,7 @@ func runGroupDelete(cmd *cobra.Command, name string) error {
 			continue
 		}
 
-		if _, isMember := memberSet[peerName]; isMember {
-			currentGroups, err := d.GetPeerGroups(ctx, peerName)
-			if err != nil {
-				pusher.Close()
-				return fmt.Errorf("get peer groups %q: %w", peerName, err)
-			}
-			newGroups := removeStr(currentGroups, name)
-
-			pk, _, _, _, err := ssh.ParseAuthorizedKey(peer.AuthorizedKey)
-			if err != nil {
-				pusher.Close()
-				return fmt.Errorf("parse peer pubkey %q: %w", peerName, err)
-			}
-			principals := append([]string{peerName}, newGroups...)
-			certBytes, serial, err := caObj.SignCert(ca.SignOptions{
-				Pubkey:     pk,
-				KeyID:      peerName,
-				Principals: principals,
-			})
-			if err != nil {
-				pusher.Close()
-				return fmt.Errorf("sign cert %q: %w", peerName, err)
-			}
-
-			if err := d.SetPeerGroups(ctx, peerName, newGroups); err != nil {
-				pusher.Close()
-				return fmt.Errorf("set peer groups %q: %w", peerName, err)
-			}
-			if err := d.UpdatePeerCertSerial(ctx, peerName, serial); err != nil {
-				pusher.Close()
-				return fmt.Errorf("update cert serial %q: %w", peerName, err)
-			}
-
+		if isMember {
 			certPath := peerCertRemotePath(peer, instanceKey)
 			if err := pusher.WriteFileAtomic(ctx, certPath, certBytes, fs.FileMode(0644)); err != nil {
 				stragglers = append(stragglers, peerName)
@@ -442,18 +484,7 @@ func runGroupDelete(cmd *cobra.Command, name string) error {
 			}
 		}
 
-		if _, isAllow := allowedBySet[peerName]; isAllow {
-			currentAllowed, err := d.GetPeerAllowedGroups(ctx, peerName)
-			if err != nil {
-				pusher.Close()
-				return fmt.Errorf("get peer allowed groups %q: %w", peerName, err)
-			}
-			newAllowed := removeStr(currentAllowed, name)
-			if err := d.SetPeerAllowedGroups(ctx, peerName, newAllowed); err != nil {
-				pusher.Close()
-				return fmt.Errorf("set peer allowed groups %q: %w", peerName, err)
-			}
-
+		if isAllow {
 			remote := peerAuthorizedKeysRemotePath(peer)
 			existing, err := pusher.ReadFile(ctx, remote)
 			if err != nil {
@@ -490,6 +521,9 @@ func runGroupDelete(cmd *cobra.Command, name string) error {
 
 	if err := d.DeleteGroup(ctx, name); err != nil {
 		return fmt.Errorf("delete group: %w", err)
+	}
+	if err := d.BumpFleetRev(ctx); err != nil {
+		return fmt.Errorf("bump fleet_rev: %w", err)
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "group %q deleted; affected peers: %s\n", name, strings.Join(touched, ","))
 	return nil
@@ -548,6 +582,9 @@ func runGroupCreate(cmd *cobra.Command, name string) error {
 		default:
 			return fmt.Errorf("create group: %w", err)
 		}
+	}
+	if err := d.BumpFleetRev(ctx); err != nil {
+		return fmt.Errorf("bump fleet_rev: %w", err)
 	}
 
 	fmt.Fprintf(cmd.OutOrStdout(), "group %q created\n", name)
@@ -677,6 +714,9 @@ func runGroupAction(cmd *cobra.Command, group string, allow bool) error {
 	if host == "" {
 		host = peer.DialHost()
 	}
+	if allow && !peer.Inbound {
+		return fmt.Errorf("peer %s is a client-style peer (enrolled --no-inbound); it accepts no inbound connections", peerName)
+	}
 
 	current, err := d.GetPeerAllowedGroups(ctx, peerName)
 	if err != nil {
@@ -706,6 +746,20 @@ func runGroupAction(cmd *cobra.Command, group string, allow bool) error {
 
 	if err := d.SetPeerAllowedGroups(ctx, peerName, current); err != nil {
 		return fmt.Errorf("set allowed groups: %w", err)
+	}
+	if err := d.BumpFleetRev(ctx); err != nil {
+		return fmt.Errorf("bump fleet_rev: %w", err)
+	}
+
+	if !peer.Inbound {
+		clientPeerNotice(cmd.OutOrStdout(), peerName)
+		fmt.Fprintf(cmd.OutOrStdout(), "group %q disallowed on %s\n", group, peerName)
+		return nil
+	}
+
+	instanceKey, err := EnsureInstanceKey(ctx, d)
+	if err != nil {
+		return fmt.Errorf("ensure instance key: %w", err)
 	}
 
 	peerUnlock := newPeerUnlocker()
@@ -740,6 +794,9 @@ func runGroupAction(cmd *cobra.Command, group string, allow bool) error {
 	}
 	if err := pusher.WriteFileAtomic(ctx, remote, newContent, fs.FileMode(0644)); err != nil {
 		return fmt.Errorf("write %s: %w", remote, err)
+	}
+	if err := splicePeerConfig(ctx, pusher, d, peer, instanceKey); err != nil {
+		return fmt.Errorf("splice ssh config: %w", err)
 	}
 	if err := pusher.VerifyHealth(ctx); err != nil {
 		return fmt.Errorf("verify health: %w", err)

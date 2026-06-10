@@ -15,6 +15,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"strings"
 	"sync"
 
@@ -165,6 +166,35 @@ func (c *Client) ReadFile(ctx context.Context, remotePath string) ([]byte, error
 	}
 	cmd := fmt.Sprintf("cat %s", shellQuote(remotePath))
 	return runCapture(ctx, cl, cmd)
+}
+
+// SpliceConfigBlock is the remote equivalent of the install-script splice: it
+// ensures the config file exists (0600 on create), removes this instance's
+// sentinel range with a version-agnostic sed, then appends the new block.
+// Foreign instances' blocks and user content are left untouched.
+func (c *Client) SpliceConfigBlock(ctx context.Context, configPath string, instanceKey string, block string) error {
+	c.mu.Lock()
+	cl := c.client
+	c.mu.Unlock()
+	if cl == nil {
+		return errors.New("sshpush: client is closed")
+	}
+	q := shellQuote(configPath)
+	prepCmd := fmt.Sprintf("mkdir -p %s && if [ ! -e %s ]; then touch %s && chmod 600 %s; fi",
+		shellQuote(path.Dir(configPath)), q, q, q)
+	if err := runSimple(ctx, cl, prepCmd); err != nil {
+		return fmt.Errorf("prepare config %s: %w", configPath, err)
+	}
+	sedExpr := fmt.Sprintf(`/^# BEGIN certhold %s( v[0-9]+)?$/,/^# END certhold %s( v[0-9]+)?$/d`, instanceKey, instanceKey)
+	delCmd := fmt.Sprintf("sed -i -E %s %s", shellQuote(sedExpr), q)
+	if err := runSimple(ctx, cl, delCmd); err != nil {
+		return fmt.Errorf("delete config block %s: %w", configPath, err)
+	}
+	appendCmd := fmt.Sprintf("cat >> %s", q)
+	if err := runWithStdin(ctx, cl, appendCmd, []byte(block)); err != nil {
+		return fmt.Errorf("append config block %s: %w", configPath, err)
+	}
+	return nil
 }
 
 func (c *Client) ReloadSSHD(ctx context.Context) error {

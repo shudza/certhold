@@ -37,6 +37,9 @@ func seedListDB(t *testing.T) string {
 	if err := d.SetPeerRevoked(ctx, "beta"); err != nil {
 		t.Fatalf("SetPeerRevoked beta: %v", err)
 	}
+	if err := d.InsertPeer(ctx, "gamma", 3, "fp-g", []byte("kg"), "alice", false, "tok-g"); err != nil {
+		t.Fatalf("InsertPeer gamma: %v", err)
+	}
 	return path
 }
 
@@ -137,5 +140,31 @@ func TestListMutuallyExclusive(t *testing.T) {
 	_, err := runList(t, "--db", dbPath, "list", "--peers", "--groups")
 	if err == nil {
 		t.Fatal("expected error when both --peers and --groups passed")
+	}
+}
+
+func TestListPeersInboundColumn(t *testing.T) {
+	dbPath := seedListDB(t)
+	got, err := runList(t, "--db", dbPath, "list")
+	if err != nil {
+		t.Fatalf("Execute: %v\noutput:\n%s", err, got)
+	}
+	if !strings.Contains(got, "INBOUND") {
+		t.Fatalf("header missing INBOUND column:\n%s", got)
+	}
+	lines := strings.Split(strings.TrimRight(got, "\n"), "\n")
+	inboundOf := map[string]string{}
+	for _, line := range lines {
+		f := strings.Fields(line)
+		if len(f) < 3 || f[0] == "NAME" {
+			continue
+		}
+		inboundOf[f[0]] = f[len(f)-2]
+	}
+	if inboundOf["alpha"] != "Y" {
+		t.Errorf("alpha INBOUND = %q, want Y", inboundOf["alpha"])
+	}
+	if inboundOf["gamma"] != "N" {
+		t.Errorf("gamma INBOUND = %q, want N (client-style peer)", inboundOf["gamma"])
 	}
 }

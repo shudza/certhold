@@ -58,6 +58,10 @@ func (f *fakePusher) ReadFile(ctx context.Context, path string) ([]byte, error) 
 	return nil, nil
 }
 
+func (f *fakePusher) SpliceConfigBlock(ctx context.Context, configPath, instanceKey, block string) error {
+	return f.record(fakePushCall{op: "splice", path: configPath, content: []byte(block)})
+}
+
 func (f *fakePusher) ReloadSSHD(ctx context.Context) error {
 	return f.record(fakePushCall{op: "reload"})
 }
@@ -287,8 +291,8 @@ func TestGroupAllowAddsAndPushes(t *testing.T) {
 	for _, c := range calls {
 		ops = append(ops, c.op)
 	}
-	if !reflect.DeepEqual(ops, []string{"read", "write", "verify"}) {
-		t.Fatalf("ops = %v, want [read write verify]: %+v", ops, calls)
+	if !reflect.DeepEqual(ops, []string{"read", "write", "splice", "verify"}) {
+		t.Fatalf("ops = %v, want [read write splice verify]: %+v", ops, calls)
 	}
 	var writeCall *fakePushCall
 	for i := range calls {
@@ -518,7 +522,7 @@ func TestGroupAllow_UserMode_RewritesAuthorizedKeys_NoReload(t *testing.T) {
 	for _, c := range calls {
 		ops = append(ops, c.op)
 	}
-	wantOps := []string{"read", "write", "verify"}
+	wantOps := []string{"read", "write", "splice", "verify"}
 	if !reflect.DeepEqual(ops, wantOps) {
 		t.Errorf("ops = %v, want %v (calls=%+v)", ops, wantOps, calls)
 	}
@@ -655,8 +659,8 @@ func TestGroupAllow_RootUser_RewritesAuthorizedKeys_NoReload(t *testing.T) {
 			writeCall = &calls[i]
 		}
 	}
-	if !reflect.DeepEqual(ops, []string{"read", "write", "verify"}) {
-		t.Errorf("ops = %v, want [read write verify] (no reload)", ops)
+	if !reflect.DeepEqual(ops, []string{"read", "write", "splice", "verify"}) {
+		t.Errorf("ops = %v, want [read write splice verify] (no reload)", ops)
 	}
 	if writeCall == nil || writeCall.path != "/root/.ssh/authorized_keys" {
 		t.Fatalf("write must target /root/.ssh/authorized_keys; got %+v", writeCall)
@@ -1672,5 +1676,106 @@ func TestGroupDelete_SkipsRevokedPeers(t *testing.T) {
 	}
 	if ok, _ := d.GroupExists(ctx, "web"); ok {
 		t.Error("group 'web' should be deleted")
+	}
+}
+
+func seedClientPeerDB(t *testing.T, allowed []string) (dataDir, dbPath string) {
+	t.Helper()
+	dataDir = t.TempDir()
+	if _, err := ca.Generate(filepath.Join(dataDir, "ca")); err != nil {
+		t.Fatalf("ca.Generate: %v", err)
+	}
+	dbPath = filepath.Join(dataDir, "state.db")
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer d.Close()
+	ctx := context.Background()
+	if err := d.InsertPeer(ctx, "laptop", 1, "fp", []byte("k"), "alice", false, "tok-laptop"); err != nil {
+		t.Fatalf("InsertPeer: %v", err)
+	}
+	for _, g := range allowed {
+		if err := d.EnsureGroup(ctx, g); err != nil {
+			t.Fatalf("EnsureGroup %s: %v", g, err)
+		}
+	}
+	if err := d.SetPeerAllowedGroups(ctx, "laptop", allowed); err != nil {
+		t.Fatalf("SetPeerAllowedGroups: %v", err)
+	}
+	return dataDir, dbPath
+}
+
+func TestGroupAllow_ClientPeerErrors(t *testing.T) {
+	dataDir, dbPath := seedClientPeerDB(t, nil)
+	preCreateGroups(t, dbPath, "g")
+
+	dialCount := 0
+	prev := groupDial
+	groupDial = func(ctx context.Context, host string, opts sshpush.Options) (sshpush.Pusher, error) {
+		dialCount++
+		return &fakePusher{}, nil
+	}
+	t.Cleanup(func() { groupDial = prev })
+
+	_, err := runGroupCmd(t, dataDir, dbPath, "allow", "g", "--on", "laptop")
+	if err == nil {
+		t.Fatal("expected error allowing a group on a client-style peer")
+	}
+	want := "peer laptop is a client-style peer (enrolled --no-inbound); it accepts no inbound connections"
+	if err.Error() != want {
+		t.Errorf("error = %q, want %q", err, want)
+	}
+	if dialCount != 0 {
+		t.Errorf("expected no dials, got %d", dialCount)
+	}
+
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer d.Close()
+	got, err := d.GetPeerAllowedGroups(context.Background(), "laptop")
+	if err != nil {
+		t.Fatalf("GetPeerAllowedGroups: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("allowed = %v, want [] (unchanged)", got)
+	}
+}
+
+func TestGroupDisallow_ClientPeer_NoDialDBUpdated(t *testing.T) {
+	dataDir, dbPath := seedClientPeerDB(t, []string{"g"})
+
+	dialCount := 0
+	prev := groupDial
+	groupDial = func(ctx context.Context, host string, opts sshpush.Options) (sshpush.Pusher, error) {
+		dialCount++
+		return &fakePusher{}, nil
+	}
+	t.Cleanup(func() { groupDial = prev })
+
+	out, err := runGroupCmd(t, dataDir, dbPath, "disallow", "g", "--on", "laptop")
+	if err != nil {
+		t.Fatalf("disallow on client peer must no-op gracefully: err=%v out=%s", err, out)
+	}
+	if dialCount != 0 {
+		t.Errorf("expected no dials, got %d", dialCount)
+	}
+	if !strings.Contains(out, "client peer laptop: changes pending until 'certhold-cli refresh' runs on it") {
+		t.Errorf("output missing client-peer notice: %q", out)
+	}
+
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer d.Close()
+	got, err := d.GetPeerAllowedGroups(context.Background(), "laptop")
+	if err != nil {
+		t.Fatalf("GetPeerAllowedGroups: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("allowed = %v, want [] (DB-side disallow must still land)", got)
 	}
 }
