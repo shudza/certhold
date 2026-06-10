@@ -15,6 +15,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/shudza/certhold/internal/ca"
+	"github.com/shudza/certhold/internal/clientcli"
 	"github.com/shudza/certhold/internal/db"
 )
 
@@ -82,6 +83,12 @@ func consumeTokenTarball(t *testing.T, dbPath, tok string) []byte {
 
 func extractTarEntries(t *testing.T, body []byte) map[string][]byte {
 	t.Helper()
+	entries, _ := extractTarEntriesWithModes(t, body)
+	return entries
+}
+
+func extractTarEntriesWithModes(t *testing.T, body []byte) (map[string][]byte, map[string]int64) {
+	t.Helper()
 	gz, err := gzip.NewReader(bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("gzip.NewReader: %v", err)
@@ -89,6 +96,7 @@ func extractTarEntries(t *testing.T, body []byte) map[string][]byte {
 	defer gz.Close()
 	tr := tar.NewReader(gz)
 	out := map[string][]byte{}
+	modes := map[string]int64{}
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -102,8 +110,9 @@ func extractTarEntries(t *testing.T, body []byte) map[string][]byte {
 			t.Fatalf("tar read: %v", err)
 		}
 		out[hdr.Name] = data
+		modes[hdr.Name] = hdr.Mode
 	}
-	return out
+	return out, modes
 }
 
 func clearBaseURLEnv(t *testing.T) {
@@ -633,6 +642,250 @@ func TestEnroll_FailsWhenGroupDoesNotExist(t *testing.T) {
 	defer d.Close()
 	if _, gerr := d.GetPeer(context.Background(), "alpha"); !errors.Is(gerr, db.ErrPeerNotFound) {
 		t.Errorf("peer alpha should not exist; GetPeer err = %v, want ErrPeerNotFound", gerr)
+	}
+}
+
+// extractClientToken parses the client-enroll output: the curl one-liner
+// followed by the client-style note. Returns the enroll token.
+func extractClientToken(t *testing.T, stdout, baseURL string) string {
+	t.Helper()
+	lines := strings.Split(strings.TrimRight(stdout, "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("client enroll output = %q, want one-liner + note", stdout)
+	}
+	prefix := "curl -kfsSL " + baseURL + "/enroll/"
+	suffix := ".sh | bash"
+	if !strings.HasPrefix(lines[0], prefix) || !strings.HasSuffix(lines[0], suffix) {
+		t.Fatalf("one-liner mismatch: %q", lines[0])
+	}
+	for _, want := range []string{"client-style peer", "manager cannot push", "certhold-cli refresh"} {
+		if !strings.Contains(lines[1], want) {
+			t.Errorf("client note %q missing %q", lines[1], want)
+		}
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(lines[0], prefix), suffix)
+}
+
+// TestEnrollClientFlag covers the --client path: peers row has inbound=0, a
+// standing pull token and the cert blob; no allowed-groups rows; the tarball
+// lacks ca_authorized_keys and carries certhold-cli (0755) plus the keyed conf
+// (0600) with the exact 5 lines; the fleet rev is bumped.
+func TestEnrollClientFlag(t *testing.T) {
+	dbPath := setupDB(t)
+	preCreateGroups(t, dbPath, "g")
+	stdout, stderr, err := runEnroll(t, dbPath, "clientvm", "--groups", "g", "--client")
+	if err != nil {
+		t.Fatalf("enroll --client: err=%v stderr=%s", err, stderr)
+	}
+	tok := extractClientToken(t, stdout, "https://certhold.home.lan")
+	key := instanceKeyOf(t, dbPath)
+
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer d.Close()
+	ctx := context.Background()
+
+	p, err := d.GetPeer(ctx, "clientvm")
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if p.Inbound {
+		t.Error("Inbound = true, want false for --client")
+	}
+	if p.PullToken == "" {
+		t.Error("PullToken is empty, want a standing pull token")
+	}
+	if len(p.Cert) == 0 {
+		t.Error("Cert blob is empty, want the signed certificate stored")
+	}
+	allowed, err := d.GetPeerAllowedGroups(ctx, "clientvm")
+	if err != nil {
+		t.Fatalf("GetPeerAllowedGroups: %v", err)
+	}
+	if len(allowed) != 0 {
+		t.Errorf("allowed groups = %v, want none for --client", allowed)
+	}
+	member, err := d.GetPeerGroups(ctx, "clientvm")
+	if err != nil {
+		t.Fatalf("GetPeerGroups: %v", err)
+	}
+	if strings.Join(member, ",") != "g" {
+		t.Errorf("peer groups = %v, want [g]", member)
+	}
+	rev, err := d.FleetRev(ctx)
+	if err != nil {
+		t.Fatalf("FleetRev: %v", err)
+	}
+	if rev != 1 {
+		t.Errorf("fleet rev = %d, want 1 after one enroll", rev)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatalf("db.Close: %v", err)
+	}
+
+	tb := consumeTokenTarball(t, dbPath, tok)
+	entries, modes := extractTarEntriesWithModes(t, tb)
+	if _, ok := entries["ca_authorized_keys"]; ok {
+		t.Errorf("client tarball must not contain ca_authorized_keys (have %v)", keysOf(entries))
+	}
+	if !bytes.Equal(entries["certhold-cli"], clientcli.Script) {
+		t.Errorf("certhold-cli entry differs from clientcli.Script (have %v)", keysOf(entries))
+	}
+	if modes["certhold-cli"] != 0o755 {
+		t.Errorf("certhold-cli mode = %o, want 0755", modes["certhold-cli"])
+	}
+	confName := "certhold_" + key + ".conf"
+	if modes[confName] != 0o600 {
+		t.Errorf("%s mode = %o, want 0600", confName, modes[confName])
+	}
+	wantConf := "BASE_URL=https://certhold.home.lan\nPULL_TOKEN=" + p.PullToken + "\nINSTANCE_KEY=" + key + "\nPEER_NAME=clientvm\nLAST_REV=0\n"
+	if got := string(entries[confName]); got != wantConf {
+		t.Errorf("conf = %q, want %q", got, wantConf)
+	}
+	if p.Cert != nil && !bytes.Equal(entries["id_ed25519_"+key+"-cert.pub"], p.Cert) {
+		t.Error("stored cert blob differs from the tarball certificate")
+	}
+}
+
+// TestEnrollNoInboundMatchesClient asserts --no-inbound behaves identically to
+// --client on the DB row and the tarball shape.
+func TestEnrollNoInboundMatchesClient(t *testing.T) {
+	dbPath := setupDB(t)
+	preCreateGroups(t, dbPath, "g")
+	stdout, stderr, err := runEnroll(t, dbPath, "nivm", "--groups", "g", "--no-inbound")
+	if err != nil {
+		t.Fatalf("enroll --no-inbound: err=%v stderr=%s", err, stderr)
+	}
+	tok := extractClientToken(t, stdout, "https://certhold.home.lan")
+
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer d.Close()
+	ctx := context.Background()
+	p, err := d.GetPeer(ctx, "nivm")
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if p.Inbound {
+		t.Error("Inbound = true, want false for --no-inbound")
+	}
+	if p.PullToken == "" {
+		t.Error("PullToken is empty")
+	}
+	allowed, err := d.GetPeerAllowedGroups(ctx, "nivm")
+	if err != nil {
+		t.Fatalf("GetPeerAllowedGroups: %v", err)
+	}
+	if len(allowed) != 0 {
+		t.Errorf("allowed groups = %v, want none", allowed)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatalf("db.Close: %v", err)
+	}
+
+	entries := extractTarEntries(t, consumeTokenTarball(t, dbPath, tok))
+	if _, ok := entries["ca_authorized_keys"]; ok {
+		t.Error("--no-inbound tarball must not contain ca_authorized_keys")
+	}
+	if _, ok := entries["certhold-cli"]; !ok {
+		t.Error("--no-inbound tarball missing certhold-cli")
+	}
+}
+
+// TestEnrollDefaultBackCompat: a default (host-style) enroll keeps inbound=1
+// and allowed groups, still ships ca_authorized_keys, and additionally carries
+// the new pull token, stored cert, cli and conf entries.
+func TestEnrollDefaultBackCompat(t *testing.T) {
+	dbPath := setupDB(t)
+	preCreateGroups(t, dbPath, "g")
+	stdout, stderr, err := runEnroll(t, dbPath, "hostvm", "--groups", "g")
+	if err != nil {
+		t.Fatalf("enroll: err=%v stderr=%s", err, stderr)
+	}
+	tok := extractToken(t, stdout, "https://certhold.home.lan")
+	key := instanceKeyOf(t, dbPath)
+
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer d.Close()
+	ctx := context.Background()
+	p, err := d.GetPeer(ctx, "hostvm")
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if !p.Inbound {
+		t.Error("Inbound = false, want true for a default enroll")
+	}
+	if p.PullToken == "" {
+		t.Error("PullToken is empty, want a standing pull token on every enroll")
+	}
+	if len(p.Cert) == 0 {
+		t.Error("Cert blob is empty, want the signed certificate stored")
+	}
+	allowed, err := d.GetPeerAllowedGroups(ctx, "hostvm")
+	if err != nil {
+		t.Fatalf("GetPeerAllowedGroups: %v", err)
+	}
+	if strings.Join(allowed, ",") != "g" {
+		t.Errorf("allowed groups = %v, want [g]", allowed)
+	}
+	rev, err := d.FleetRev(ctx)
+	if err != nil {
+		t.Fatalf("FleetRev: %v", err)
+	}
+	if rev != 1 {
+		t.Errorf("fleet rev = %d, want 1 after one enroll", rev)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatalf("db.Close: %v", err)
+	}
+
+	entries, modes := extractTarEntriesWithModes(t, consumeTokenTarball(t, dbPath, tok))
+	for _, n := range []string{"ca_authorized_keys", "certhold-cli", "certhold_" + key + ".conf"} {
+		if _, ok := entries[n]; !ok {
+			t.Errorf("default tarball missing %q (have %v)", n, keysOf(entries))
+		}
+	}
+	if modes["certhold-cli"] != 0o755 {
+		t.Errorf("certhold-cli mode = %o, want 0755", modes["certhold-cli"])
+	}
+	if modes["certhold_"+key+".conf"] != 0o600 {
+		t.Errorf("conf mode = %o, want 0600", modes["certhold_"+key+".conf"])
+	}
+	wantConf := "BASE_URL=https://certhold.home.lan\nPULL_TOKEN=" + p.PullToken + "\nINSTANCE_KEY=" + key + "\nPEER_NAME=hostvm\nLAST_REV=0\n"
+	if got := string(entries["certhold_"+key+".conf"]); got != wantConf {
+		t.Errorf("conf = %q, want %q", got, wantConf)
+	}
+}
+
+// TestEnrollHostBlockForReachablePeer: enrolling B after A (which allows one of
+// B's groups) puts a `Host A` stanza with A's address/user into B's config.
+func TestEnrollHostBlockForReachablePeer(t *testing.T) {
+	dbPath := setupDB(t)
+	preCreateGroups(t, dbPath, "g")
+	if _, stderr, err := runEnroll(t, dbPath, "peerA", "--groups", "g", "--address", "10.0.0.7", "--user", "alice"); err != nil {
+		t.Fatalf("enroll peerA: err=%v stderr=%s", err, stderr)
+	}
+	stdout, stderr, err := runEnroll(t, dbPath, "peerB", "--groups", "g")
+	if err != nil {
+		t.Fatalf("enroll peerB: err=%v stderr=%s", err, stderr)
+	}
+	tok := extractToken(t, stdout, "https://certhold.home.lan")
+
+	entries := extractTarEntries(t, consumeTokenTarball(t, dbPath, tok))
+	cfg := string(entries["config"])
+	want := "Host peerA\n    HostName 10.0.0.7\n    User alice\n"
+	if !strings.Contains(cfg, want) {
+		t.Errorf("peerB config missing %q\nconfig:\n%s", want, cfg)
+	}
+	if strings.Contains(cfg, "Host peerB\n") {
+		t.Errorf("peerB config must not contain a Host stanza for itself\nconfig:\n%s", cfg)
 	}
 }
 

@@ -2,7 +2,10 @@ package db
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
+	"strconv"
 )
 
 const schemaVersion = 7
@@ -67,31 +70,37 @@ CREATE TABLE IF NOT EXISTS ca (
   active INTEGER NOT NULL DEFAULT 0,
   created_at TIMESTAMP NOT NULL
 );
-
-CREATE TABLE IF NOT EXISTS krl_version (
-  version INTEGER PRIMARY KEY,
-  generated_at TIMESTAMP NOT NULL
-);
 `
 
 func (db *DB) migrate(ctx context.Context) error {
 	if _, err := db.sql.ExecContext(ctx, schemaSQL); err != nil {
 		return fmt.Errorf("apply schema: %w", err)
 	}
-	if err := db.addModeColumns(ctx); err != nil {
+	ver, err := db.storedSchemaVersion(ctx)
+	if err != nil {
 		return err
 	}
-	if err := db.addTarballColumn(ctx); err != nil {
-		return err
-	}
-	if err := db.addLayoutVersionColumn(ctx); err != nil {
-		return err
-	}
-	if err := db.addAddressColumn(ctx); err != nil {
-		return err
-	}
-	if err := db.dropDeadColumns(ctx); err != nil {
-		return err
+	// Workaround for a destructive re-migration: addModeColumns re-adds the
+	// dropped mode column on every open, which re-triggers the dropDeadColumns
+	// rebuild and silently discards the post-v6 inbound/pull_token/cert values.
+	// The legacy add*/drop steps therefore only run for databases below the
+	// rebuilt v6 shape; addClientPeerColumns stays unconditional (presence-gated).
+	if ver < 6 {
+		if err := db.addModeColumns(ctx); err != nil {
+			return err
+		}
+		if err := db.addTarballColumn(ctx); err != nil {
+			return err
+		}
+		if err := db.addLayoutVersionColumn(ctx); err != nil {
+			return err
+		}
+		if err := db.addAddressColumn(ctx); err != nil {
+			return err
+		}
+		if err := db.dropDeadColumns(ctx); err != nil {
+			return err
+		}
 	}
 	if err := db.addClientPeerColumns(ctx); err != nil {
 		return err
@@ -167,6 +176,23 @@ func (db *DB) addAddressColumn(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (db *DB) storedSchemaVersion(ctx context.Context) (int, error) {
+	var raw string
+	err := db.sql.QueryRowContext(ctx,
+		`SELECT value FROM meta WHERE key = 'schema_version'`).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("read schema_version: %w", err)
+	}
+	ver, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("parse schema_version %q: %w", raw, err)
+	}
+	return ver, nil
 }
 
 func (db *DB) addClientPeerColumns(ctx context.Context) error {

@@ -12,6 +12,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/shudza/certhold/internal/ca"
+	"github.com/shudza/certhold/internal/clientcli"
 	"github.com/shudza/certhold/internal/db"
 	"github.com/shudza/certhold/internal/peerfiles"
 	"github.com/shudza/certhold/internal/token"
@@ -44,6 +45,16 @@ func newEnrollCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+
+			noInbound, err := cmd.Flags().GetBool("no-inbound")
+			if err != nil {
+				return err
+			}
+			client, err := cmd.Flags().GetBool("client")
+			if err != nil {
+				return err
+			}
+			clientMode := noInbound || client
 
 			groups, err := parseGroups(groupsCSV)
 			if err != nil {
@@ -107,16 +118,9 @@ func newEnrollCmd() *cobra.Command {
 
 			fingerprint := ssh.FingerprintSHA256(sshPub)
 
-			tarball, err := peerfiles.BuildUser(peerfiles.UserPeerFiles{
-				TargetUser:  targetUser,
-				PrivKey:     priv,
-				CertPub:     certBytes,
-				CAPub:       caObj.PublicKeyAuthorizedKey(),
-				Principals:  groups,
-				InstanceKey: instanceKey,
-			})
+			pullToken, err := token.Generate()
 			if err != nil {
-				return fmt.Errorf("build tarball: %w", err)
+				return fmt.Errorf("generate pull token: %w", err)
 			}
 
 			tok, err := token.Generate()
@@ -125,10 +129,7 @@ func newEnrollCmd() *cobra.Command {
 			}
 
 			if err := d.WithTx(ctx, func(tx *db.Tx) error {
-				if err := tx.InsertToken(ctx, tok, name, strings.Join(groups, ","), targetUser, tarball); err != nil {
-					return err
-				}
-				if err := tx.InsertPeer(ctx, name, serial, fingerprint, pubAuth, targetUser, true, ""); err != nil {
+				if err := tx.InsertPeer(ctx, name, serial, fingerprint, pubAuth, targetUser, !clientMode, pullToken); err != nil {
 					return fmt.Errorf("insert peer: %w", err)
 				}
 				if address != "" {
@@ -148,15 +149,59 @@ func newEnrollCmd() *cobra.Command {
 				if err := tx.SetPeerGroups(ctx, name, groups); err != nil {
 					return fmt.Errorf("set peer groups: %w", err)
 				}
-				if err := tx.SetPeerAllowedGroups(ctx, name, groups); err != nil {
-					return fmt.Errorf("set peer allowed groups: %w", err)
+				if !clientMode {
+					if err := tx.SetPeerAllowedGroups(ctx, name, groups); err != nil {
+						return fmt.Errorf("set peer allowed groups: %w", err)
+					}
+				}
+				if err := tx.BumpFleetRev(ctx); err != nil {
+					return fmt.Errorf("bump fleet rev: %w", err)
 				}
 				return nil
 			}); err != nil {
 				return err
 			}
 
+			if err := d.SetPeerCert(ctx, name, certBytes, serial); err != nil {
+				return fmt.Errorf("set peer cert: %w", err)
+			}
+
+			reachable, err := d.ReachableHosts(ctx, name)
+			if err != nil {
+				return fmt.Errorf("reachable hosts: %w", err)
+			}
+			hosts := make([]peerfiles.HostEntry, 0, len(reachable))
+			for _, h := range reachable {
+				hosts = append(hosts, peerfiles.HostEntry{Name: h.Name, Address: h.Address, User: h.TargetUser})
+			}
+
+			conf := fmt.Sprintf("BASE_URL=%s\nPULL_TOKEN=%s\nINSTANCE_KEY=%s\nPEER_NAME=%s\nLAST_REV=0\n",
+				baseURL, pullToken, instanceKey, name)
+
+			tarball, err := peerfiles.BuildUser(peerfiles.UserPeerFiles{
+				TargetUser:  targetUser,
+				PrivKey:     priv,
+				CertPub:     certBytes,
+				CAPub:       caObj.PublicKeyAuthorizedKey(),
+				Principals:  groups,
+				InstanceKey: instanceKey,
+				NoInbound:   clientMode,
+				Hosts:       hosts,
+				CLIScript:   clientcli.Script,
+				Conf:        []byte(conf),
+			})
+			if err != nil {
+				return fmt.Errorf("build tarball: %w", err)
+			}
+
+			if err := d.InsertToken(ctx, tok, name, strings.Join(groups, ","), targetUser, tarball); err != nil {
+				return fmt.Errorf("insert token: %w", err)
+			}
+
 			fmt.Fprintf(cmd.OutOrStdout(), "curl -kfsSL %s/enroll/%s.sh | bash\n", baseURL, tok)
+			if clientMode {
+				fmt.Fprintf(cmd.OutOrStdout(), "client-style peer; manager cannot push to it; updates arrive via `certhold-cli refresh`.\n")
+			}
 			return nil
 		},
 	}
@@ -166,6 +211,8 @@ func newEnrollCmd() *cobra.Command {
 	cmd.Flags().String("user", "", "Unix user owning the ~/.ssh files; when set, acts as a hard constraint at install time (--user root targets /root/.ssh)")
 	cmd.Flags().String("hostname", "", "deprecated/unused under layout v2 (host trust is TOFU known_hosts)")
 	cmd.Flags().String("address", "", "network address (host or IP) certhold uses to SSH to this peer; defaults to the source IP seen at install, then the peer name")
+	cmd.Flags().Bool("no-inbound", false, "enroll a client-style peer: no inbound trust line, other peers cannot SSH into it, updates arrive via certhold-cli refresh")
+	cmd.Flags().Bool("client", false, "alias for --no-inbound")
 	_ = cmd.MarkFlagRequired("groups")
 
 	return cmd
