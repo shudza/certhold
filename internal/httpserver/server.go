@@ -99,7 +99,9 @@ func scriptHandler(database *db.DB) func(http.ResponseWriter, *http.Request, str
 // namespaced identity files into a staging dir, installs them, appends this
 // instance's cert-authority line idempotently (grep-guarded by the CA pubkey),
 // and splices the keyed client-config block with a per-instance,
-// version-agnostic sed so multiple certhold instances coexist. It never reloads
+// version-agnostic sed so multiple certhold instances coexist. The block is
+// taken from the staged tarball `config` entry (hosts-bearing, built at mint),
+// falling back to a hosts-less inline copy when no entry is staged. It never reloads
 // sshd and carries NO TrustedUserCAKeys/AuthorizedPrincipalsFile/RevokedKeys/
 // HostCertificate directives.
 func v2Script(baseURL, token, instanceKey string) string {
@@ -153,7 +155,16 @@ func writeV2Body(sb *strings.Builder, curl, keyFile, block, instanceKey string) 
 
 	fmt.Fprintf(sb, "touch \"$USER_HOME/.ssh/config\"\n")
 	fmt.Fprintf(sb, "sed -i -E \"/^# BEGIN certhold %s( v[0-9]+)?\\$/,/^# END certhold %s( v[0-9]+)?\\$/d\" \"$USER_HOME/.ssh/config\"\n", instanceKey, instanceKey)
+	// Prefer the staged tarball `config` entry: it is the hosts-bearing keyed
+	// block built at mint (ReachableHosts), so Host aliases land at install.
+	// The hosts-less inline heredoc remains only as a fallback for tarballs
+	// without a config entry (not minted by this codebase; the guard keeps the
+	// script from dying under set -e and still installs a working block).
+	fmt.Fprintf(sb, "if [ -f \"$STAGE/config\" ]; then\n")
+	fmt.Fprintf(sb, "cat \"$STAGE/config\" >> \"$USER_HOME/.ssh/config\"\n")
+	fmt.Fprintf(sb, "else\n")
 	fmt.Fprintf(sb, "cat >> \"$USER_HOME/.ssh/config\" <<'CHCFG_EOF'\n%sCHCFG_EOF\n", block)
+	fmt.Fprintf(sb, "fi\n")
 	fmt.Fprintf(sb, "echo \"  ~ ~/.ssh/config                            (replaced certhold block)\"\n")
 
 	fmt.Fprintf(sb, "if [ -f \"$STAGE/certhold-cli\" ]; then\n")

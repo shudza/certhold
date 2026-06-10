@@ -889,6 +889,29 @@ func TestEnrollHostBlockForReachablePeer(t *testing.T) {
 	}
 }
 
+// TestEnrollClientHostBlockForReachablePeer: a --client enroll's tarball config
+// carries the same `Host` stanza for an already-reachable peer, so the install
+// script can splice the alias at install time (T09).
+func TestEnrollClientHostBlockForReachablePeer(t *testing.T) {
+	dbPath := setupDB(t)
+	preCreateGroups(t, dbPath, "g")
+	if _, stderr, err := runEnroll(t, dbPath, "peerA", "--groups", "g", "--address", "10.0.0.7", "--user", "alice"); err != nil {
+		t.Fatalf("enroll peerA: err=%v stderr=%s", err, stderr)
+	}
+	stdout, stderr, err := runEnroll(t, dbPath, "clientB", "--groups", "g", "--client")
+	if err != nil {
+		t.Fatalf("enroll clientB --client: err=%v stderr=%s", err, stderr)
+	}
+	tok := extractClientToken(t, stdout, "https://certhold.home.lan")
+
+	entries := extractTarEntries(t, consumeTokenTarball(t, dbPath, tok))
+	cfg := string(entries["config"])
+	want := "Host peerA\n    HostName 10.0.0.7\n    User alice\n"
+	if !strings.Contains(cfg, want) {
+		t.Errorf("clientB config missing %q\nconfig:\n%s", want, cfg)
+	}
+}
+
 func TestEnrollWrongCAPassphraseFails(t *testing.T) {
 	dataDir := t.TempDir()
 	dbPath := filepath.Join(dataDir, "state.db")
