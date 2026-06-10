@@ -14,18 +14,31 @@ Certhold's entire trust root is two artifacts on the manager, under `<data-dir>`
 
 Two design facts set the blast radius:
 
-1. **`manager` is effectively root on every peer, forever.** Every peer accepts
-   the `manager` principal for root login, and there is **no `command=` /
-   `ForceCommand` restriction** — certhold gets an unrestricted shell when it
-   pushes.
+1. **`manager` is effectively root on every push-managed peer, forever.** Every
+   push-managed peer accepts the `manager` principal for root login, and there
+   is **no `command=` / `ForceCommand` restriction** — certhold gets an
+   unrestricted shell when it pushes.
 2. **The manager cert never expires.** It is issued (like every peer cert) with
    no `ValidBefore`, so it is valid indefinitely.
 
 > Honest summary: an attacker who obtains `<data-dir>` and can decrypt the keys
-> holds, immediately and indefinitely, root on every enrolled peer — by using
-> the manager key/cert directly, or by minting a fresh `manager` cert with the CA
-> key. Recovery means a full CA [rekey](maintenance-and-operations.md#rekey)
-> **and** re-enrolling every peer.
+> holds, immediately and indefinitely, root on every push-managed peer — by
+> using the manager key/cert directly, or by minting a fresh `manager` cert with
+> the CA key. Recovery means a full CA
+> [rekey](maintenance-and-operations.md#rekey) **and** re-enrolling every peer.
+
+### Client-style peers shrink the surface
+
+A [client-style peer](architecture.md#client-style-peers-and-the-pull-channel)
+(`enroll --no-inbound`/`--client`) carries **no `cert-authority` line at all** —
+it trusts no CA for inbound SSH, including this one. The standing `manager`
+access above simply does not exist toward it: a stolen manager key/cert, or a
+freshly minted `manager` cert, opens nothing on a client-style peer, because its
+`sshd` has no certhold trust anchor to satisfy. The CA compromise blast radius
+on such a peer is limited to *impersonation* (minting certs that other peers
+accept), never *intrusion into the peer itself*. This makes `--client` the
+right default for laptops and workstations that have no reason to accept
+inbound SSH.
 
 ### Planned hardening (not implemented)
 
@@ -66,8 +79,11 @@ no-echo, with the env var checked first so automation never blocks; no flag ever
 takes a passphrase value, and unlocked passphrase bytes are wiped at command exit.
 
 The long-running **`serve` process never touches either key** — under
-sign-at-mint, signing happens in the `enroll` CLI and `serve` only hands out the
-stored bundle (see [usage.md](usage.md#onboarding-a-peer)).
+sign-at-mint, signing happens in the CLI (`enroll`, `update`, `rekey`/`revoke`)
+and `serve` only hands out stored bytes: the enroll bundle minted against the
+token row, and pull-channel refresh bundles assembled from the cert already
+stored on the peer row (see [usage.md](usage.md#onboarding-a-peer) and
+[the pull token threat model](#the-pull-token-threat-model)).
 
 ### When the manager prompts
 
@@ -90,6 +106,30 @@ established), not decrypted. `revoke` is a partial CA rekey, so its key usage
 matches `rekey`. `rekey` reuses the old CA passphrase for the new key by default;
 `--rotate-passphrase` prompts for a fresh one (CA key only) — see
 [rekey](maintenance-and-operations.md#passphrase-across-rotation).
+
+### The pull token threat model
+
+Every enroll mints a standing **pull token** — the bearer credential
+`certhold-cli` presents to `GET /pull/<token>`. What a stolen token yields is
+deliberately narrow:
+
+- **Public material only.** The refresh bundle contains the peer's CA-signed
+  certificate (public), the keyed `config` block, the `certhold-cli` script,
+  and a manifest. Never a private key, never a `cert-authority` line — holding
+  the bundle does not let anyone authenticate as the peer or grant themselves
+  trust.
+- **Per-peer-filtered topology.** The real exposure is reconnaissance: the
+  `config` block names the peers *this one peer* may reach (names, addresses,
+  login users), and the manifest/`rev` endpoint leak the peer's name, instance
+  key, cert serial, and the fleet revision. It is the slice of the topology
+  this peer would see anyway — not the whole fleet map, and not anyone else's.
+
+The protections around it: the token lives in `~/.ssh/certhold_<key>.conf` at
+mode **`0600`** on the peer and in the manager database; it travels only inside
+HTTPS URLs; an empty token never matches; and **revoking the peer cuts the
+token off permanently** (`410` from both pull endpoints) — that is the remedy
+for a token believed leaked: revoke and re-enroll the peer. `serve` holds no CA
+key, so the pull path cannot be escalated into signing anything.
 
 ### Per-peer passphrases (install-side)
 

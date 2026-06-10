@@ -2,9 +2,12 @@
 
 The exact files certhold installs on a peer, with permissions and contents.
 Certhold has a single trust model: everything lands under the **target user's**
-`~/.ssh/`. The tarball is built and signed by `enroll` and delivered once during
-[onboarding](usage.md#onboarding-a-peer). Tarball entries are reproducible
-(ownership comes from the extracting user, not baked in).
+`~/.ssh/` (plus `certhold-cli` in `~/.local/bin/`). The install tarball is built
+and signed by `enroll` and delivered during
+[onboarding](usage.md#onboarding-a-peer); afterwards, peers can also fetch
+[refresh bundles](#the-refresh-bundle-pull-channel) over the pull channel.
+Archive entries are reproducible (ownership comes from the extracting user, not
+baked in).
 
 > **Managing root.** There is no separate "root mode". To manage `root`, enroll
 > with `--user root` and run the install one-liner **as root**: the script reads
@@ -33,11 +36,15 @@ block are **per-instance** and isolated. Tarball entries (relative to
 | `id_ed25519_<key>-cert.pub` | `0644` | CA-signed user certificate for that key. |
 | `known_hosts` | `0644` | Outbound host trust; **empty** by default (TOFU). |
 | `config` | `0644` | This instance's keyed SSH client block (below). |
-| `ca_authorized_keys` | `0644` | The `cert-authority` line for this instance's CA; the install script **appends** it to `authorized_keys` idempotently and then removes this staging file. |
+| `ca_authorized_keys` | `0644` | The `cert-authority` line for this instance's CA; the install script **appends** it to `authorized_keys` idempotently and then removes this staging file. **Omitted entirely** from a client-style (`enroll --no-inbound`) bundle. |
+| `certhold-cli` | `0755` | The [client CLI](#certhold-cli-and-the-conf-file); the install script installs it as `~/.local/bin/certhold-cli`. |
+| `certhold_<key>.conf` | `0600` | The pull-channel conf file (below); installed into `<home>/.ssh/`. |
 
 A whole `authorized_keys` file is **never shipped** — the install script appends
 this instance's line only if its CA pubkey isn't already trusted (grep-guarded),
-so other instances' lines (and any pre-existing keys) survive.
+so other instances' lines (and any pre-existing keys) survive. A client-style
+bundle ships no `ca_authorized_keys` at all, so its install never touches
+`authorized_keys` and the peer ends up with **no inbound trust line**.
 
 ## `authorized_keys` — the inbound trust line
 
@@ -57,13 +64,19 @@ what grants root logins.
 
 ## `config` — the keyed client block
 
-The keyed sentinel block is **not** a tarball file you drop in whole — the
-install script splices it into `<home>/.ssh/config`:
+The keyed sentinel block ships as the tarball `config` entry, but it is **not**
+installed as a standalone file — the install script splices the staged entry
+into `<home>/.ssh/config`:
 
 ```
 # BEGIN certhold <key> v2
 # <6-line comment header: managed-by note, what the block does, why the key
 #  namespaces it, and how to refresh via the enroll one-liner>
+Host app1
+    HostName 192.168.1.11
+    User deploy
+Host db1
+    HostName 192.168.1.15
 Host *
     CertificateFile ~/.ssh/id_ed25519_<key>-cert.pub
     IdentityFile ~/.ssh/id_ed25519_<key>
@@ -71,9 +84,20 @@ Host *
 # END certhold <key> v2
 ```
 
-The comment header is part of the spliced block (see `V2SshClientBlock` in
-`internal/peerfiles/layout.go`), so a human inspecting `~/.ssh/config` sees who
-owns the range and how to refresh it. The key precedes the version so the
+The block opens with one **`Host <name>` alias stanza per peer this peer may
+reach** — every other non-revoked, inbound peer that allows at least one of this
+peer's groups. `HostName` is the peer's recorded address and `User` its target
+user; either line is omitted when unknown, and a stanza whose address *and* user
+are both unknown is skipped entirely. The aliases are what make `ssh app1` work
+by name. They sit before the catch-all `Host *` stanza, inside the sentinel
+range, so every re-splice (re-enroll, push, or `certhold-cli refresh`) replaces
+them — they reflect fleet state **as of the last delivery**, not live state (for
+an enroll's install, as of the tarball's mint; later pushes and refreshes
+self-correct any enroll-to-install drift).
+
+The comment header is part of the spliced block (see `V2SshClientBlockWithHosts`
+in `internal/peerfiles/layout.go`), so a human inspecting `~/.ssh/config` sees
+who owns the range and how to refresh it. The key precedes the version so the
 install splice uses a **per-instance, version-agnostic** `sed`:
 
 ```
@@ -90,6 +114,47 @@ blocks are untouched.
 > lines are additive (SSH tries each), so authentication still works; this only
 > affects which cert/known_hosts file is *preferred*. Acceptable for leaf peers.
 
+## `certhold-cli` and the conf file
+
+Two more files round out every install (host-style and client-style alike):
+
+- **`~/.local/bin/certhold-cli`** (`0755`) — a small pure-bash CLI with two
+  commands, [`refresh` and `status`](usage.md#certhold-cli-on-the-peer). It is
+  run on demand, never resident, and needs only OpenSSH-6.5-era tools (bash,
+  `curl`, `tar`+gzip, `sed`, `grep`, `install`, `mktemp`, `cmp`, `ssh-keygen`).
+  The install script prints a hint if `~/.local/bin` is not on `PATH`
+  (`hint: ~/.local/bin is not on your PATH; add it to run certhold-cli by name`);
+  it never edits shell rc files.
+- **`<home>/.ssh/certhold_<key>.conf`** (`0600`) — the pull-channel
+  configuration, one file per managing instance (`certhold-cli` discovers
+  instances by globbing `~/.ssh/certhold_*.conf`). A plain `KEY=value` file:
+
+  ```
+  BASE_URL=https://192.168.1.10:8443
+  PULL_TOKEN=<standing pull token>
+  INSTANCE_KEY=<key>
+  PEER_NAME=laptop
+  LAST_REV=0
+  ```
+
+  `LAST_REV` is the fleet revision applied by the last `certhold-cli refresh`
+  (rewritten in place from the bundle manifest); `status` compares it with the
+  manager's current revision. The file is `0600` because the pull token is a
+  bearer credential — see [security.md](security.md#the-pull-token-threat-model).
+
+## The refresh bundle (pull channel)
+
+`certhold-cli refresh` downloads `GET <BASE_URL>/pull/<PULL_TOKEN>` — a
+reproducible gzip+tar assembled by `serve` from database state, containing
+**public material only** (never a private key, never a `cert-authority` line):
+
+| File | Mode | Contents |
+|---|---|---|
+| `id_ed25519_<key>-cert.pub` | `0644` | The peer's latest stored CA-signed certificate; installed atomically over the old one. |
+| `config` | `0644` | The current keyed client block (with `Host` aliases); spliced into `~/.ssh/config` with the same per-instance `sed`. |
+| `certhold-cli` | `0755` | The current CLI script; `refresh` replaces itself from it as its **last** action when the bytes differ. |
+| `manifest` | `0644` | `PEER_NAME=`, `INSTANCE_KEY=`, `FLEET_REV=`, `CERT_SERIAL=`, `CLI_VERSION=` lines; `FLEET_REV` is written back to the conf's `LAST_REV`. |
+
 ## The install script
 
 Under `set -e`, the install script:
@@ -101,9 +166,17 @@ Under `set -e`, the install script:
 3. installs the namespaced key (`0600`) and cert (`0644`), then runs the optional
    [peer-key passphrase step](security.md#per-peer-passphrases-install-side);
 4. appends `ca_authorized_keys` to `authorized_keys` **only if** this instance's
-   CA pubkey isn't already trusted (grep-guarded), so other instances survive;
-5. splices the keyed `config` block (per-instance `sed` delete + append) and
-   removes the staging dir.
+   CA pubkey isn't already trusted (grep-guarded), so other instances survive —
+   skipped entirely for a client-style bundle, which stages no
+   `ca_authorized_keys`;
+5. splices the keyed `config` block: the per-instance `sed` delete, then an
+   append of the **staged tarball `config` entry** — the hosts-bearing block
+   built at mint, so `Host` aliases land at install (guarded by
+   `[ -f "$STAGE/config" ]`, falling back to an inline hosts-less block for a
+   tarball without the entry);
+6. installs `certhold-cli` into `~/.local/bin/` (`0755`, with a `PATH` hint when
+   needed) and `certhold_<key>.conf` into `<home>/.ssh/` (`0600`), then removes
+   the staging dir.
 
 It does **not** edit `sshd_config`, ships **no** `TrustedUserCAKeys` /
 `AuthorizedPrincipalsFile` / `RevokedKeys` / `HostCertificate` directives, and

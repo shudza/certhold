@@ -1,15 +1,20 @@
 # Maintenance & operations
 
 This covers how certhold changes a peer after onboarding — the push mechanism
-shared by every operation, then the two heaviest operations, **revocation** and
-**rekey**. Command flags are in [usage.md](usage.md); the trust model is in
+shared by every operation, the pull channel for client-style peers, then the two
+heaviest operations, **revocation** and **rekey**. Command flags are in
+[usage.md](usage.md); the trust model is in
 [architecture.md](architecture.md).
 
 ## The push model
 
-Certhold has no agent on the peer. Every state change — a reissued cert, an
-updated principals list, a rotated CA — is delivered by SSHing into the peer and
-writing files. The shape is the same for all commands:
+Certhold runs no daemon on the peer — nothing resident, only files (plus
+`certhold-cli`, a small bash CLI run on demand). For push-managed (`inbound`)
+peers, every
+state change — a reissued cert, an updated principals list, a rotated CA — is
+delivered by SSHing into the peer and writing files. (Client-style peers are
+never dialed; they get [the pull channel](#the-pull-channel-client-style-peers)
+instead.) The shape is the same for all commands:
 
 1. Mutate local state (DB and/or CA) first.
 2. SSH into the peer using **certhold's own peer cert and key** (the `manager`
@@ -54,6 +59,35 @@ plaintext key never prompts. See [security.md](security.md).
   that reads remote state (the existing `authorized_keys`) before writing.
 - **`revoke`** and **`rekey`** are multi-peer pushes, below.
 
+Every command that dials a peer also re-splices the peer's keyed `config` block
+(its `Host` aliases) from current fleet state, and every command that (re)signs
+a cert persists the cert bytes in the database — that stored cert is what the
+pull channel serves.
+
+## The pull channel (client-style peers)
+
+A [client-style peer](architecture.md#client-style-peers-and-the-pull-channel)
+(`enroll --no-inbound`/`--client`) is never dialed. Every mutating command
+treats it the same way: the DB-side change still lands in full (group rows
+edited, cert re-signed and stored, fleet revision bumped), the SSH push is
+skipped, and the command prints
+
+```
+client peer <name>: changes pending until 'certhold-cli refresh' runs on it
+```
+
+Delivery happens when someone runs `certhold-cli refresh` **on the peer**, which
+pulls the stored material from `serve` (which must therefore be running — see
+[usage.md](usage.md#serve)). Until then the peer keeps acting on its old cert
+and config. There is no notification mechanism: staleness is visible on the
+manager (the notice, and the fleet revision) and on the peer
+(`certhold-cli status` reports `stale (run: certhold-cli refresh)`).
+
+The same eventual consistency applies to `Host` alias blocks fleet-wide: a
+reachability change (new peer, changed address, allow-list edit) reaches each
+peer's `~/.ssh/config` at that peer's **next push or pull** — commands do not
+fan out config to peers they would not otherwise dial.
+
 ### No retry queue
 
 Multi-peer operations iterate peers in a plain loop. **There is no automatic
@@ -62,7 +96,9 @@ is skipped and reported as a *straggler* (`revoke`/`rekey` continue past an
 unreachable peer), and the way to catch it up is to **re-run the command
 manually**. Re-runs are idempotent — the database tracks per-peer cert serials —
 but nothing retries on its own. This is an accepted soft-consistency tradeoff:
-until an offline peer receives an update it keeps acting on its old state.
+until an offline peer receives an update it keeps acting on its old state. The
+pull channel has the same property from the other side: a client-style peer
+keeps acting on its old state until someone runs `certhold-cli refresh` on it.
 
 ## Revocation
 
@@ -77,7 +113,9 @@ uses): trust lives entirely in the `cert-authority` line in each peer's
 **always** a partial CA rekey — it rotates the entire CA and reissues every other
 peer, **excluding** the revoked one. The revoked peer never receives a new cert,
 and its old cert was signed by the now-retired CA, so it stops being accepted as
-the new CA propagates.
+the new CA propagates. Its standing pull token is refused from the moment the
+`revoked` flag is set (`GET /pull/<token>` and `…/rev` answer `410`), so a
+revoked client-style peer cannot pull its way back in either.
 
 This reuses the [rekey](#rekey) engine with the revoked peer excluded, so it is
 **resilient to unreachable peers** (see below): an offline peer becomes a
@@ -109,9 +147,12 @@ same engine with the revoked peer excluded.)
    half-finished previous run.
 3. For each non-revoked peer except certhold: sign a new cert with the new CA and
    push it — rewrite this instance's `authorized_keys` `cert-authority` line with
-   the new CA pubkey and push the new namespaced cert (no `sshd` reload). A peer
-   that cannot be reached is skipped and recorded as a straggler (see below)
-   rather than aborting the rotation.
+   the new CA pubkey, push the new namespaced cert, and re-splice the keyed
+   `config` block (no `sshd` reload). A peer that cannot be reached is skipped
+   and recorded as a straggler (see below) rather than aborting the rotation.
+   A client-style peer is re-signed and its cert stored, but never dialed — the
+   pending-refresh notice is printed instead (see
+   [below](#client-style-peers-under-rekey-and-revoke)).
 4. **Rotate certhold itself last**, writing its own new CA pub + self cert
    locally. Doing self last is what stops certhold from locking itself out
    mid-rotation — every peer still trusts the old-CA manager cert during the loop.
@@ -170,6 +211,25 @@ the warning). To rotate a straggler once it is reachable again:
 
 Re-running `rekey` from scratch is also valid but rolls a *fresh* CA across the
 whole fleet again; targeted recovery via the archived CA is cheaper.
+
+### Client-style peers under rekey (and revoke)
+
+Client-style peers are **not stragglers** — they are handled by design, not by
+failure. The rekey loop re-signs each one from its stored public key under the
+new CA, persists the new cert in the database, prints
+`client peer <name>: changes pending until 'certhold-cli refresh' runs on it`,
+and counts it as rotated; it is never dialed.
+
+The operational consequence is the mirror of the straggler hazard, but
+**self-healing**: until `certhold-cli refresh` runs on it, a client-style peer
+keeps presenting its old-CA cert, which the rotated fleet no longer accepts —
+**it is locked out of every peer** (it accepts no inbound SSH anyway, so nothing
+is lost in the other direction). One `certhold-cli refresh` on the peer pulls
+the new-CA cert from `serve` and restores its access; no archived-CA recovery
+dance is needed, because a client-style peer trusts no CA inbound — only its own
+cert changes. After a `revoke`, run `certhold-cli refresh` on each remaining
+client-style peer for the same reason. The revoked peer itself gets `410` from
+the pull endpoints and stays cut off.
 
 ### Passphrase across rotation
 

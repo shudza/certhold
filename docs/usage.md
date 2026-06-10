@@ -37,7 +37,9 @@ A systemd unit for `serve` is recommended so it survives reboots and crashes.
 `/etc/systemd/system/certhold.service` (running `serve` as the invoking
 `SUDO_USER`) and enables and starts it — see [`install`](#install). The `serve`
 process never holds the CA key, so it can run as an unprivileged, network-facing
-service.
+service. Beyond onboarding, `serve` is also what [client-style
+peers](#client-style-peers-enroll---client) pull their refreshed certs from, so
+it should stay up for the life of the fleet.
 
 ### Activating the manager as a peer
 
@@ -78,6 +80,8 @@ Changed files:
   ~ ~/.ssh/known_hosts                       (appended manager host key)
   ~ ~/.ssh/authorized_keys                   (appended cert-authority line)
   ~ ~/.ssh/config                            (replaced certhold block)
+  + ~/.local/bin/certhold-cli               (installed, 0755 - client CLI)
+  + ~/.ssh/certhold_<instance>.conf   (installed, 0600 - client conf)
 
 Success. Try:  ssh app1@app1.lan
 This address is what this peer reports for itself; if a different
@@ -87,20 +91,25 @@ address is reachable from the manager, pass --address to certhold enroll next ti
 `+` marks files certhold installs whole; `~` marks files it edits in place
 (`known_hosts` and `authorized_keys` lines are only printed if this install
 actually appended them, so a re-run on an already-trusted peer shows fewer
-lines). The host in the `Success` line comes from the peer's own
-`hostname -f`; if that isn't the address reachable from the manager, pass
-`enroll --address <host-or-ip>` next time.
+lines). If `~/.local/bin` is not on the user's `PATH`, the script prints
+`hint: ~/.local/bin is not on your PATH; add it to run certhold-cli by name` —
+it never edits shell rc files. The host in the `Success` line comes from the
+peer's own `hostname -f`; if that isn't the address reachable from the manager,
+pass `enroll --address <host-or-ip>` next time.
 
 What happens under the hood:
 
 - `enroll` (on the manager) validates inputs, loads and unlocks the CA, generates
   the peer's keypair, signs its certificate (principals = the peer name plus its
   `--groups`), builds the install tarball, and stores it against the token row.
-  This **sign-at-mint** step is the only thing that touches the CA key.
+  This **sign-at-mint** step is the only thing that touches the CA key. It also
+  mints the peer's standing [pull token](#client-style-peers-enroll---client)
+  and stores the signed cert on the peer row, so the peer can later pull
+  refreshed material from `serve`.
 - The peer's `curl … | bash` fetches a small install script, then the tarball,
   unpacks it into the invoking user's `~/.ssh/`, appends the `cert-authority`
-  line, and splices the keyed `~/.ssh/config` block. Nothing system-wide changes
-  and there is no `sshd` reload.
+  line, splices the keyed `~/.ssh/config` block, and installs `certhold-cli`
+  plus its conf file. Nothing system-wide changes and there is no `sshd` reload.
 
 The `-k` accepts the self-signed TLS cert; the enrollment token is the real
 authentication.
@@ -129,9 +138,50 @@ source IP seen when the peer fetches its tarball at install (`X-Forwarded-For` i
 not trusted, so behind a proxy or NAT use `enroll --address` explicitly).
 `update`/`group --host` still override the address for a single invocation.
 
-### Enroll endpoints
+Peers get the same decoupling for free: each peer's keyed `~/.ssh/config` block
+carries a `Host <name>` alias (recorded address + login user) for every peer it
+may reach, so from a peer
 
-`certhold serve` exposes one route with two behaviors, keyed on a `.sh` suffix:
+```
+[laptop]$ ssh app1
+```
+
+works by name even when `app1` is not a resolvable hostname. The aliases are
+written at install and refreshed at each later push or `certhold-cli refresh` —
+see [peer-file-layout.md](peer-file-layout.md#config--the-keyed-client-block).
+
+### Client-style peers (`enroll --client`)
+
+Pass `--no-inbound` (or its alias `--client`) to enroll a **client-style peer**
+— a peer that accepts no inbound SSH, fit for laptops and workstations. It is
+still an ordinary peer (same cert, same groups, full outbound reach); what
+changes:
+
+- its bundle ships **no `cert-authority` line**, so neither other peers nor the
+  manager can SSH into it, and `group allow … --on` it is rejected;
+- the manager **never dials it** — mutating commands persist the change and
+  print `client peer <name>: changes pending until 'certhold-cli refresh' runs
+  on it`;
+- it picks changes up itself by running `certhold-cli refresh` (installed at
+  onboarding), which pulls a public-material bundle from `serve` using a
+  standing per-peer **pull token**.
+
+```
+$ certhold enroll laptop --groups infra --client
+curl -kfsSL https://192.168.1.10:8443/enroll/<token>.sh | bash
+client-style peer; manager cannot push to it; updates arrive via `certhold-cli refresh`.
+```
+
+Onboarding is the same one-liner; the changed-files output simply lacks the
+`authorized_keys` line. See
+[architecture.md](architecture.md#client-style-peers-and-the-pull-channel) for
+the push-vs-pull model and
+[`certhold-cli`](#certhold-cli-on-the-peer) for the peer-side commands.
+
+### Serve endpoints
+
+`certhold serve` exposes an enroll route with two behaviors, keyed on a `.sh`
+suffix:
 
 - **`GET /enroll/<token>.sh`** — returns the install script. The token is
   inspected, **not consumed**.
@@ -149,6 +199,29 @@ Status codes:
 | missing / invalid / mismatched `?user=` | `400` (token preserved) |
 | token already consumed (re-fetch) | `410` |
 | otherwise | `200` |
+
+It also exposes the **pull channel** used by `certhold-cli`, keyed on the
+standing per-peer pull token (minted at every enroll, **not consumed** by use):
+
+- **`GET /pull/<token>`** — streams the peer's refresh bundle
+  (`application/gzip`, `Cache-Control: no-store`): its latest stored cert, the
+  keyed `config` block, the current `certhold-cli`, and a manifest — public
+  material only (see
+  [peer-file-layout.md](peer-file-layout.md#the-refresh-bundle-pull-channel)).
+- **`GET /pull/<token>/rev`** — returns the current fleet revision as
+  `text/plain` (a decimal plus newline), for cheap staleness checks.
+
+Status codes (both pull routes):
+
+| Condition | Status |
+|---|---|
+| token not found (or empty) | `404` |
+| peer revoked | `410` |
+| peer has no stored cert (pre-feature enrollment; bundle route only) | `409` — re-enroll it or run `certhold update` on the manager |
+| otherwise | `200` |
+
+Like enrollment, `serve` never signs on the pull path — bundles are assembled
+from the cert stored at the last (re)sign.
 
 ## Command reference
 
@@ -202,13 +275,15 @@ is given.
 ```
 certhold enroll <name> --groups <a,b,c> [--base-url URL]
                 [--user <name>] [--address <host>]
+                [--no-inbound | --client]
 ```
 
 Mints a one-time token, signs the peer cert (sign-at-mint), builds and stores the
-install tarball, records the peer, and prints the onboarding one-liner. Errors if
-a peer of that name already exists. Every group named in `--groups` must already
-exist — create them up front with [`group create`](#group-create); there is no
-implicit creation. No SSH push — the peer pulls its tarball from `serve`.
+install tarball, records the peer (with a standing pull token and the signed
+cert), and prints the onboarding one-liner. Errors if a peer of that name
+already exists. Every group named in `--groups` must already exist — create them
+up front with [`group create`](#group-create); there is no implicit creation. No
+SSH push — the peer pulls its tarball from `serve`.
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -216,6 +291,8 @@ implicit creation. No SSH push — the peer pulls its tarball from `serve`.
 | `--base-url` | persisted / fallback | Enroll base URL for the one-liner. Precedence: flag > `$CERTHOLD_BASE_URL` > the `base_url` persisted by `init` > `https://certhold.home.lan`. |
 | `--user` | — | Pin the install user; a hard constraint at install time. Use `--user root` (and run the one-liner as root) to manage `/root/.ssh`. |
 | `--address` | — | Network address (host or IP) certhold dials to reach this peer. Defaults to the source IP seen at install, then the peer name. See [Name vs. address](#name-vs-address). |
+| `--no-inbound` | `false` | Enroll a [client-style peer](#client-style-peers-enroll---client): no inbound trust line, other peers cannot SSH into it, updates arrive via `certhold-cli refresh`. |
+| `--client` | `false` | Alias for `--no-inbound`. |
 
 (`--hostname` is accepted but unused under the current layout — host trust is
 TOFU `known_hosts`, so there is no host-label entry to set.)
@@ -229,9 +306,10 @@ certhold list [--peers | --groups]
 ```
 
 Reads local state and prints a table. No push, no passphrase. Default (or
-`--peers`): `NAME GROUPS ALLOWED REVOKED`. `--groups`: groups with peer counts.
-`GROUPS` is the peer's own membership; `ALLOWED` is who may connect into it (see
-[data-model.md](data-model.md)).
+`--peers`): `NAME GROUPS ALLOWED INBOUND REVOKED`. `--groups`: groups with peer
+counts. `GROUPS` is the peer's own membership; `ALLOWED` is who may connect into
+it (see [data-model.md](data-model.md)); `INBOUND` is `Y` for push-managed peers
+and `N` for [client-style peers](#client-style-peers-enroll---client).
 
 ### `update`
 
@@ -240,10 +318,13 @@ certhold update <name> --groups <a,b,d> [--host HOST]
 ```
 
 Reissues the peer's cert with a new group set, then SSHes in (as the peer's
-`target_user`) and pushes the new cert. No `sshd` reload. Runs a post-push health
-check. Errors if the peer is unknown or revoked. Every group named in `--groups`
-must already exist — create them up front with [`group create`](#group-create);
-there is no implicit creation.
+`target_user`) and pushes the new cert plus a refreshed `Host`-alias config
+block. No `sshd` reload. Runs a post-push health check. Errors if the peer is
+unknown or revoked. Every group named in `--groups` must already exist — create
+them up front with [`group create`](#group-create); there is no implicit
+creation. A client-style peer is re-signed but **not** dialed: `update` prints
+`client peer <name>: changes pending until 'certhold-cli refresh' runs on it`
+and the new cert lands at the peer's next refresh.
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -266,6 +347,10 @@ push it, and run a health check (no `sshd` reload). Idempotent — a no-op exits
 without pushing. `manager` is always implicit and cannot be removed. The group
 named on `allow` must already exist — create it up front with
 [`group create`](#group-create); there is no implicit creation.
+
+A client-style peer has no inbound allow-list: `allow` is rejected with
+`peer <name> is a client-style peer (enrolled --no-inbound); it accepts no
+inbound connections`, and `disallow` no-ops gracefully (never dialing the peer).
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -314,9 +399,11 @@ certhold group delete <name>
 Removes a group from every peer's membership and inbound allow-list across the
 fleet, then deletes the group row. Reissues certs for members and rewrites
 `authorized_keys` for allow-list peers, pushing both. Refuses `manager`. Skips
-revoked peers. If any peer cannot be reached, the group row is preserved and the
-command exits non-zero so the operator can re-run after the straggler is
-recovered; per-peer pushes that already succeeded remain committed.
+revoked peers. Client-style members are re-signed but not dialed (the
+pending-refresh notice is printed instead). If any peer cannot be reached, the
+group row is preserved and the command exits non-zero so the operator can re-run
+after the straggler is recovered; per-peer pushes that already succeeded remain
+committed.
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -333,10 +420,11 @@ certhold group rename <old> <new>
 
 Atomically renames a group across the DB and the fleet. Reissues every member's
 cert and rewrites every allow-list peer's `authorized_keys` so they carry the
-new name. Refuses to/from `manager`. A same-name rename is a no-op. If any push
-fails, the DB rename stays committed and the command exits non-zero; reconcile
-stragglers with a subsequent `update` (for member-only stragglers) or a no-op
-`group allow` (for allow-list stragglers).
+new name. Refuses to/from `manager`. A same-name rename is a no-op. Client-style
+members are re-signed but not dialed (the pending-refresh notice is printed
+instead). If any push fails, the DB rename stays committed and the command exits
+non-zero; reconcile stragglers with a subsequent `update` (for member-only
+stragglers) or a no-op `group allow` (for allow-list stragglers).
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -354,8 +442,9 @@ certhold revoke <name> [--hostname <manager-name>]
 Marks the peer revoked, then cuts its cert off across the fleet by forcing a
 **partial CA rekey**: the CA is rotated and every other peer is reissued, while
 the revoked peer is excluded so its old-CA cert stops being accepted as the new
-CA propagates. Full mechanics are in
-[revocation](maintenance-and-operations.md#revocation).
+CA propagates. The revoked peer's standing pull token is refused from that point
+on (`410`), so a revoked client-style peer cannot pull either. Full mechanics
+are in [revocation](maintenance-and-operations.md#revocation).
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -372,8 +461,12 @@ certhold rekey [--hostname <name>] [--rotate-passphrase]
 Rotates the CA: generates a new CA, reissues every non-revoked peer's cert,
 pushes the new trust material to each, rotates certhold itself last, then
 archives the old CA. Unreachable peers are skipped and reported as stragglers
-rather than aborting the rotation. See [rekey](maintenance-and-operations.md#rekey)
-for the algorithm and straggler recovery.
+rather than aborting the rotation. Client-style peers are re-signed under the
+new CA but never dialed — they stay on their old-CA cert (locked out of the
+fleet) until they run `certhold-cli refresh`. See
+[rekey](maintenance-and-operations.md#rekey) for the algorithm, straggler
+recovery, and
+[client-style peers under rekey](maintenance-and-operations.md#client-style-peers-under-rekey-and-revoke).
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -389,8 +482,11 @@ passphrase (reused from the old, or fresh with `--rotate-passphrase`).
 certhold serve [--addr :8443] [--tls-cert FILE --tls-key FILE]
 ```
 
-Runs the HTTPS enroll endpoint that peers `curl` during onboarding. Long-running,
-graceful shutdown on SIGINT/SIGTERM. TLS is always on: with no explicit cert it
+Runs the HTTPS endpoint that peers `curl` during onboarding and that
+`certhold-cli` pulls refresh bundles from afterwards (see
+[Serve endpoints](#serve-endpoints)). Long-running, graceful shutdown on
+SIGINT/SIGTERM; keep it up so client-style peers can refresh — `certhold
+install` makes it a systemd service. TLS is always on: with no explicit cert it
 generates a self-signed one and prints its SHA-256 fingerprint. Reads the state
 db; never touches the CA key or prompts for a passphrase.
 
@@ -421,6 +517,46 @@ and no side effects.
 | `--tls-cert` / `--tls-key` | — | Use your own TLS cert/key (resolved to absolute paths in the unit). Must be supplied together. |
 | `--print` | `false` | Print the rendered unit to stdout and exit; no root required, no side effects. |
 
+### `certhold-cli` (on the peer)
+
+```
+certhold-cli refresh [--instance <key>]
+certhold-cli status  [--instance <key>]
+certhold-cli --help
+```
+
+The one command that runs on a peer — a small pure-bash script installed at
+enroll time into `~/.local/bin/certhold-cli`, run on demand (nothing resident).
+It discovers managing instances from `~/.ssh/certhold_*.conf` files and operates
+on all of them, or just one with `--instance <key>`. It needs no manager-side
+key or passphrase: the conf's pull token is the credential.
+
+- **`refresh`** — for each instance, pulls the refresh bundle from
+  `<BASE_URL>/pull/<PULL_TOKEN>`, atomically installs the new cert, splices the
+  keyed `config` block (foreign blocks and user content untouched), and records
+  the bundle's fleet revision in the conf's `LAST_REV`:
+
+  ```
+  [laptop]$ certhold-cli refresh
+  refreshed laptop (<key>): rev 7, cert ~/.ssh/id_ed25519_<key>-cert.pub
+  ```
+
+  As its **last** action it replaces itself from the bundle's `certhold-cli`
+  when the script changed (printing
+  `certhold-cli: self-updated from bundle at <path>`). A failing instance is
+  isolated — others still refresh; the exit code is non-zero if any failed.
+- **`status`** — per instance, prints the conf path, the installed cert with its
+  serial and principals (via `ssh-keygen -L`), the local revision (`LAST_REV`),
+  the manager's current revision (from `<BASE_URL>/pull/<PULL_TOKEN>/rev`), and
+  a verdict: `up-to-date`, `stale (run: certhold-cli refresh)`, or
+  `manager unreachable`. An unreachable manager does **not** make `status` exit
+  non-zero.
+
+Although every peer gets the CLI and a pull token, it is the **only** update
+channel for [client-style peers](#client-style-peers-enroll---client) — run
+`refresh` on them after any manager-side change that affects them (and always
+after a `rekey`/`revoke`, which otherwise leaves them on the retired CA).
+
 ## Troubleshooting
 
 | Symptom | Likely cause |
@@ -428,3 +564,7 @@ and no side effects.
 | Push fails with `ssh: handshake failed` | The peer's host key changed (or was never seeded); update the manager's `known_hosts` — see [maintenance-and-operations.md](maintenance-and-operations.md#host-key-trust-on-the-push). |
 | `update` / `group` health check fails | Inspect the peer's `~<user>/.ssh/authorized_keys` and `id_ed25519_<key>-cert.pub`, and check `sshd`'s logs for auth errors. For a `--user root` peer also confirm the account isn't password-locked and `PermitRootLogin` allows pubkey/cert. |
 | `init` errors `state db already exists` | A `state.db` is already present; move it aside or use a different `--data-dir` / `--db`. |
+| A client-style peer can no longer ssh anywhere after `rekey`/`revoke` | Expected: it still holds the retired CA's cert. Run `certhold-cli refresh` on it (requires `serve` up). |
+| `certhold-cli refresh` fails with HTTP `410` | The peer is revoked; its pull token is permanently refused. |
+| `certhold-cli refresh` fails with HTTP `409` | The peer row has no stored cert (pre-feature enrollment) — re-enroll it or run `certhold update` on the manager. |
+| `certhold-cli` verdict is `manager unreachable` | `serve` is down or the `BASE_URL` in `~/.ssh/certhold_<key>.conf` is wrong. Certs do not expire, so existing access keeps working meanwhile. |
