@@ -29,6 +29,7 @@ func NewRootCmd() *cobra.Command {
 		newInitCmd(),
 		newEnrollCmd(),
 		newListCmd(),
+		newTuiCmd(),
 		newUpdateCmd(),
 		newGroupCmd(),
 		newRevokeCmd(),
