@@ -175,6 +175,69 @@ func TestBuildUser_NamespacedIdentityAndConfig(t *testing.T) {
 	}
 }
 
+func TestBuildUser_NoInboundOmitsCAAuthorizedKeys(t *testing.T) {
+	in := sampleUserInputs()
+	in.NoInbound = true
+	data, err := BuildUser(in)
+	if err != nil {
+		t.Fatalf("BuildUser: %v", err)
+	}
+	got := extractUser(t, data)
+	if _, ok := got["ca_authorized_keys"]; ok {
+		t.Errorf("NoInbound tarball must omit ca_authorized_keys; have %v", keys(got))
+	}
+	if len(got) != 4 {
+		t.Errorf("entry count: got %d want 4: %v", len(got), keys(got))
+	}
+}
+
+func TestBuildUser_CLIScriptAndConfEntries(t *testing.T) {
+	in := sampleUserInputs()
+	in.CLIScript = []byte("#!/bin/sh\necho cli\n")
+	in.Conf = []byte("server_url=https://example\n")
+	data, err := BuildUser(in)
+	if err != nil {
+		t.Fatalf("BuildUser: %v", err)
+	}
+	got := extractUser(t, data)
+
+	cli, ok := got["certhold-cli"]
+	if !ok {
+		t.Fatalf("missing certhold-cli; have %v", keys(got))
+	}
+	if cli.mode != 0755 {
+		t.Errorf("certhold-cli mode: got %o want %o", cli.mode, 0755)
+	}
+	if !bytes.Equal(cli.data, in.CLIScript) {
+		t.Errorf("certhold-cli data = %q want %q", cli.data, in.CLIScript)
+	}
+
+	confName := "certhold_" + in.InstanceKey + ".conf"
+	conf, ok := got[confName]
+	if !ok {
+		t.Fatalf("missing %s; have %v", confName, keys(got))
+	}
+	if conf.mode != 0600 {
+		t.Errorf("%s mode: got %o want %o", confName, conf.mode, 0600)
+	}
+	if !bytes.Equal(conf.data, in.Conf) {
+		t.Errorf("%s data = %q want %q", confName, conf.data, in.Conf)
+	}
+}
+
+func TestBuildUser_HostsLandInConfig(t *testing.T) {
+	in := sampleUserInputs()
+	in.Hosts = []HostEntry{{Name: "web1", Address: "10.0.0.1", User: "deploy"}}
+	data, err := BuildUser(in)
+	if err != nil {
+		t.Fatalf("BuildUser: %v", err)
+	}
+	got := extractUser(t, data)
+	if want := V2SshClientBlockWithHosts(in.InstanceKey, in.Hosts); string(got["config"].data) != want {
+		t.Errorf("config = %q\nwant %q", got["config"].data, want)
+	}
+}
+
 func TestWriteUserSelfFiles(t *testing.T) {
 	dir := t.TempDir()
 	in := sampleUserInputs()

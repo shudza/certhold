@@ -19,6 +19,10 @@ type UserPeerFiles struct {
 	Principals      []string
 	KnownHostsLines []string
 	InstanceKey     string
+	NoInbound       bool
+	Hosts           []HostEntry
+	CLIScript       []byte
+	Conf            []byte
 }
 
 // userFileEntry is one file destined for ~user/.ssh/.
@@ -33,23 +37,36 @@ type userFileEntry struct {
 // script appends the cert-authority line from ca_authorized_keys to
 // authorized_keys idempotently (grep-guarded) so multiple instances coexist.
 func userFileEntries(p UserPeerFiles) []userFileEntry {
-	return []userFileEntry{
+	entries := []userFileEntry{
 		{V2KeyFileName(p.InstanceKey), 0600, p.PrivKey},
 		{V2CertFileName(p.InstanceKey), 0644, p.CertPub},
 		{"known_hosts", 0644, buildKnownHosts(p.KnownHostsLines)},
-		{"config", 0644, []byte(V2SshClientBlock(p.InstanceKey))},
-		{"ca_authorized_keys", 0644, buildAuthorizedKeysLine(p.CAPub, p.Principals)},
+		{"config", 0644, []byte(V2SshClientBlockWithHosts(p.InstanceKey, p.Hosts))},
 	}
+	if !p.NoInbound {
+		entries = append(entries, userFileEntry{"ca_authorized_keys", 0644, buildAuthorizedKeysLine(p.CAPub, p.Principals)})
+	}
+	if p.CLIScript != nil {
+		entries = append(entries, userFileEntry{"certhold-cli", 0755, p.CLIScript})
+	}
+	if p.Conf != nil {
+		entries = append(entries, userFileEntry{"certhold_" + p.InstanceKey + ".conf", 0600, p.Conf})
+	}
+	return entries
 }
 
 // BuildUser returns a gzip+tar archive whose entries have paths relative to
 // ~user/.ssh/. The install script untars this into that directory.
 func BuildUser(p UserPeerFiles) ([]byte, error) {
+	return buildArchive(userFileEntries(p))
+}
+
+// buildArchive packs the entries into a reproducible gzip+tar archive
+// (fixed mod time, zero uid/gid, PAX format).
+func buildArchive(entries []userFileEntry) ([]byte, error) {
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gz)
-
-	entries := userFileEntries(p)
 
 	modTime := time.Unix(0, 0).UTC()
 	for _, e := range entries {

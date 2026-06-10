@@ -112,6 +112,92 @@ func TestV2SshClientBlockFullyScrubbedBySedRange(t *testing.T) {
 	}
 }
 
+func TestV2SshClientBlockWithHostsNilMatchesPlainBlock(t *testing.T) {
+	const key = "0123456789abcdef"
+	if got, want := V2SshClientBlockWithHosts(key, nil), V2SshClientBlock(key); got != want {
+		t.Errorf("nil-hosts block differs from V2SshClientBlock:\ngot:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestV2SshClientBlockWithHostsEmittedBeforeHostStar(t *testing.T) {
+	const key = "0123456789abcdef"
+	block := V2SshClientBlockWithHosts(key, []HostEntry{
+		{Name: "web1", Address: "10.0.0.1", User: "deploy"},
+		{Name: "db1", Address: "10.0.0.2"},
+	})
+	begin := strings.Index(block, BeginSentinel(key))
+	web1 := strings.Index(block, "Host web1\n")
+	db1 := strings.Index(block, "Host db1\n")
+	star := strings.Index(block, "Host *\n")
+	end := strings.Index(block, EndSentinel(key))
+	if begin < 0 || web1 < 0 || db1 < 0 || star < 0 || end < 0 {
+		t.Fatalf("missing stanza markers (begin=%d web1=%d db1=%d star=%d end=%d):\n%s", begin, web1, db1, star, end, block)
+	}
+	if !(begin < web1 && web1 < db1 && db1 < star && star < end) {
+		t.Errorf("host stanzas not between begin sentinel and Host * (begin=%d web1=%d db1=%d star=%d end=%d):\n%s", begin, web1, db1, star, end, block)
+	}
+}
+
+func TestV2SshClientBlockWithHostsConditionalLines(t *testing.T) {
+	const key = "0123456789abcdef"
+	block := V2SshClientBlockWithHosts(key, []HostEntry{
+		{Name: "full", Address: "192.0.2.1", User: "alice"},
+		{Name: "addr-only", Address: "192.0.2.2"},
+		{Name: "user-only", User: "bob"},
+	})
+	if !strings.Contains(block, "Host full\n    HostName 192.0.2.1\n    User alice\n") {
+		t.Errorf("full entry stanza wrong:\n%s", block)
+	}
+	if !strings.Contains(block, "Host addr-only\n    HostName 192.0.2.2\nHost user-only\n    User bob\n") {
+		t.Errorf("conditional HostName/User lines wrong:\n%s", block)
+	}
+}
+
+func TestV2SshClientBlockWithHostsSkipsEmptyEntry(t *testing.T) {
+	const key = "0123456789abcdef"
+	block := V2SshClientBlockWithHosts(key, []HostEntry{
+		{Name: "ghost"},
+		{Name: "real", Address: "192.0.2.9"},
+	})
+	if strings.Contains(block, "Host ghost") {
+		t.Errorf("entry with empty Address and User must be skipped:\n%s", block)
+	}
+	if !strings.Contains(block, "Host real\n") {
+		t.Errorf("non-empty entry missing:\n%s", block)
+	}
+}
+
+func TestV2SshClientBlockWithHostsFullyScrubbedBySedRange(t *testing.T) {
+	const key = "KEY"
+	beginRe := regexp.MustCompile(`^# BEGIN certhold ` + key + `( v[0-9]+)?$`)
+	endRe := regexp.MustCompile(`^# END certhold ` + key + `( v[0-9]+)?$`)
+
+	block := V2SshClientBlockWithHosts(key, []HostEntry{{Name: "web1", Address: "10.0.0.1", User: "deploy"}})
+	lines := strings.Split(block, "\n")
+
+	inRange := false
+	var remaining []string
+	for _, ln := range lines {
+		if !inRange && beginRe.MatchString(ln) {
+			inRange = true
+			continue
+		}
+		if inRange {
+			if endRe.MatchString(ln) {
+				inRange = false
+			}
+			continue
+		}
+		remaining = append(remaining, ln)
+	}
+
+	for _, ln := range remaining {
+		if strings.TrimSpace(ln) != "" {
+			t.Errorf("sed-range scrub left non-empty line %q; remaining=%q", ln, remaining)
+		}
+	}
+}
+
 // TestTarballBodiesCarryNoSplittableSentinels is the no-op proof: the BuildUser
 // tarball's known_hosts and identity files never contain the splice sentinels,
 // so only the config carries them (asserted by the usertar tests).
