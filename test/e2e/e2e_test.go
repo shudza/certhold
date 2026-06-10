@@ -307,7 +307,7 @@ func TestE2E(t *testing.T) {
 		t.Logf("serve launch output:\n%s", res.out)
 
 		waitForManagerHTTPS(ctx, t)
-		waitForSSHD(ctx, t, "peer1", "peer2", "peer3")
+		waitForSSHD(ctx, t, "peer1", "peer2", "peer3", "peer4", "peer5")
 
 		// Capture the instance key from the manager's namespaced self key file.
 		ls := composeExec(ctx, t, "", "manager",
@@ -321,6 +321,9 @@ func TestE2E(t *testing.T) {
 	})
 
 	t.Run("02_enroll_web01_install_peer1", func(t *testing.T) {
+		// Group references are strict: enroll/update reject groups that were
+		// not created first.
+		certhold(ctx, t, "group", "create", "web")
 		line := enrollOneLiner(ctx, t, "web01", "peer1", targetUser, "web")
 		// Run the install one-liner AS deploy on peer1.
 		res := composeExec(ctx, t, targetUser, "peer1", line)
@@ -331,6 +334,7 @@ func TestE2E(t *testing.T) {
 	})
 
 	t.Run("03_enroll_db01_install_peer2", func(t *testing.T) {
+		certhold(ctx, t, "group", "create", "db")
 		line := enrollOneLiner(ctx, t, "db01", "peer2", targetUser, "db")
 		res := composeExec(ctx, t, targetUser, "peer2", line)
 		if res.exitCode != 0 {
@@ -442,6 +446,7 @@ func TestE2E(t *testing.T) {
 		// root-mode codepath. We enroll AFTER the rekeys above, so rootbox's cert
 		// and trust line are signed with the CURRENT active CA, matching the
 		// manager's freshly-rotated self cert.
+		certhold(ctx, t, "group", "create", "infra")
 		line := enrollOneLiner(ctx, t, "rootbox", "peer3", "root", "infra")
 
 		// Run the one-liner as root (no -u): the install must target /root/.ssh.
@@ -469,6 +474,10 @@ func TestE2E(t *testing.T) {
 		if code := sshTryAs(ctx, t, "root", "peer3", "peer3"); code != 0 {
 			t.Fatalf("root@peer3->root@peer3 cert SSH failed (exit %d) after root install+update (want 0)", code)
 		}
+	})
+
+	t.Run("10_client_peer_flow", func(t *testing.T) {
+		runClientPeerFlow(ctx, t, instanceKey)
 	})
 }
 

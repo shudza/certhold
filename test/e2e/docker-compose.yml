@@ -58,6 +58,29 @@ services:
     networks:
       - chnet
 
+  # peer4/peer5 are dedicated to the client-peer flow (TestE2E step 10):
+  # peer4 hosts the host-style peer app01 (push target), peer5 hosts the
+  # client-style peer laptop (`enroll --client`, pull-only via certhold-cli).
+  peer4:
+    build:
+      context: ../..
+      dockerfile: test/e2e/Dockerfile.peer
+    hostname: peer4
+    environment:
+      CERTHOLD_NO_PASSPHRASE: "1"
+    networks:
+      - chnet
+
+  peer5:
+    build:
+      context: ../..
+      dockerfile: test/e2e/Dockerfile.peer
+    hostname: peer5
+    environment:
+      CERTHOLD_NO_PASSPHRASE: "1"
+    networks:
+      - chnet
+
 networks:
   chnet:
     driver: bridge
