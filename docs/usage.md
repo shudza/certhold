@@ -327,21 +327,27 @@ switched with `tab` (or `1` / `2`):
   peer name — see [Name vs. address](#name-vs-address)). `EXPIRES` is read from
   the peer's stored signed cert: `-` for peers enrolled before certs were
   persisted, `∞` for a no-expiry cert. Revoked peers are dimmed red; expired
-  certs highlighted. `enter` opens a detail pane with the full record
-  (fingerprint, created, cert validity window, …). Pull token values are never
-  displayed — the detail pane only says whether one exists.
+  certs highlighted. On terminals too narrow for every column, low-priority
+  columns (`INBOUND`, `SERIAL`, then `ALLOWED`, …) are dropped so `REVOKED` and
+  `EXPIRES` stay readable. `enter` opens a detail pane with the full record
+  (status, cert validity window, fingerprint, created, …); the pane stays
+  pinned to that peer across reloads. Pull token values are never displayed —
+  the detail pane only says whether one exists.
 - **Groups**: groups with peer counts; the pane under the table shows the
   selected group's members and which peers allow it inbound.
 
-The header shows the db path, fleet revision and active CA version.
+The header shows the db path, fleet revision and active CA version. The
+selected row is marked with `>` and the active tab is bracketed, so the
+dashboard stays usable when styling is stripped (`NO_COLOR`). When a table
+overflows the window, a `sel/total` scroll cue with `▲`/`▼` shows the position.
 
 | Key | Action |
 |---|---|
 | `tab`, `1`, `2` | Switch between the Peers and Groups views. |
 | `j`/`k`, arrows | Move the selection. |
 | `enter` | Open the selected peer's detail pane. |
-| `esc` | Close the detail pane / clear the filter. |
-| `/` | Fuzzy-filter the current table (subsequence match; `enter` applies). |
+| `esc` | Close the detail pane / clear the current view's filter. |
+| `/` | Fuzzy-filter the current table (per-view; subsequence match; the match count updates live; `enter` applies). |
 | `r` | Reload from the database. |
 | `q`, `ctrl+c` | Quit. |
 

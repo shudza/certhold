@@ -32,13 +32,15 @@ type Model struct {
 	data    fleetData
 	loadErr error
 
-	view     view
-	detail   bool
-	peerIdx  int
-	groupIdx int
+	view       view
+	detail     bool
+	detailName string
+	peerIdx    int
+	groupIdx   int
 
 	filtering bool
 	filter    textinput.Model
+	filters   [2]string
 
 	width  int
 	height int
@@ -110,6 +112,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "esc":
 			m.filtering = false
 			m.filter.SetValue("")
+			m.filters[m.view] = ""
 			m.filter.Blur()
 			m.clampSelection()
 			return m, nil
@@ -121,6 +124,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		var cmd tea.Cmd
 		m.filter, cmd = m.filter.Update(msg)
+		m.filters[m.view] = m.filter.Value()
 		m.clampSelection()
 		return m, cmd
 	}
@@ -130,15 +134,15 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "tab":
 		m.view = 1 - m.view
-		m.detail = false
+		m.closeDetail()
 		return m, nil
 	case "1":
 		m.view = viewPeers
-		m.detail = false
+		m.closeDetail()
 		return m, nil
 	case "2":
 		m.view = viewGroups
-		m.detail = false
+		m.closeDetail()
 		return m, nil
 	case "j", "down":
 		m.move(1)
@@ -148,22 +152,26 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "enter":
 		if m.view == viewPeers {
-			if _, ok := m.selectedPeer(); ok {
+			if p, ok := m.selectedPeer(); ok {
 				m.detail = true
+				m.detailName = p.Name
 			}
 		}
 		return m, nil
 	case "esc":
 		if m.detail {
-			m.detail = false
-		} else if m.filter.Value() != "" {
+			m.closeDetail()
+		} else if m.filters[m.view] != "" {
+			m.filters[m.view] = ""
 			m.filter.SetValue("")
 			m.clampSelection()
 		}
 		return m, nil
 	case "/":
 		m.filtering = true
-		m.detail = false
+		m.closeDetail()
+		m.filter.SetValue(m.filters[m.view])
+		m.filter.CursorEnd()
 		m.filter.Focus()
 		return m, nil
 	case "r":
@@ -194,6 +202,21 @@ func (m *Model) move(delta int) {
 	}
 }
 
+// closeDetail leaves the detail pane and re-points the table selection at the
+// pinned peer, which may have moved (or vanished) since the pane opened.
+func (m *Model) closeDetail() {
+	if m.detail && m.detailName != "" {
+		for i, p := range m.filteredPeers() {
+			if p.Name == m.detailName {
+				m.peerIdx = i
+				break
+			}
+		}
+	}
+	m.detail = false
+	m.detailName = ""
+}
+
 func (m *Model) clampSelection() {
 	if np := len(m.filteredPeers()); np == 0 {
 		m.peerIdx = 0
@@ -208,7 +231,7 @@ func (m *Model) clampSelection() {
 }
 
 func (m Model) filteredPeers() []peerRow {
-	q := strings.ToLower(strings.TrimSpace(m.filter.Value()))
+	q := strings.ToLower(strings.TrimSpace(m.filters[viewPeers]))
 	if q == "" {
 		return m.data.Peers
 	}
@@ -224,7 +247,7 @@ func (m Model) filteredPeers() []peerRow {
 }
 
 func (m Model) filteredGroups() []groupRow {
-	q := strings.ToLower(strings.TrimSpace(m.filter.Value()))
+	q := strings.ToLower(strings.TrimSpace(m.filters[viewGroups]))
 	if q == "" {
 		return m.data.Groups
 	}
@@ -235,6 +258,17 @@ func (m Model) filteredGroups() []groupRow {
 		}
 	}
 	return out
+}
+
+// detailPeer resolves the detail pane's peer by name, not index, so a reload
+// that removes or reorders peers can never silently swap the shown record.
+func (m Model) detailPeer() (peerRow, bool) {
+	for _, p := range m.filteredPeers() {
+		if p.Name == m.detailName {
+			return p, true
+		}
+	}
+	return peerRow{}, false
 }
 
 func (m Model) selectedPeer() (peerRow, bool) {

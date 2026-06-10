@@ -3,12 +3,14 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 )
 
 func testData() fleetData {
@@ -321,21 +323,254 @@ func TestQuitKeys(t *testing.T) {
 	}
 }
 
+func wideData() fleetData {
+	d := testData()
+	d.DBPath = "/very/long/path/that/easily/overflows/narrow/terminals/certhold/state.db"
+	d.Peers[0].TargetUser = "extralongusername"
+	d.Peers[0].Fingerprint = "SHA256:" + strings.Repeat("a", 43)
+	d.Peers[0].Groups = []string{"infrastructure-primary", "database-replicas", "observability-stack"}
+	d.Peers[0].Allowed = []string{"operations-oncall", "deployment-bots"}
+	d.Peers[2].Expires = certExpiry{
+		state: certAt,
+		from:  time.Now().Add(-100 * 24 * time.Hour),
+		until: time.Now().Add(-30 * time.Hour),
+	}
+	d.Groups[0].Members = []string{
+		"alpha", "beta", "gamma-with-a-long-name", "delta-with-a-long-name", "epsilon-with-a-long-name",
+	}
+	return d
+}
+
 func TestResizeKeepsLayout(t *testing.T) {
-	for _, size := range []tea.WindowSizeMsg{{Width: 100, Height: 30}, {Width: 60, Height: 12}} {
-		m := newTestModel(nil)
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	defer lipgloss.SetColorProfile(prev)
+
+	sawANSI := false
+	sizes := []tea.WindowSizeMsg{
+		{Width: 100, Height: 30}, {Width: 80, Height: 24}, {Width: 60, Height: 16}, {Width: 60, Height: 12},
+	}
+	for _, size := range sizes {
+		m := NewModel(context.Background(), wideData(), nil)
 		nm, _ := m.Update(size)
 		m = nm.(Model)
-		for _, state := range []Model{m, press(t, m, "enter"), press(t, m, "2")} {
-			lines := strings.Split(state.View(), "\n")
+		states := map[string]Model{
+			"table":     m,
+			"detail":    press(t, m, "enter"),
+			"groups":    press(t, m, "2"),
+			"filtering": press(t, m, "/", "a"),
+		}
+		for name, state := range states {
+			v := state.View()
+			if strings.Contains(v, "\x1b[") {
+				sawANSI = true
+			}
+			lines := strings.Split(v, "\n")
 			if len(lines) != size.Height {
-				t.Fatalf("%dx%d: got %d lines", size.Width, size.Height, len(lines))
+				t.Fatalf("%dx%d %s: got %d lines", size.Width, size.Height, name, len(lines))
 			}
 			for _, l := range lines {
-				if lipgloss.Width(l) > size.Width {
-					t.Fatalf("%dx%d: line overflows: %q", size.Width, size.Height, l)
+				if lw := lipgloss.Width(l); lw > size.Width {
+					t.Fatalf("%dx%d %s: line overflows (%d > %d): %q",
+						size.Width, size.Height, name, lw, size.Width, l)
 				}
 			}
 		}
+	}
+	if !sawANSI {
+		t.Fatal("forced color profile produced no ANSI — overflow checks are vacuous")
+	}
+}
+
+func TestNarrowWidthsKeepCriticalColumns(t *testing.T) {
+	d := testData()
+	d.Peers[0].TargetUser = "extralongusername"
+	for _, size := range []tea.WindowSizeMsg{{Width: 80, Height: 24}, {Width: 60, Height: 12}} {
+		m := NewModel(context.Background(), d, nil)
+		nm, _ := m.Update(size)
+		m = nm.(Model)
+		v := m.View()
+		for _, want := range []string{"REVOKED", "EXPIRES", "2027-03-01"} {
+			if !strings.Contains(v, want) {
+				t.Errorf("%dx%d: view missing %q:\n%s", size.Width, size.Height, want, v)
+			}
+		}
+		var betaLine string
+		for _, l := range strings.Split(v, "\n") {
+			if strings.Contains(l, "beta") {
+				betaLine = l
+				break
+			}
+		}
+		if !strings.Contains(betaLine, "Y") {
+			t.Errorf("%dx%d: beta's REVOKED flag not visible: %q", size.Width, size.Height, betaLine)
+		}
+	}
+}
+
+func TestDetailPinnedAcrossReload(t *testing.T) {
+	m := press(t, newTestModel(nil), "j", "enter")
+	if m.detailName != "beta" {
+		t.Fatalf("detailName = %q, want beta", m.detailName)
+	}
+	if !strings.Contains(m.View(), "peer: beta") {
+		t.Fatalf("detail should show beta:\n%s", m.View())
+	}
+
+	shifted := testData()
+	shifted.Peers = append([]peerRow{{Name: "aardvark", DialHost: "aardvark", Inbound: true}}, shifted.Peers...)
+	nm, _ := m.Update(reloadedMsg{data: shifted})
+	m = nm.(Model)
+	if !strings.Contains(m.View(), "peer: beta") {
+		t.Fatalf("detail must stay pinned to beta after an insertion shifts order:\n%s", m.View())
+	}
+	back := press(t, m, "esc")
+	if back.detail {
+		t.Fatal("esc should close detail")
+	}
+	if back.peerIdx != 2 {
+		t.Fatalf("esc should re-point selection at beta, peerIdx = %d, want 2", back.peerIdx)
+	}
+
+	removed := testData()
+	removed.Peers = []peerRow{removed.Peers[0], removed.Peers[2]}
+	nm, _ = m.Update(reloadedMsg{data: removed})
+	m = nm.(Model)
+	if !strings.Contains(m.View(), "peer no longer present") {
+		t.Fatalf("detail for a removed peer must show the placeholder:\n%s", m.View())
+	}
+	m = press(t, m, "esc")
+	if m.detail {
+		t.Fatal("esc must close the placeholder detail")
+	}
+}
+
+func TestErrorAndFilterStatusCoexist(t *testing.T) {
+	m := press(t, newTestModel(nil), "/", "a", "l", "p", "enter")
+	nm, _ := m.Update(reloadedMsg{err: errors.New("disk gone")})
+	m = nm.(Model)
+	v := m.View()
+	if !strings.Contains(v, "error: disk gone") {
+		t.Fatalf("view missing load error:\n%s", v)
+	}
+	if !strings.Contains(v, `filter "alp" — 1/3 shown`) {
+		t.Fatalf("load error must not hide the filter status:\n%s", v)
+	}
+}
+
+func TestScrollCue(t *testing.T) {
+	d := testData()
+	for i := 0; i < 10; i++ {
+		d.Peers = append(d.Peers, peerRow{Name: fmt.Sprintf("peer%02d", i), DialHost: "host"})
+	}
+	m := NewModel(context.Background(), d, nil)
+	nm, _ := m.Update(tea.WindowSizeMsg{Width: 60, Height: 12})
+	m = nm.(Model)
+	if v := m.View(); !strings.Contains(v, "1/13 ▼") {
+		t.Fatalf("overflowing table missing scroll cue:\n%s", v)
+	}
+	for i := 0; i < 12; i++ {
+		m = press(t, m, "j")
+	}
+	if v := m.View(); !strings.Contains(v, "▲ 13/13") {
+		t.Fatalf("bottom of list missing position cue:\n%s", v)
+	}
+}
+
+func TestDetailClippedShowsMore(t *testing.T) {
+	m := press(t, newTestModel(nil), "enter")
+	nm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 10})
+	m = nm.(Model)
+	v := m.View()
+	if !strings.Contains(v, "more — enlarge the terminal") {
+		t.Fatalf("clipped detail missing 'more' indicator:\n%s", v)
+	}
+	for _, want := range []string{"status", "cert"} {
+		if !strings.Contains(v, want) {
+			t.Errorf("clipped detail must keep %q visible:\n%s", want, v)
+		}
+	}
+}
+
+func TestFooterHintsPerState(t *testing.T) {
+	m := newTestModel(nil)
+	if !strings.Contains(m.View(), "enter detail") {
+		t.Fatal("peers hints missing 'enter detail'")
+	}
+	g := press(t, m, "2")
+	if strings.Contains(g.View(), "enter detail") {
+		t.Fatal("groups hints must not advertise enter (it is a no-op)")
+	}
+	if !strings.Contains(g.View(), "j/k move") {
+		t.Fatal("groups hints missing movement keys")
+	}
+	d := press(t, m, "enter")
+	dv := d.View()
+	for _, want := range []string{"esc back", "tab/1/2 views", "/ filter"} {
+		if !strings.Contains(dv, want) {
+			t.Errorf("detail hints missing %q:\n%s", want, dv)
+		}
+	}
+	f := press(t, m, "/")
+	if !strings.Contains(f.View(), "enter apply") {
+		t.Fatal("filtering hints missing 'enter apply'")
+	}
+}
+
+func TestFilterPerView(t *testing.T) {
+	m := press(t, newTestModel(nil), "/", "a", "l", "p", "enter")
+	if n := len(m.filteredPeers()); n != 1 {
+		t.Fatalf("filtered peers = %d, want 1", n)
+	}
+	m = press(t, m, "2")
+	if n := len(m.filteredGroups()); n != 2 {
+		t.Fatalf("groups view inherited the peers filter: %d groups shown, want 2", n)
+	}
+	if strings.Contains(m.View(), `filter "alp"`) {
+		t.Fatal("groups footer must not show the peers filter")
+	}
+	m = press(t, m, "/", "o", "p", "enter")
+	gs := m.filteredGroups()
+	if len(gs) != 1 || gs[0].Name != "ops" {
+		t.Fatalf("filtered groups = %+v, want [ops]", gs)
+	}
+	m = press(t, m, "1")
+	if n := len(m.filteredPeers()); n != 1 {
+		t.Fatalf("peers filter must persist independently, got %d peers", n)
+	}
+}
+
+func TestTextualMarkersSurviveNoColor(t *testing.T) {
+	m := newTestModel(nil)
+	v := m.View()
+	if !strings.Contains(v, "[1 peers (3)]") {
+		t.Fatalf("active tab missing textual marker:\n%s", v)
+	}
+	var selLine string
+	for _, l := range strings.Split(v, "\n") {
+		if strings.HasPrefix(l, selMarker) {
+			selLine = l
+			break
+		}
+	}
+	if !strings.Contains(selLine, "alpha") {
+		t.Fatalf("selected row missing %q marker:\n%s", selMarker, v)
+	}
+	if gv := press(t, m, "2").View(); !strings.Contains(gv, "[2 groups (2)]") {
+		t.Fatalf("groups tab missing textual marker:\n%s", gv)
+	}
+	if dv := press(t, m, "enter").View(); !strings.Contains(dv, "[peer detail]") {
+		t.Fatalf("detail badge missing textual marker:\n%s", dv)
+	}
+}
+
+func TestLiveMatchCountWhileFiltering(t *testing.T) {
+	m := press(t, newTestModel(nil), "/", "g", "m")
+	if v := m.View(); !strings.Contains(v, "1/3 match") {
+		t.Fatalf("typing a filter must show the live match count:\n%s", v)
+	}
+	m = press(t, m, "x")
+	if v := m.View(); !strings.Contains(v, "0/3 match") {
+		t.Fatalf("live match count not updated:\n%s", v)
 	}
 }

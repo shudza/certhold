@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 var (
@@ -23,7 +24,12 @@ var (
 	labelStyle   = lipgloss.NewStyle().Faint(true)
 )
 
-const colGap = "  "
+const (
+	colGap    = "  "
+	selMarker = "> "
+	noMarker  = "  "
+	minColW   = 6
+)
 
 func (m Model) View() string {
 	w, h := m.width, m.height
@@ -44,7 +50,7 @@ func (m Model) View() string {
 	var body []string
 	switch {
 	case m.detail && m.view == viewPeers:
-		body = m.peerDetailLines(w)
+		body = m.peerDetailLines(w, bodyH)
 	case m.view == viewPeers:
 		body = m.peersTableLines(w, bodyH)
 	default:
@@ -67,41 +73,45 @@ func (m Model) headerLines(w int) []string {
 	peersTab := fmt.Sprintf("1 peers (%d)", len(m.data.Peers))
 	groupsTab := fmt.Sprintf("2 groups (%d)", len(m.data.Groups))
 	if m.view == viewPeers {
-		peersTab = tabOnStyle.Render(peersTab)
-		groupsTab = tabOffStyle.Render(groupsTab)
+		peersTab = tabOnStyle.Render("[" + peersTab + "]")
+		groupsTab = tabOffStyle.Render(" " + groupsTab + " ")
 	} else {
-		peersTab = tabOffStyle.Render(peersTab)
-		groupsTab = tabOnStyle.Render(groupsTab)
+		peersTab = tabOffStyle.Render(" " + peersTab + " ")
+		groupsTab = tabOnStyle.Render("[" + groupsTab + "]")
 	}
 	tabs := peersTab + colGap + groupsTab
 	if m.detail && m.view == viewPeers {
-		tabs += colGap + tabOnStyle.Render("peer detail")
+		tabs += colGap + tabOnStyle.Render("[peer detail]")
 	}
 
 	return []string{truncLine(top, w), truncLine(tabs, w), ""}
 }
 
 func (m Model) footerLines(w int) []string {
-	var status string
-	switch {
-	case m.filtering:
-		status = m.filter.View()
-	case m.loadErr != nil:
-		status = errStyle.Render("error: " + m.loadErr.Error())
-	case m.filter.Value() != "":
-		n, total := len(m.filteredPeers()), len(m.data.Peers)
-		if m.view == viewGroups {
-			n, total = len(m.filteredGroups()), len(m.data.Groups)
-		}
-		status = metaStyle.Render(fmt.Sprintf("filter %q — %d/%d shown (esc clears)", m.filter.Value(), n, total))
+	n, total := len(m.filteredPeers()), len(m.data.Peers)
+	if m.view == viewGroups {
+		n, total = len(m.filteredGroups()), len(m.data.Groups)
 	}
+
+	var parts []string
+	if m.filtering {
+		parts = append(parts, m.filter.View()+metaStyle.Render(fmt.Sprintf("%s%d/%d match", colGap, n, total)))
+	} else if applied := m.filters[m.view]; applied != "" {
+		parts = append(parts, metaStyle.Render(fmt.Sprintf("filter %q — %d/%d shown (esc clears)", applied, n, total)))
+	}
+	if m.loadErr != nil {
+		parts = append([]string{errStyle.Render("error: " + m.loadErr.Error())}, parts...)
+	}
+	status := strings.Join(parts, colGap)
 
 	var hints string
 	switch {
 	case m.filtering:
 		hints = "enter apply · esc clear · ctrl+c quit"
 	case m.detail:
-		hints = "esc back · r reload · q quit"
+		hints = "esc back · tab/1/2 views · / filter · r reload · q quit"
+	case m.view == viewGroups:
+		hints = "tab/1/2 views · j/k move · / filter · r reload · q quit"
 	default:
 		hints = "tab/1/2 views · j/k move · enter detail · / filter · r reload · q quit"
 	}
@@ -111,7 +121,7 @@ func (m Model) footerLines(w int) []string {
 func (m Model) peersTableLines(w, bodyH int) []string {
 	peers := m.filteredPeers()
 	if len(peers) == 0 {
-		if m.filter.Value() != "" {
+		if m.filters[viewPeers] != "" {
 			return []string{dimStyle.Render("no peers match the filter")}
 		}
 		return []string{dimStyle.Render("no peers enrolled — see 'certhold enroll'")}
@@ -132,10 +142,21 @@ func (m Model) peersTableLines(w, bodyH int) []string {
 			p.Expires.short(),
 		}
 	}
-	widths := fitColumns(headers, rows, []int{0, 1, 3, 4}, w)
+	tableW := w - len(selMarker)
+	flexible := []int{0, 1, 2, 3, 4}
+	dropOrder := []int{5, 7, 4, 3, 2, 1}
+	keep := dropColumns(headers, rows, flexible, dropOrder, tableW)
+	headers = project(headers, keep)
+	for i := range rows {
+		rows[i] = project(rows[i], keep)
+	}
+	widths := fitColumns(headers, rows, remap(flexible, keep), tableW)
 
 	sel := clamp(m.peerIdx, 0, len(peers)-1)
 	visible := bodyH - 1
+	if len(peers) > visible && visible > 2 {
+		visible--
+	}
 	if visible < 1 {
 		visible = 1
 	}
@@ -144,23 +165,30 @@ func (m Model) peersTableLines(w, bodyH int) []string {
 		top = sel - visible + 1
 	}
 
-	lines := []string{renderRow(headers, widths, w, colHeadStyle)}
+	lines := []string{renderRow(noMarker, headers, widths, w, colHeadStyle)}
 	for i := top; i < len(peers) && i < top+visible; i++ {
 		p := peers[i]
+		marker := noMarker
+		if i == sel {
+			marker = selMarker
+		}
 		var line string
 		switch {
 		case i == sel:
-			line = renderRow(rows[i], widths, w, selStyle)
+			line = renderRow(marker, rows[i], widths, w, selStyle)
 		case p.Revoked:
-			line = renderRow(rows[i], widths, w, revokedStyle)
+			line = renderRow(marker, rows[i], widths, w, revokedStyle)
 		case p.Expires.expired():
 			cells := padCells(rows[i], widths)
 			cells[len(cells)-1] = expiredStyle.Render(cells[len(cells)-1])
-			line = strings.Join(cells, colGap)
+			line = truncLine(marker+strings.Join(cells, colGap), w)
 		default:
-			line = renderRow(rows[i], widths, w, lipgloss.NewStyle())
+			line = renderRow(marker, rows[i], widths, w, lipgloss.NewStyle())
 		}
 		lines = append(lines, line)
+	}
+	if len(peers) > visible {
+		lines = append(lines, scrollCue(sel, top, visible, len(peers)))
 	}
 	return lines
 }
@@ -168,7 +196,7 @@ func (m Model) peersTableLines(w, bodyH int) []string {
 func (m Model) groupsLines(w, bodyH int) []string {
 	groups := m.filteredGroups()
 	if len(groups) == 0 {
-		if m.filter.Value() != "" {
+		if m.filters[viewGroups] != "" {
 			return []string{dimStyle.Render("no groups match the filter")}
 		}
 		return []string{dimStyle.Render("no groups — see 'certhold group create'")}
@@ -179,11 +207,14 @@ func (m Model) groupsLines(w, bodyH int) []string {
 	for i, g := range groups {
 		rows[i] = []string{g.Name, fmt.Sprintf("%d", g.PeerCount)}
 	}
-	widths := fitColumns(headers, rows, []int{0}, w)
+	widths := fitColumns(headers, rows, []int{0}, w-len(selMarker))
 
 	const paneH = 4
 	sel := clamp(m.groupIdx, 0, len(groups)-1)
 	visible := bodyH - 1 - paneH
+	if len(groups) > visible && visible > 2 {
+		visible--
+	}
 	if visible < 1 {
 		visible = 1
 	}
@@ -192,13 +223,16 @@ func (m Model) groupsLines(w, bodyH int) []string {
 		top = sel - visible + 1
 	}
 
-	lines := []string{renderRow(headers, widths, w, colHeadStyle)}
+	lines := []string{renderRow(noMarker, headers, widths, w, colHeadStyle)}
 	for i := top; i < len(groups) && i < top+visible; i++ {
-		style := lipgloss.NewStyle()
+		marker, style := noMarker, lipgloss.NewStyle()
 		if i == sel {
-			style = selStyle
+			marker, style = selMarker, selStyle
 		}
-		lines = append(lines, renderRow(rows[i], widths, w, style))
+		lines = append(lines, renderRow(marker, rows[i], widths, w, style))
+	}
+	if len(groups) > visible {
+		lines = append(lines, scrollCue(sel, top, visible, len(groups)))
 	}
 	for len(lines) < bodyH-paneH {
 		lines = append(lines, "")
@@ -210,7 +244,7 @@ func (m Model) groupsLines(w, bodyH int) []string {
 		rule += strings.Repeat("─", pad)
 	}
 	lines = append(lines,
-		dimStyle.Render(rule),
+		truncLine(dimStyle.Render(rule), w),
 		truncLine(labelStyle.Render(fmt.Sprintf("members (%d):", len(g.Members)))+" "+joinOrDash(g.Members), w),
 		truncLine(labelStyle.Render(fmt.Sprintf("allowed inbound by (%d):", len(g.AllowedBy)))+" "+joinOrDash(g.AllowedBy), w),
 		"",
@@ -218,8 +252,8 @@ func (m Model) groupsLines(w, bodyH int) []string {
 	return lines
 }
 
-func (m Model) peerDetailLines(w int) []string {
-	p, ok := m.selectedPeer()
+func (m Model) peerDetailLines(w, bodyH int) []string {
+	p, ok := m.detailPeer()
 	if !ok {
 		return []string{dimStyle.Render("peer no longer present — esc to go back")}
 	}
@@ -235,10 +269,11 @@ func (m Model) peerDetailLines(w int) []string {
 	field := func(label, value string) string {
 		return truncLine(labelStyle.Render(fmt.Sprintf("%-13s", label))+value, w)
 	}
-	return []string{
+	lines := []string{
 		truncLine(titleStyle.Render("peer: "+p.Name), w),
 		"",
 		field("status", status),
+		field("cert", p.Expires.window()),
 		field("address", p.DialHost),
 		field("user", orDash(p.TargetUser)),
 		field("serial", fmt.Sprintf("%d", p.Serial)),
@@ -247,9 +282,25 @@ func (m Model) peerDetailLines(w int) []string {
 		field("groups", joinOrDash(p.Groups)),
 		field("allowed in", joinOrDash(p.Allowed)),
 		field("inbound", yn(p.Inbound)),
-		field("cert", p.Expires.window()),
 		field("pull token", token),
 	}
+	if len(lines) > bodyH && bodyH >= 2 {
+		hidden := len(lines) - (bodyH - 1)
+		lines = append(lines[:bodyH-1:bodyH-1],
+			dimStyle.Render(fmt.Sprintf("… %d more — enlarge the terminal", hidden)))
+	}
+	return lines
+}
+
+func scrollCue(sel, top, visible, total int) string {
+	cue := fmt.Sprintf("%d/%d", sel+1, total)
+	if top > 0 {
+		cue = "▲ " + cue
+	}
+	if top+visible < total {
+		cue += " ▼"
+	}
+	return dimStyle.Render(cue)
 }
 
 func (c certExpiry) short() string {
@@ -317,9 +368,7 @@ func joinOrDash(s []string) string {
 	return strings.Join(sorted, ",")
 }
 
-// fitColumns sizes each column to its widest cell, then shrinks the listed
-// flexible columns (widest first, floor 6) until the table fits the terminal.
-func fitColumns(headers []string, rows [][]string, flexible []int, w int) []int {
+func naturalWidths(headers []string, rows [][]string) []int {
 	widths := make([]int, len(headers))
 	for i, h := range headers {
 		widths[i] = lipgloss.Width(h)
@@ -331,6 +380,77 @@ func fitColumns(headers []string, rows [][]string, flexible []int, w int) []int 
 			}
 		}
 	}
+	return widths
+}
+
+// dropColumns picks which columns survive a narrow terminal: when even
+// shrinking every flexible column to its floor cannot fit the table, whole
+// low-priority columns are dropped (in dropOrder) so the high-priority ones
+// (REVOKED, EXPIRES) stay readable instead of being amputated by the line
+// clamp.
+func dropColumns(headers []string, rows [][]string, flexible, dropOrder []int, w int) []int {
+	nat := naturalWidths(headers, rows)
+	flex := make(map[int]bool, len(flexible))
+	for _, i := range flexible {
+		flex[i] = true
+	}
+	dropped := make(map[int]bool)
+	minTotal := func() int {
+		t, n := 0, 0
+		for i, nw := range nat {
+			if dropped[i] {
+				continue
+			}
+			if flex[i] && nw > minColW {
+				nw = minColW
+			}
+			t += nw
+			n++
+		}
+		return t + (n-1)*len(colGap)
+	}
+	for _, d := range dropOrder {
+		if minTotal() <= w {
+			break
+		}
+		dropped[d] = true
+	}
+	keep := make([]int, 0, len(headers))
+	for i := range headers {
+		if !dropped[i] {
+			keep = append(keep, i)
+		}
+	}
+	return keep
+}
+
+func project(row []string, keep []int) []string {
+	out := make([]string, len(keep))
+	for i, k := range keep {
+		out[i] = row[k]
+	}
+	return out
+}
+
+func remap(idx, keep []int) []int {
+	pos := make(map[int]int, len(keep))
+	for i, k := range keep {
+		pos[k] = i
+	}
+	out := make([]int, 0, len(idx))
+	for _, i := range idx {
+		if p, ok := pos[i]; ok {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// fitColumns sizes each column to its widest cell, then shrinks the listed
+// flexible columns (widest first, floor minColW) until the table fits the
+// terminal.
+func fitColumns(headers []string, rows [][]string, flexible []int, w int) []int {
+	widths := naturalWidths(headers, rows)
 	total := func() int {
 		t := (len(widths) - 1) * len(colGap)
 		for _, cw := range widths {
@@ -341,7 +461,7 @@ func fitColumns(headers []string, rows [][]string, flexible []int, w int) []int 
 	for total() > w {
 		widest := -1
 		for _, i := range flexible {
-			if widths[i] > 6 && (widest == -1 || widths[i] > widths[widest]) {
+			if widths[i] > minColW && (widest == -1 || widths[i] > widths[widest]) {
 				widest = i
 			}
 		}
@@ -362,38 +482,25 @@ func padCells(cells []string, widths []int) []string {
 	return out
 }
 
-// renderRow joins padded cells, truncates the plain text to the terminal
-// width, and only then applies the row style — styled lines can never
-// overflow and wrap.
-func renderRow(cells []string, widths []int, w int, style lipgloss.Style) string {
-	line := strings.Join(padCells(cells, widths), colGap)
+func renderRow(marker string, cells []string, widths []int, w int, style lipgloss.Style) string {
+	line := marker + strings.Join(padCells(cells, widths), colGap)
 	if lipgloss.Width(line) > w {
 		line = truncCell(line, w)
 	}
 	return style.Render(line)
 }
 
+// truncCell clamps a possibly styled string to w terminal cells without
+// splitting escape sequences (the "…" tail counts against w).
 func truncCell(s string, w int) string {
 	if lipgloss.Width(s) <= w {
 		return s
 	}
-	r := []rune(s)
-	for len(r) > 0 && lipgloss.Width(string(r))+1 > w {
-		r = r[:len(r)-1]
-	}
-	return string(r) + "…"
+	return ansi.Truncate(s, w, "…")
 }
 
-// truncLine cuts a possibly styled line to the terminal width without
-// splitting escape sequences, falling back to the raw line when unstyled.
 func truncLine(s string, w int) string {
-	if lipgloss.Width(s) <= w {
-		return s
-	}
-	if !strings.Contains(s, "\x1b") {
-		return truncCell(s, w)
-	}
-	return s
+	return truncCell(s, w)
 }
 
 func fitLines(lines []string, w, h int) []string {
