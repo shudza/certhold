@@ -32,8 +32,12 @@ and manager keys, picks the network interface peers will use, and persists a
 base URL like `https://192.168.1.10:8443`. `serve` then runs the enrollment
 endpoint and prints the self-signed cert's SHA-256 fingerprint.
 
-A systemd unit for `serve` is recommended. The `serve` process never holds the
-CA key, so it can run as an unprivileged, network-facing service.
+A systemd unit for `serve` is recommended so it survives reboots and crashes.
+`sudo certhold install` is the one-command way to get one: it writes
+`/etc/systemd/system/certhold.service` (running `serve` as the invoking
+`SUDO_USER`) and enables and starts it — see [`install`](#install). The `serve`
+process never holds the CA key, so it can run as an unprivileged, network-facing
+service.
 
 ### Activating the manager as a peer
 
@@ -394,6 +398,28 @@ db; never touches the CA key or prompts for a passphrase.
 |---|---|---|
 | `--addr` | `:8443` | Listen address. |
 | `--tls-cert` / `--tls-key` | — | Use your own TLS cert/key. Must be supplied together. |
+
+### `install`
+
+```
+certhold install [--addr :8443] [--tls-cert FILE --tls-key FILE] [--print]
+```
+
+Installs `certhold serve` as a systemd system service so it survives reboots and
+crashes. Writes `/etc/systemd/system/certhold.service` — a unit whose
+`ExecStart` runs `serve` with the resolved binary path, `--db`/`--data-dir`, and
+the flags below, with `User=` set to the invoking `SUDO_USER` (so the endpoint
+runs unprivileged, never as root) — then runs `systemctl daemon-reload` and
+`systemctl enable --now certhold.service` to start it now and on boot. Reports
+whether the unit file changed. Must run as root (try `sudo certhold install`),
+except with `--print`, which renders the unit to stdout and exits with no root
+and no side effects.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--addr` | `:8443` | Listen address baked into the unit's `serve` command. |
+| `--tls-cert` / `--tls-key` | — | Use your own TLS cert/key (resolved to absolute paths in the unit). Must be supplied together. |
+| `--print` | `false` | Print the rendered unit to stdout and exit; no root required, no side effects. |
 
 ## Troubleshooting
 

@@ -70,6 +70,10 @@ certhold init                 # generate the CA, self-enroll, pick the interface
 certhold serve --addr :8443   # run the enroll endpoint over HTTPS (self-signed). Leave it running.
 ```
 
+To keep `serve` running across reboots and crashes, install it as a systemd
+service: `sudo certhold install` writes and enables `certhold.service` (running
+`serve` unprivileged as your user). See [docs/usage.md](docs/usage.md#install).
+
 **2. Enroll two peers** from the manager, both in the `infra` group. Groups are
 created explicitly — `init` bootstraps `manager`, every other group is
 operator-created:
