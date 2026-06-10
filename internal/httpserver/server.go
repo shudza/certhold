@@ -51,6 +51,8 @@ func New(database *db.DB) http.Handler {
 		}
 		tarball(w, r)
 	})
+	mux.HandleFunc("GET /pull/{token}", pullHandler(database))
+	mux.HandleFunc("GET /pull/{token}/rev", pullRevHandler(database))
 	return mux
 }
 
