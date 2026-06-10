@@ -1,0 +1,244 @@
+#!/usr/bin/env bash
+# certhold-cli -- pure-bash client for certhold-managed SSH certificates.
+# Installed on peers at enroll time. Pulls the latest bundle from each
+# configured manager (refresh) and reports identity + staleness (status).
+# Self-updates from the bundle as the very last action of refresh.
+# Requires only OpenSSH-6.5-era tools: bash, curl, tar+gzip, sed, grep,
+# install, mktemp, cmp, ssh-keygen.
+set -euo pipefail
+
+CERTHOLD_CLI_VERSION="1"
+
+SSH_DIR="$HOME/.ssh"
+STAGE=""
+NEW_CLI=""
+SELF_PATH="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
+
+cleanup() {
+  [ -n "$STAGE" ] && rm -rf "$STAGE"
+  return 0
+}
+trap cleanup EXIT
+
+usage() {
+  printf '%s\n' \
+    "certhold-cli ${CERTHOLD_CLI_VERSION} -- client for certhold-managed SSH certificates" \
+    "" \
+    "Usage:" \
+    "  certhold-cli refresh [--instance <key>]   pull the latest bundle per instance and apply it" \
+    "  certhold-cli status  [--instance <key>]   show identity, certificate and staleness per instance" \
+    "  certhold-cli --help                       show this help" \
+    "" \
+    "Instances are discovered from ~/.ssh/certhold_<key>.conf files."
+}
+
+# Appends a newline to $1 iff its last line is unterminated, so a later
+# '>>' append cannot glue the sentinel onto user content.
+ensure_trailing_newline() {
+  local f="$1" line=""
+  [ -s "$f" ] || return 0
+  while IFS= read -r line; do :; done < "$f"
+  [ -z "$line" ] || printf '\n' >> "$f"
+}
+
+atomic_install() {
+  local mode="$1" src="$2" dst="$3" tmp
+  tmp="$(mktemp "${dst}.XXXXXX")" || return 1
+  if ! install -m "$mode" "$src" "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv -f "$tmp" "$dst"
+}
+
+# Sourcing the conf in callers relies on these being function-local there.
+load_conf() {
+  . "$1"
+}
+
+refresh_instance() {
+  local conf="$1"
+  local BASE_URL="" PULL_TOKEN="" INSTANCE_KEY="" PEER_NAME="" LAST_REV=""
+  load_conf "$conf" || { echo "certhold-cli: cannot source $conf" >&2; return 1; }
+  if [ -z "$BASE_URL" ] || [ -z "$PULL_TOKEN" ] || [ -z "$INSTANCE_KEY" ]; then
+    echo "certhold-cli: $conf: missing BASE_URL, PULL_TOKEN or INSTANCE_KEY" >&2
+    return 1
+  fi
+
+  local dir
+  dir="$(mktemp -d "$STAGE/bundle.XXXXXX")" || return 1
+  if ! curl -kfsSL "$BASE_URL/pull/$PULL_TOKEN" | tar -xz -C "$dir"; then
+    echo "certhold-cli: ${PEER_NAME:-?} ($INSTANCE_KEY): failed to pull bundle from $BASE_URL" >&2
+    return 1
+  fi
+
+  local cert="id_ed25519_${INSTANCE_KEY}-cert.pub" f
+  for f in "$cert" config manifest; do
+    if [ ! -f "$dir/$f" ]; then
+      echo "certhold-cli: $INSTANCE_KEY: bundle is missing '$f'" >&2
+      return 1
+    fi
+  done
+
+  atomic_install 644 "$dir/$cert" "$SSH_DIR/$cert" || return 1
+
+  local cfg="$SSH_DIR/config"
+  if [ ! -e "$cfg" ]; then
+    install -m 600 /dev/null "$cfg" || return 1
+  fi
+  sed -i -E "/^# BEGIN certhold ${INSTANCE_KEY}( v[0-9]+)?\$/,/^# END certhold ${INSTANCE_KEY}( v[0-9]+)?\$/d" "$cfg" || return 1
+  ensure_trailing_newline "$cfg" || return 1
+  printf '%s\n' "$(<"$dir/config")" >> "$cfg" || return 1
+
+  local fleet_rev
+  fleet_rev="$(sed -n 's/^FLEET_REV=//p' "$dir/manifest")" || return 1
+  if [ -z "$fleet_rev" ]; then
+    echo "certhold-cli: $INSTANCE_KEY: bundle manifest has no FLEET_REV" >&2
+    return 1
+  fi
+  if grep -q '^LAST_REV=' "$conf"; then
+    sed -i "s/^LAST_REV=.*/LAST_REV=${fleet_rev}/" "$conf" || return 1
+  else
+    printf 'LAST_REV=%s\n' "$fleet_rev" >> "$conf" || return 1
+  fi
+
+  if [ -f "$dir/certhold-cli" ]; then
+    NEW_CLI="$dir/certhold-cli"
+  fi
+
+  echo "refreshed ${PEER_NAME:-?} ($INSTANCE_KEY): rev $fleet_rev, cert ~/.ssh/$cert"
+}
+
+# Must stay the last action of refresh: bash reads scripts incrementally, so
+# the running copy may only be replaced when nothing remains to execute.
+self_update() {
+  local rc="$1"
+  [ -n "$NEW_CLI" ] && [ -f "$NEW_CLI" ] || return 0
+  if cmp -s "$NEW_CLI" "$SELF_PATH"; then
+    return 0
+  fi
+  if atomic_install 755 "$NEW_CLI" "$SELF_PATH"; then
+    echo "certhold-cli: self-updated from bundle at $SELF_PATH"
+    exit "$rc"
+  fi
+  echo "certhold-cli: self-update failed, kept current version at $SELF_PATH" >&2
+  return 0
+}
+
+status_instance() {
+  local conf="$1"
+  local BASE_URL="" PULL_TOKEN="" INSTANCE_KEY="" PEER_NAME="" LAST_REV=""
+  load_conf "$conf" || { echo "certhold-cli: cannot source $conf" >&2; return 1; }
+
+  echo "instance ${INSTANCE_KEY:-?} (${PEER_NAME:-?})"
+  echo "  conf:       $conf"
+
+  local cert="$SSH_DIR/id_ed25519_${INSTANCE_KEY}-cert.pub" info="" serial principals
+  if [ ! -f "$cert" ]; then
+    echo "  cert:       missing ($cert)"
+  elif info="$(ssh-keygen -L -f "$cert" 2>/dev/null)"; then
+    serial="$(printf '%s\n' "$info" | sed -n 's/^[[:space:]]*Serial:[[:space:]]*//p')"
+    principals="$(printf '%s\n' "$info" \
+      | sed -n '/^[[:space:]]*Principals:/,/^[[:space:]]*Critical Options:/p' \
+      | sed -e '1d' -e '$d' -e 's/^[[:space:]]*//')"
+    echo "  cert:       $cert"
+    echo "  serial:     ${serial:-unknown}"
+    if [ -n "$principals" ]; then
+      local p
+      while IFS= read -r p; do
+        echo "  principal:  $p"
+      done <<< "$principals"
+    else
+      echo "  principal:  (none)"
+    fi
+  else
+    echo "  cert:       unreadable ($cert)"
+  fi
+
+  echo "  local rev:  ${LAST_REV:-unknown}"
+  local remote=""
+  if [ -n "$BASE_URL" ] && [ -n "$PULL_TOKEN" ] \
+    && remote="$(curl -kfsSL "$BASE_URL/pull/$PULL_TOKEN/rev" 2>/dev/null)" && [ -n "$remote" ]; then
+    echo "  remote rev: $remote"
+    if [ "${LAST_REV:-}" = "$remote" ]; then
+      echo "  verdict:    up-to-date"
+    else
+      echo "  verdict:    stale (run: certhold-cli refresh)"
+    fi
+  else
+    echo "  remote rev: unknown"
+    echo "  verdict:    manager unreachable"
+  fi
+}
+
+for_each_instance() {
+  local fn="$1" only="$2" conf key found=0 failed=0
+  for conf in "$SSH_DIR"/certhold_*.conf; do
+    [ -e "$conf" ] || continue
+    key="${conf##*/certhold_}"
+    key="${key%.conf}"
+    if [ -n "$only" ] && [ "$key" != "$only" ]; then
+      continue
+    fi
+    found=1
+    if ! "$fn" "$conf"; then
+      failed=1
+    fi
+  done
+  if [ "$found" -eq 0 ]; then
+    echo "certhold-cli: no matching instances ($SSH_DIR/certhold_*.conf)" >&2
+    return 1
+  fi
+  return "$failed"
+}
+
+cmd_refresh() {
+  local only="$1" failed=0
+  STAGE="$(mktemp -d "$SSH_DIR/.certhold-cli.XXXXXX")"
+  for_each_instance refresh_instance "$only" || failed=1
+  self_update "$failed"
+  exit "$failed"
+}
+
+cmd_status() {
+  local only="$1" failed=0
+  for_each_instance status_instance "$only" || failed=1
+  exit "$failed"
+}
+
+main() {
+  if [ $# -eq 0 ]; then
+    usage >&2
+    exit 2
+  fi
+  local cmd="$1" only=""
+  shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --instance)
+        if [ $# -lt 2 ]; then
+          echo "certhold-cli: --instance requires a value" >&2
+          exit 2
+        fi
+        only="$2"
+        shift 2
+        ;;
+      *)
+        echo "certhold-cli: unknown argument: $1" >&2
+        exit 2
+        ;;
+    esac
+  done
+  case "$cmd" in
+    refresh) cmd_refresh "$only" ;;
+    status) cmd_status "$only" ;;
+    --help | -h | help) usage ;;
+    *)
+      echo "certhold-cli: unknown command: $cmd" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+}
+
+main "$@"
