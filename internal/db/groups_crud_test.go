@@ -45,10 +45,10 @@ func TestCreateGroup_InvalidName(t *testing.T) {
 func TestDeleteGroup_CascadesPeerMemberships(t *testing.T) {
 	ctx := t.Context()
 	d := newTestDB(t)
-	if err := d.InsertPeer(ctx, "alpha", 1, "fp", []byte("k"), ""); err != nil {
+	if err := d.InsertPeer(ctx, "alpha", 1, "fp", []byte("k"), "", true, ""); err != nil {
 		t.Fatalf("InsertPeer alpha: %v", err)
 	}
-	if err := d.InsertPeer(ctx, "beta", 2, "fp", []byte("k"), ""); err != nil {
+	if err := d.InsertPeer(ctx, "beta", 2, "fp", []byte("k"), "", true, ""); err != nil {
 		t.Fatalf("InsertPeer beta: %v", err)
 	}
 	if err := d.SetPeerGroups(ctx, "alpha", []string{"infra", "db"}); err != nil {
@@ -102,7 +102,7 @@ func TestDeleteGroup_NotFound(t *testing.T) {
 func TestRenameGroup_Success(t *testing.T) {
 	ctx := t.Context()
 	d := newTestDB(t)
-	if err := d.InsertPeer(ctx, "p", 1, "fp", []byte("k"), ""); err != nil {
+	if err := d.InsertPeer(ctx, "p", 1, "fp", []byte("k"), "", true, ""); err != nil {
 		t.Fatalf("InsertPeer: %v", err)
 	}
 	if err := d.SetPeerGroups(ctx, "p", []string{"old"}); err != nil {
@@ -178,7 +178,7 @@ func TestGetGroupMembersAndAllowedBy_Ordering(t *testing.T) {
 	ctx := t.Context()
 	d := newTestDB(t)
 	for _, n := range []string{"charlie", "alpha", "bravo"} {
-		if err := d.InsertPeer(ctx, n, 1, "fp", []byte("k"), ""); err != nil {
+		if err := d.InsertPeer(ctx, n, 1, "fp", []byte("k"), "", true, ""); err != nil {
 			t.Fatalf("InsertPeer %s: %v", n, err)
 		}
 		if err := d.SetPeerGroups(ctx, n, []string{"infra"}); err != nil {

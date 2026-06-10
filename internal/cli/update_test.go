@@ -101,7 +101,7 @@ func setupUpdateEnv(t *testing.T, peerName string, initialGroups []string, revok
 		t.Fatalf("EnsureInstanceKey: %v", err)
 	}
 	fingerprint := ssh.FingerprintSHA256(sshPub)
-	if err := d.InsertPeer(ctx, peerName, serial, fingerprint, pubAuth, "root"); err != nil {
+	if err := d.InsertPeer(ctx, peerName, serial, fingerprint, pubAuth, "root", true, ""); err != nil {
 		t.Fatalf("InsertPeer: %v", err)
 	}
 	for _, g := range initialGroups {
@@ -194,7 +194,7 @@ func TestUpdateDialsTargetUserForUserModePeer(t *testing.T) {
 		t.Fatalf("db.Open: %v", err)
 	}
 	ctx := context.Background()
-	if err := d.InsertPeer(ctx, "web01", serial, ssh.FingerprintSHA256(sshPub), pubAuth, "deploy"); err != nil {
+	if err := d.InsertPeer(ctx, "web01", serial, ssh.FingerprintSHA256(sshPub), pubAuth, "deploy", true, ""); err != nil {
 		t.Fatalf("InsertPeer: %v", err)
 	}
 	if err := d.EnsureGroup(ctx, "web"); err != nil {
@@ -389,7 +389,7 @@ func setupUpdateUserPeer(t *testing.T, peerName, targetUser string) (dataDir, db
 	if err != nil {
 		t.Fatalf("EnsureInstanceKey: %v", err)
 	}
-	if err := d.InsertPeer(ctx, peerName, 1, ssh.FingerprintSHA256(sshPub), pubAuth, targetUser); err != nil {
+	if err := d.InsertPeer(ctx, peerName, 1, ssh.FingerprintSHA256(sshPub), pubAuth, targetUser, true, ""); err != nil {
 		t.Fatalf("InsertPeer: %v", err)
 	}
 	return dataDir, dbPath, key
@@ -444,7 +444,7 @@ func setupUpdateV2Peer(t *testing.T, peerName, targetUser string) (dataDir, dbPa
 	if err != nil {
 		t.Fatalf("EnsureInstanceKey: %v", err)
 	}
-	if err := d.InsertPeer(ctx, peerName, 1, ssh.FingerprintSHA256(sshPub), pubAuth, targetUser); err != nil {
+	if err := d.InsertPeer(ctx, peerName, 1, ssh.FingerprintSHA256(sshPub), pubAuth, targetUser, true, ""); err != nil {
 		t.Fatalf("InsertPeer: %v", err)
 	}
 	d.Close()
@@ -526,7 +526,7 @@ func setupUpdateEncryptedCAEnv(t *testing.T, peerName string, initialGroups []st
 	if _, err := EnsureInstanceKey(ctx, d); err != nil {
 		t.Fatalf("EnsureInstanceKey: %v", err)
 	}
-	if err := d.InsertPeer(ctx, peerName, serial, ssh.FingerprintSHA256(sshPub), pubAuth, "root"); err != nil {
+	if err := d.InsertPeer(ctx, peerName, serial, ssh.FingerprintSHA256(sshPub), pubAuth, "root", true, ""); err != nil {
 		t.Fatalf("InsertPeer: %v", err)
 	}
 	for _, g := range initialGroups {

@@ -19,6 +19,9 @@ type Peer struct {
 	CreatedAt     time.Time
 	TargetUser    string
 	Address       string
+	Inbound       bool
+	PullToken     string
+	Cert          []byte
 }
 
 // DialHost returns the network address certhold dials to reach this peer:
@@ -34,13 +37,15 @@ func (p *Peer) DialHost() string {
 
 // InsertPeer records a newly enrolled peer. targetUser is the install-time user
 // whose ~/.ssh the peer's files land under (empty until redeemed, "root" for a
-// --user root enrollment). The peer's network address is set separately via
-// SetPeerAddress once known.
-func (db *DB) InsertPeer(ctx context.Context, name string, serial uint64, fingerprint string, authorizedKey []byte, targetUser string) error {
+// --user root enrollment). inbound marks whether other peers may SSH into this
+// one; pullToken is the standing token a client-style peer presents to pull
+// refreshed material (empty for push-managed peers). The peer's network address
+// is set separately via SetPeerAddress once known.
+func (db *DB) InsertPeer(ctx context.Context, name string, serial uint64, fingerprint string, authorizedKey []byte, targetUser string, inbound bool, pullToken string) error {
 	_, err := db.sql.ExecContext(ctx,
-		`INSERT INTO peers(name, cert_serial, pubkey_fingerprint, authorized_key, revoked, created_at, target_user)
-		 VALUES (?, ?, ?, ?, 0, ?, ?)`,
-		name, int64(serial), fingerprint, authorizedKey, time.Now().UTC(), targetUser,
+		`INSERT INTO peers(name, cert_serial, pubkey_fingerprint, authorized_key, revoked, created_at, target_user, inbound, pull_token)
+		 VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?)`,
+		name, int64(serial), fingerprint, authorizedKey, time.Now().UTC(), targetUser, boolToInt(inbound), pullToken,
 	)
 	if err != nil {
 		return fmt.Errorf("insert peer: %w", err)
@@ -48,43 +53,74 @@ func (db *DB) InsertPeer(ctx context.Context, name string, serial uint64, finger
 	return nil
 }
 
-func (db *DB) GetPeer(ctx context.Context, name string) (*Peer, error) {
-	row := db.sql.QueryRowContext(ctx,
-		`SELECT name, cert_serial, pubkey_fingerprint, authorized_key, revoked, created_at, target_user, address
-		 FROM peers WHERE name = ?`, name)
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+const peerColumns = `name, cert_serial, pubkey_fingerprint, authorized_key, revoked, created_at, target_user, address, inbound, pull_token, cert`
+
+func scanPeer(row interface{ Scan(dest ...any) error }) (*Peer, error) {
 	p := &Peer{}
 	var serial int64
-	var revoked int
-	if err := row.Scan(&p.Name, &serial, &p.Fingerprint, &p.AuthorizedKey, &revoked, &p.CreatedAt, &p.TargetUser, &p.Address); err != nil {
+	var revoked, inbound int
+	if err := row.Scan(&p.Name, &serial, &p.Fingerprint, &p.AuthorizedKey, &revoked, &p.CreatedAt, &p.TargetUser, &p.Address, &inbound, &p.PullToken, &p.Cert); err != nil {
+		return nil, err
+	}
+	p.Serial = uint64(serial)
+	p.Revoked = revoked != 0
+	p.Inbound = inbound != 0
+	return p, nil
+}
+
+func (db *DB) GetPeer(ctx context.Context, name string) (*Peer, error) {
+	row := db.sql.QueryRowContext(ctx,
+		`SELECT `+peerColumns+` FROM peers WHERE name = ?`, name)
+	p, err := scanPeer(row)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrPeerNotFound
 		}
 		return nil, fmt.Errorf("get peer: %w", err)
 	}
-	p.Serial = uint64(serial)
-	p.Revoked = revoked != 0
+	return p, nil
+}
+
+// GetPeerByPullToken resolves the peer holding the given standing pull token.
+// An empty token is always not-found: the empty string is the column default for every
+// push-managed peer, so matching it would hand out an arbitrary peer.
+func (db *DB) GetPeerByPullToken(ctx context.Context, token string) (*Peer, error) {
+	if token == "" {
+		return nil, ErrPeerNotFound
+	}
+	row := db.sql.QueryRowContext(ctx,
+		`SELECT `+peerColumns+` FROM peers WHERE pull_token = ?`, token)
+	p, err := scanPeer(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrPeerNotFound
+		}
+		return nil, fmt.Errorf("get peer by pull token: %w", err)
+	}
 	return p, nil
 }
 
 func (db *DB) ListPeers(ctx context.Context) ([]Peer, error) {
 	rows, err := db.sql.QueryContext(ctx,
-		`SELECT name, cert_serial, pubkey_fingerprint, authorized_key, revoked, created_at, target_user, address
-		 FROM peers ORDER BY name`)
+		`SELECT `+peerColumns+` FROM peers ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("list peers: %w", err)
 	}
 	defer rows.Close()
 	var out []Peer
 	for rows.Next() {
-		var p Peer
-		var serial int64
-		var revoked int
-		if err := rows.Scan(&p.Name, &serial, &p.Fingerprint, &p.AuthorizedKey, &revoked, &p.CreatedAt, &p.TargetUser, &p.Address); err != nil {
+		p, err := scanPeer(rows)
+		if err != nil {
 			return nil, fmt.Errorf("scan peer: %w", err)
 		}
-		p.Serial = uint64(serial)
-		p.Revoked = revoked != 0
-		out = append(out, p)
+		out = append(out, *p)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iter peers: %w", err)
@@ -115,6 +151,24 @@ func (db *DB) UpdatePeerCertSerial(ctx context.Context, name string, serial uint
 	n, err := res.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("update peer cert_serial rows: %w", err)
+	}
+	if n == 0 {
+		return ErrPeerNotFound
+	}
+	return nil
+}
+
+// SetPeerCert stores the peer's latest signed certificate (public material)
+// together with its serial so the two never drift apart.
+func (db *DB) SetPeerCert(ctx context.Context, name string, cert []byte, serial uint64) error {
+	res, err := db.sql.ExecContext(ctx,
+		`UPDATE peers SET cert = ?, cert_serial = ? WHERE name = ?`, cert, int64(serial), name)
+	if err != nil {
+		return fmt.Errorf("set peer cert: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set peer cert rows: %w", err)
 	}
 	if n == 0 {
 		return ErrPeerNotFound

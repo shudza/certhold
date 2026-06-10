@@ -324,7 +324,7 @@ func TestEnrollDuplicateName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
-	if err := d.InsertPeer(context.Background(), "new-vm", 1, "fp", []byte("k"), ""); err != nil {
+	if err := d.InsertPeer(context.Background(), "new-vm", 1, "fp", []byte("k"), "", true, ""); err != nil {
 		t.Fatalf("InsertPeer setup: %v", err)
 	}
 	if err := d.Close(); err != nil {

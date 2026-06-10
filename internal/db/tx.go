@@ -52,11 +52,11 @@ func (t *Tx) InsertToken(ctx context.Context, token, peerName, groupsCSV, target
 	return nil
 }
 
-func (t *Tx) InsertPeer(ctx context.Context, name string, serial uint64, fingerprint string, authorizedKey []byte, targetUser string) error {
+func (t *Tx) InsertPeer(ctx context.Context, name string, serial uint64, fingerprint string, authorizedKey []byte, targetUser string, inbound bool, pullToken string) error {
 	_, err := t.tx.ExecContext(ctx,
-		`INSERT INTO peers(name, cert_serial, pubkey_fingerprint, authorized_key, revoked, created_at, target_user)
-		 VALUES (?, ?, ?, ?, 0, ?, ?)`,
-		name, int64(serial), fingerprint, authorizedKey, time.Now().UTC(), targetUser,
+		`INSERT INTO peers(name, cert_serial, pubkey_fingerprint, authorized_key, revoked, created_at, target_user, inbound, pull_token)
+		 VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?)`,
+		name, int64(serial), fingerprint, authorizedKey, time.Now().UTC(), targetUser, boolToInt(inbound), pullToken,
 	)
 	if err != nil {
 		return fmt.Errorf("insert peer: %w", err)

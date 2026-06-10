@@ -86,7 +86,7 @@ const testInstanceKey = "0123456789abcdef"
 func (e *testEnv) seedPeerRow(t *testing.T, name, targetUser string) {
 	t.Helper()
 	ctx := context.Background()
-	if err := e.db.InsertPeer(ctx, name, 1, "fp-"+name, []byte("authk-"+name), targetUser); err != nil {
+	if err := e.db.InsertPeer(ctx, name, 1, "fp-"+name, []byte("authk-"+name), targetUser, true, ""); err != nil {
 		t.Fatalf("InsertPeer: %v", err)
 	}
 }

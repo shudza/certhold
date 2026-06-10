@@ -208,7 +208,7 @@ func seedGroupDB(t *testing.T, allowed []string) (dataDir, dbPath string) {
 	}
 	defer d.Close()
 	ctx := context.Background()
-	if err := d.InsertPeer(ctx, "peer1", 1, "fp", []byte("k"), "alice"); err != nil {
+	if err := d.InsertPeer(ctx, "peer1", 1, "fp", []byte("k"), "alice", true, ""); err != nil {
 		t.Fatalf("InsertPeer: %v", err)
 	}
 	for _, g := range allowed {
@@ -418,7 +418,7 @@ func TestGroupSSHOptionsPathsMatchInitLayout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
-	if err := d.InsertPeer(context.Background(), "peer1", 1, "fp", []byte("k"), "alice"); err != nil {
+	if err := d.InsertPeer(context.Background(), "peer1", 1, "fp", []byte("k"), "alice", true, ""); err != nil {
 		t.Fatalf("InsertPeer: %v", err)
 	}
 	key, _, _ := d.GetMeta(context.Background(), db.MetaInstanceKey)
@@ -461,7 +461,7 @@ func setupGroupUserModeDB(t *testing.T, peerName, targetUser string, allowed []s
 		t.Fatalf("db.Open: %v", err)
 	}
 	defer d.Close()
-	if err := d.InsertPeer(context.Background(), peerName, 1, "fp", []byte("k"), targetUser); err != nil {
+	if err := d.InsertPeer(context.Background(), peerName, 1, "fp", []byte("k"), targetUser, true, ""); err != nil {
 		t.Fatalf("InsertPeer: %v", err)
 	}
 	for _, g := range allowed {
@@ -560,7 +560,7 @@ func TestGroupAllow_UserMode_EncryptedCA_NoCAPassphrase(t *testing.T) {
 		t.Fatalf("db.Open: %v", err)
 	}
 	ctx := context.Background()
-	if err := d.InsertPeer(ctx, "vmU", 1, "fp", []byte("k"), "alice"); err != nil {
+	if err := d.InsertPeer(ctx, "vmU", 1, "fp", []byte("k"), "alice", true, ""); err != nil {
 		t.Fatalf("InsertPeer: %v", err)
 	}
 	if err := d.EnsureGroup(ctx, "infra"); err != nil {
@@ -616,7 +616,7 @@ func TestGroupAllow_RootUser_RewritesAuthorizedKeys_NoReload(t *testing.T) {
 		t.Fatalf("db.Open: %v", err)
 	}
 	ctx := context.Background()
-	if err := d.InsertPeer(ctx, "vmRoot", 1, "fp", []byte("k"), "root"); err != nil {
+	if err := d.InsertPeer(ctx, "vmRoot", 1, "fp", []byte("k"), "root", true, ""); err != nil {
 		t.Fatalf("InsertPeer: %v", err)
 	}
 	if err := d.EnsureGroup(ctx, "infra"); err != nil {
@@ -814,10 +814,10 @@ func TestGroupShow_HappyPath(t *testing.T) {
 	if err := d.CreateGroup(ctx, "infra"); err != nil {
 		t.Fatalf("CreateGroup: %v", err)
 	}
-	if err := d.InsertPeer(ctx, "alpha", 1, "fp1", []byte("k"), "alice"); err != nil {
+	if err := d.InsertPeer(ctx, "alpha", 1, "fp1", []byte("k"), "alice", true, ""); err != nil {
 		t.Fatalf("InsertPeer alpha: %v", err)
 	}
-	if err := d.InsertPeer(ctx, "beta", 1, "fp2", []byte("k"), "bob"); err != nil {
+	if err := d.InsertPeer(ctx, "beta", 1, "fp2", []byte("k"), "bob", true, ""); err != nil {
 		t.Fatalf("InsertPeer beta: %v", err)
 	}
 	if err := d.SetPeerGroups(ctx, "alpha", []string{"infra"}); err != nil {
@@ -1028,13 +1028,13 @@ func TestGroupDelete_CascadesMembershipAndAllowList(t *testing.T) {
 	alphaKey := freshPeerKey(t)
 	betaKey := freshPeerKey(t)
 	gammaKey := freshPeerKey(t)
-	if err := d.InsertPeer(ctx, "alpha", 1, "fp-a", alphaKey, "alice"); err != nil {
+	if err := d.InsertPeer(ctx, "alpha", 1, "fp-a", alphaKey, "alice", true, ""); err != nil {
 		t.Fatalf("InsertPeer alpha: %v", err)
 	}
-	if err := d.InsertPeer(ctx, "beta", 1, "fp-b", betaKey, "bob"); err != nil {
+	if err := d.InsertPeer(ctx, "beta", 1, "fp-b", betaKey, "bob", true, ""); err != nil {
 		t.Fatalf("InsertPeer beta: %v", err)
 	}
-	if err := d.InsertPeer(ctx, "gamma", 1, "fp-g", gammaKey, "carol"); err != nil {
+	if err := d.InsertPeer(ctx, "gamma", 1, "fp-g", gammaKey, "carol", true, ""); err != nil {
 		t.Fatalf("InsertPeer gamma: %v", err)
 	}
 	if err := d.SetPeerGroups(ctx, "alpha", []string{"web", "infra"}); err != nil {
@@ -1125,7 +1125,7 @@ func TestGroupDelete_StragglerKeepsGroup(t *testing.T) {
 		t.Fatalf("EnsureGroup web: %v", err)
 	}
 	alphaKey := freshPeerKey(t)
-	if err := d.InsertPeer(ctx, "alpha", 1, "fp-a", alphaKey, "alice"); err != nil {
+	if err := d.InsertPeer(ctx, "alpha", 1, "fp-a", alphaKey, "alice", true, ""); err != nil {
 		t.Fatalf("InsertPeer alpha: %v", err)
 	}
 	if err := d.SetPeerGroups(ctx, "alpha", []string{"web"}); err != nil {
@@ -1187,13 +1187,13 @@ func TestGroupRename_Success(t *testing.T) {
 	alphaKey := freshPeerKey(t)
 	betaKey := freshPeerKey(t)
 	gammaKey := freshPeerKey(t)
-	if err := d.InsertPeer(ctx, "alpha", 1, "fp-a", alphaKey, "alice"); err != nil {
+	if err := d.InsertPeer(ctx, "alpha", 1, "fp-a", alphaKey, "alice", true, ""); err != nil {
 		t.Fatalf("InsertPeer alpha: %v", err)
 	}
-	if err := d.InsertPeer(ctx, "beta", 1, "fp-b", betaKey, "bob"); err != nil {
+	if err := d.InsertPeer(ctx, "beta", 1, "fp-b", betaKey, "bob", true, ""); err != nil {
 		t.Fatalf("InsertPeer beta: %v", err)
 	}
-	if err := d.InsertPeer(ctx, "gamma", 1, "fp-g", gammaKey, "carol"); err != nil {
+	if err := d.InsertPeer(ctx, "gamma", 1, "fp-g", gammaKey, "carol", true, ""); err != nil {
 		t.Fatalf("InsertPeer gamma: %v", err)
 	}
 	if err := d.SetPeerGroups(ctx, "alpha", []string{"web"}); err != nil {
@@ -1288,7 +1288,7 @@ func TestGroupRename_TargetExists(t *testing.T) {
 		t.Fatalf("EnsureGroup public: %v", err)
 	}
 	alphaKey := freshPeerKey(t)
-	if err := d.InsertPeer(ctx, "alpha", 1, "fp-a", alphaKey, "alice"); err != nil {
+	if err := d.InsertPeer(ctx, "alpha", 1, "fp-a", alphaKey, "alice", true, ""); err != nil {
 		t.Fatalf("InsertPeer alpha: %v", err)
 	}
 	if err := d.SetPeerGroups(ctx, "alpha", []string{"web"}); err != nil {
@@ -1442,7 +1442,7 @@ func TestGroupRename_NoOpSameName(t *testing.T) {
 		t.Fatalf("EnsureGroup web: %v", err)
 	}
 	alphaKey := freshPeerKey(t)
-	if err := d.InsertPeer(ctx, "alpha", 1, "fp-a", alphaKey, "alice"); err != nil {
+	if err := d.InsertPeer(ctx, "alpha", 1, "fp-a", alphaKey, "alice", true, ""); err != nil {
 		t.Fatalf("InsertPeer alpha: %v", err)
 	}
 	if err := d.SetPeerGroups(ctx, "alpha", []string{"web"}); err != nil {
@@ -1489,7 +1489,7 @@ func TestGroupRename_StragglerKeepsRenameCommitted(t *testing.T) {
 		t.Fatalf("EnsureGroup web: %v", err)
 	}
 	alphaKey := freshPeerKey(t)
-	if err := d.InsertPeer(ctx, "alpha", 1, "fp-a", alphaKey, "alice"); err != nil {
+	if err := d.InsertPeer(ctx, "alpha", 1, "fp-a", alphaKey, "alice", true, ""); err != nil {
 		t.Fatalf("InsertPeer alpha: %v", err)
 	}
 	if err := d.SetPeerGroups(ctx, "alpha", []string{"web"}); err != nil {
@@ -1540,10 +1540,10 @@ func TestGroupRename_SkipsRevokedPeers(t *testing.T) {
 	}
 	aliveKey := freshPeerKey(t)
 	deadKey := freshPeerKey(t)
-	if err := d.InsertPeer(ctx, "alive", 1, "fp-l", aliveKey, "alice"); err != nil {
+	if err := d.InsertPeer(ctx, "alive", 1, "fp-l", aliveKey, "alice", true, ""); err != nil {
 		t.Fatalf("InsertPeer alive: %v", err)
 	}
-	if err := d.InsertPeer(ctx, "dead", 1, "fp-d", deadKey, "bob"); err != nil {
+	if err := d.InsertPeer(ctx, "dead", 1, "fp-d", deadKey, "bob", true, ""); err != nil {
 		t.Fatalf("InsertPeer dead: %v", err)
 	}
 	if err := d.SetPeerGroups(ctx, "alive", []string{"web"}); err != nil {
@@ -1618,10 +1618,10 @@ func TestGroupDelete_SkipsRevokedPeers(t *testing.T) {
 	}
 	aliveKey := freshPeerKey(t)
 	deadKey := freshPeerKey(t)
-	if err := d.InsertPeer(ctx, "alive", 1, "fp-l", aliveKey, "alice"); err != nil {
+	if err := d.InsertPeer(ctx, "alive", 1, "fp-l", aliveKey, "alice", true, ""); err != nil {
 		t.Fatalf("InsertPeer alive: %v", err)
 	}
-	if err := d.InsertPeer(ctx, "dead", 1, "fp-d", deadKey, "bob"); err != nil {
+	if err := d.InsertPeer(ctx, "dead", 1, "fp-d", deadKey, "bob", true, ""); err != nil {
 		t.Fatalf("InsertPeer dead: %v", err)
 	}
 	if err := d.SetPeerGroups(ctx, "alive", []string{"web"}); err != nil {
