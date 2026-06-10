@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 6
+const schemaVersion = 7
 
 // The peers table extends PLAN.md with authorized_key BLOB and created_at TIMESTAMP.
 // We persist the peer's pubkey so certhold can re-sign certs on update/rekey without
@@ -17,7 +17,10 @@ const schemaVersion = 6
 // vestigial mode/layout_version/last_krl_version columns and the dead krl_version
 // table, leaving the clean single-user-mode schema (schema_version=6). Running the
 // add* steps before the drop keeps the migration correct for both fresh and pre-existing
-// databases without rewriting the base CREATE statements.
+// databases without rewriting the base CREATE statements. addClientPeerColumns then
+// adds the client-peer columns (inbound/pull_token/cert) on top of the rebuilt peers
+// table (schema_version=7); it must run AFTER dropDeadColumns or the rebuild would
+// discard them.
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY,
@@ -90,6 +93,9 @@ func (db *DB) migrate(ctx context.Context) error {
 	if err := db.dropDeadColumns(ctx); err != nil {
 		return err
 	}
+	if err := db.addClientPeerColumns(ctx); err != nil {
+		return err
+	}
 	if _, err := db.sql.ExecContext(ctx,
 		`INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)`,
 		fmt.Sprintf("%d", schemaVersion),
@@ -158,6 +164,32 @@ func (db *DB) addAddressColumn(ctx context.Context) error {
 		if _, err := db.sql.ExecContext(ctx,
 			`ALTER TABLE peers ADD COLUMN address TEXT NOT NULL DEFAULT ''`); err != nil {
 			return fmt.Errorf("alter peers add address: %w", err)
+		}
+	}
+	return nil
+}
+
+func (db *DB) addClientPeerColumns(ctx context.Context) error {
+	has, err := db.tableHasColumns(ctx, "peers")
+	if err != nil {
+		return err
+	}
+	if !has["inbound"] {
+		if _, err := db.sql.ExecContext(ctx,
+			`ALTER TABLE peers ADD COLUMN inbound INTEGER NOT NULL DEFAULT 1`); err != nil {
+			return fmt.Errorf("alter peers add inbound: %w", err)
+		}
+	}
+	if !has["pull_token"] {
+		if _, err := db.sql.ExecContext(ctx,
+			`ALTER TABLE peers ADD COLUMN pull_token TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("alter peers add pull_token: %w", err)
+		}
+	}
+	if !has["cert"] {
+		if _, err := db.sql.ExecContext(ctx,
+			`ALTER TABLE peers ADD COLUMN cert BLOB`); err != nil {
+			return fmt.Errorf("alter peers add cert: %w", err)
 		}
 	}
 	return nil

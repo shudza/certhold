@@ -141,8 +141,8 @@ func TestMigratePreV3AddsTarballColumnPreservingRows(t *testing.T) {
 	if err := raw.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='schema_version'`).Scan(&ver); err != nil {
 		t.Fatalf("read schema_version: %v", err)
 	}
-	if ver != "6" {
-		t.Errorf("schema_version = %q, want \"6\"", ver)
+	if ver != "7" {
+		t.Errorf("schema_version = %q, want \"7\"", ver)
 	}
 
 	if err := raw.Close(); err != nil {
@@ -245,8 +245,8 @@ func TestMigratePreV4PreservesRowsDroppingDeadColumns(t *testing.T) {
 	if err := raw.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='schema_version'`).Scan(&ver); err != nil {
 		t.Fatalf("read schema_version: %v", err)
 	}
-	if ver != "6" {
-		t.Errorf("schema_version = %q, want \"6\"", ver)
+	if ver != "7" {
+		t.Errorf("schema_version = %q, want \"7\"", ver)
 	}
 
 	if err := raw.Close(); err != nil {
@@ -378,8 +378,8 @@ func TestMigratePreV5AddsAddressColumnPreservingRows(t *testing.T) {
 	if err := raw.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='schema_version'`).Scan(&ver); err != nil {
 		t.Fatalf("read schema_version: %v", err)
 	}
-	if ver != "6" {
-		t.Errorf("schema_version = %q, want \"6\"", ver)
+	if ver != "7" {
+		t.Errorf("schema_version = %q, want \"7\"", ver)
 	}
 
 	if err := raw.Close(); err != nil {
@@ -648,8 +648,8 @@ func TestMigrateV5DropsDeadColumnsPreservingRows(t *testing.T) {
 	if err := raw.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='schema_version'`).Scan(&ver); err != nil {
 		t.Fatalf("read schema_version: %v", err)
 	}
-	if ver != "6" {
-		t.Errorf("schema_version = %q, want \"6\"", ver)
+	if ver != "7" {
+		t.Errorf("schema_version = %q, want \"7\"", ver)
 	}
 
 	// Foreign keys clean.
@@ -660,6 +660,172 @@ func TestMigrateV5DropsDeadColumnsPreservingRows(t *testing.T) {
 	defer fkRows.Close()
 	if fkRows.Next() {
 		t.Error("foreign_key_check reported a violation after migrate")
+	}
+
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+}
+
+// v6SchemaSQL is the clean schema_version=6 shape left by dropDeadColumns: no
+// vestigial columns, no krl_version table, and none of the client-peer columns
+// (inbound/pull_token/cert) added at schema_version=7.
+const v6SchemaSQL = `
+CREATE TABLE meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+CREATE TABLE peers (
+  name TEXT PRIMARY KEY,
+  cert_serial INTEGER NOT NULL,
+  pubkey_fingerprint TEXT NOT NULL,
+  authorized_key BLOB NOT NULL,
+  revoked INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMP NOT NULL,
+  target_user TEXT NOT NULL DEFAULT '',
+  address TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE groups (
+  name TEXT PRIMARY KEY
+);
+CREATE TABLE peer_groups (
+  peer_name TEXT NOT NULL REFERENCES peers(name),
+  group_name TEXT NOT NULL REFERENCES groups(name),
+  PRIMARY KEY (peer_name, group_name)
+);
+CREATE TABLE peer_allowed_groups (
+  peer_name TEXT NOT NULL REFERENCES peers(name),
+  group_name TEXT NOT NULL REFERENCES groups(name),
+  PRIMARY KEY (peer_name, group_name)
+);
+CREATE TABLE tokens (
+  token TEXT PRIMARY KEY,
+  peer_name TEXT NOT NULL,
+  groups TEXT NOT NULL,
+  tarball BLOB,
+  consumed INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMP NOT NULL,
+  target_user TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE ca (
+  version INTEGER PRIMARY KEY,
+  active INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMP NOT NULL
+);
+`
+
+func openV6DB(t *testing.T, path string) *sql.DB {
+	t.Helper()
+	raw, err := sql.Open("sqlite", path+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
+	if err != nil {
+		t.Fatalf("open raw sqlite: %v", err)
+	}
+	raw.SetMaxOpenConns(1)
+	ctx := context.Background()
+	if _, err := raw.ExecContext(ctx, v6SchemaSQL); err != nil {
+		t.Fatalf("apply v6 schema: %v", err)
+	}
+	if _, err := raw.ExecContext(ctx,
+		`INSERT INTO meta(key, value) VALUES('schema_version', '6')`); err != nil {
+		t.Fatalf("set schema_version=6: %v", err)
+	}
+	now := time.Now().UTC()
+	if _, err := raw.ExecContext(ctx,
+		`INSERT INTO peers(name, cert_serial, pubkey_fingerprint, authorized_key, revoked, created_at, target_user, address)
+		 VALUES('delta', 13, 'SHA256:jkl', ?, 0, ?, 'alice', '10.0.0.7')`,
+		[]byte("ssh-ed25519 AAAA-delta"), now); err != nil {
+		t.Fatalf("insert v6 peer: %v", err)
+	}
+	return raw
+}
+
+// TestMigrateV6AddsClientPeerColumns starts from a clean schema_version=6 db and
+// asserts migrate adds the inbound/pull_token/cert columns with the right defaults,
+// preserves the seeded row (reading back inbound=true, empty pull_token, nil cert),
+// bumps schema_version to 7, and is idempotent.
+func TestMigrateV6AddsClientPeerColumns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v6.sqlite")
+	raw := openV6DB(t, path)
+
+	ctx := context.Background()
+	if cols, err := (&DB{sql: raw}).tableHasColumns(ctx, "peers"); err != nil {
+		t.Fatalf("tableHasColumns: %v", err)
+	} else if cols["inbound"] || cols["pull_token"] || cols["cert"] {
+		t.Fatal("test precondition: v6 peers table must NOT have inbound/pull_token/cert columns")
+	}
+
+	d := &DB{sql: raw}
+	for i := 0; i < 2; i++ {
+		if err := d.migrate(ctx); err != nil {
+			t.Fatalf("migrate run %d: %v", i+1, err)
+		}
+	}
+
+	type colInfo struct {
+		notnull int
+		dflt    any
+	}
+	got := map[string]colInfo{}
+	rows, err := raw.QueryContext(ctx, "PRAGMA table_info(peers)")
+	if err != nil {
+		t.Fatalf("pragma: %v", err)
+	}
+	for rows.Next() {
+		var cid, nn, pk int
+		var name, ctype string
+		var dv any
+		if err := rows.Scan(&cid, &name, &ctype, &nn, &dv, &pk); err != nil {
+			t.Fatalf("scan pragma: %v", err)
+		}
+		got[name] = colInfo{notnull: nn, dflt: dv}
+	}
+	rows.Close()
+	want := map[string]struct {
+		notnull int
+		dflt    string
+	}{
+		"inbound":    {notnull: 1, dflt: "1"},
+		"pull_token": {notnull: 1, dflt: "''"},
+		"cert":       {notnull: 0, dflt: "<nil>"},
+	}
+	for col, w := range want {
+		ci, ok := got[col]
+		if !ok {
+			t.Errorf("peers.%s missing after migrate", col)
+			continue
+		}
+		if ci.notnull != w.notnull {
+			t.Errorf("peers.%s notnull = %d, want %d", col, ci.notnull, w.notnull)
+		}
+		if fmt.Sprintf("%v", ci.dflt) != w.dflt {
+			t.Errorf("peers.%s default = %v, want %s", col, ci.dflt, w.dflt)
+		}
+	}
+
+	p, err := d.GetPeer(ctx, "delta")
+	if err != nil {
+		t.Fatalf("GetPeer after migrate: %v", err)
+	}
+	if p.Serial != 13 || p.Fingerprint != "SHA256:jkl" || string(p.AuthorizedKey) != "ssh-ed25519 AAAA-delta" ||
+		p.Revoked || p.TargetUser != "alice" || p.Address != "10.0.0.7" {
+		t.Errorf("peer row not preserved: %+v", p)
+	}
+	if !p.Inbound {
+		t.Error("migrated peer should default to Inbound=true")
+	}
+	if p.PullToken != "" {
+		t.Errorf("PullToken = %q, want empty for a migrated row", p.PullToken)
+	}
+	if p.Cert != nil {
+		t.Errorf("Cert = %v, want nil for a migrated row", p.Cert)
+	}
+
+	var ver string
+	if err := raw.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='schema_version'`).Scan(&ver); err != nil {
+		t.Fatalf("read schema_version: %v", err)
+	}
+	if ver != "7" {
+		t.Errorf("schema_version = %q, want \"7\"", ver)
 	}
 
 	if err := raw.Close(); err != nil {

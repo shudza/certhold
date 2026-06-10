@@ -69,7 +69,7 @@ func TestRevokeTriggersRekey_NoKRL(t *testing.T) {
 	key, _, _ := d.GetMeta(ctx, db.MetaInstanceKey)
 	for _, name := range []string{"alpha", "beta"} {
 		_, pubAuth, _, _ := ca.GeneratePeerKey()
-		if err := d.InsertPeer(ctx, name, 100, "fp-"+name, pubAuth, "root"); err != nil {
+		if err := d.InsertPeer(ctx, name, 100, "fp-"+name, pubAuth, "root", true, ""); err != nil {
 			t.Fatalf("InsertPeer %s: %v", name, err)
 		}
 		_ = d.EnsureGroup(ctx, "infra")
@@ -171,7 +171,7 @@ func TestRevokeStragglerStillCompletes(t *testing.T) {
 	// alpha is revoked; beta is the unreachable straggler; gamma is reachable.
 	for _, name := range []string{"alpha", "beta", "gamma"} {
 		_, pubAuth, _, _ := ca.GeneratePeerKey()
-		if err := d.InsertPeer(ctx, name, 100, "fp-"+name, pubAuth, "root"); err != nil {
+		if err := d.InsertPeer(ctx, name, 100, "fp-"+name, pubAuth, "root", true, ""); err != nil {
 			t.Fatalf("InsertPeer %s: %v", name, err)
 		}
 		_ = d.EnsureGroup(ctx, "infra")

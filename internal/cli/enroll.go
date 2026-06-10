@@ -128,7 +128,7 @@ func newEnrollCmd() *cobra.Command {
 				if err := tx.InsertToken(ctx, tok, name, strings.Join(groups, ","), targetUser, tarball); err != nil {
 					return err
 				}
-				if err := tx.InsertPeer(ctx, name, serial, fingerprint, pubAuth, targetUser); err != nil {
+				if err := tx.InsertPeer(ctx, name, serial, fingerprint, pubAuth, targetUser, true, ""); err != nil {
 					return fmt.Errorf("insert peer: %w", err)
 				}
 				if address != "" {
