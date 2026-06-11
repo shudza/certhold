@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -17,6 +18,7 @@ const (
 	viewPeers view = iota
 	viewGroups
 	viewStatus
+	viewNet
 	viewCount
 )
 
@@ -41,8 +43,16 @@ type Model struct {
 	peerIdx    int
 	groupIdx   int
 
-	health *http.Client
-	serve  *healthMsg
+	health    *http.Client
+	serve     *healthMsg
+	healthSeq int
+
+	probe       ProbeFn
+	tick        func(gen int) tea.Cmd
+	now         func() time.Time
+	probes      map[string]probeResult
+	probeGen    int
+	probePaused bool
 
 	filtering bool
 	filter    textinput.Model
@@ -63,6 +73,10 @@ func NewModel(ctx context.Context, data fleetData, reload reloader) Model {
 		data:   data,
 		view:   viewPeers,
 		health: defaultHealthClient(),
+		probe:  defaultProbe,
+		tick:   defaultTick,
+		now:    time.Now,
+		probes: map[string]probeResult{},
 		filter: ti,
 	}
 }
@@ -106,7 +120,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clampSelection()
 		return m, nil
 	case healthMsg:
+		if msg.seq != m.healthSeq {
+			return m, nil
+		}
 		m.serve = &msg
+		return m, nil
+	case probeTickMsg:
+		if m.view != viewNet || m.probePaused || msg.gen != m.probeGen {
+			return m, nil
+		}
+		return m, m.startSweep()
+	case probeResultMsg:
+		m.applyProbeResult(msg)
 		return m, nil
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -145,8 +170,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "tab":
 		m.view = (m.view + 1) % viewCount
 		m.closeDetail()
-		if m.view == viewStatus {
+		switch m.view {
+		case viewStatus:
 			return m, m.healthCmd()
+		case viewNet:
+			return m, m.enterNetCmd()
 		}
 		return m, nil
 	case "1":
@@ -161,6 +189,24 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.view = viewStatus
 		m.closeDetail()
 		return m, m.healthCmd()
+	case "4":
+		m.view = viewNet
+		m.closeDetail()
+		return m, m.enterNetCmd()
+	case "P":
+		if m.view != viewNet {
+			return m, nil
+		}
+		return m, m.startSweep()
+	case "p":
+		if m.view != viewNet {
+			return m, nil
+		}
+		m.probePaused = !m.probePaused
+		if m.probePaused {
+			return m, nil
+		}
+		return m, m.startSweep()
 	case "j", "down":
 		m.move(1)
 		return m, nil
@@ -185,7 +231,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "/":
-		if m.view == viewStatus {
+		if m.view == viewStatus || m.view == viewNet {
 			return m, nil
 		}
 		m.filtering = true

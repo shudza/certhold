@@ -130,8 +130,12 @@ func TestViewSwitching(t *testing.T) {
 		t.Fatalf("after second tab view = %v, want status", m.view)
 	}
 	m = press(t, m, "tab")
+	if m.view != viewNet {
+		t.Fatalf("after third tab view = %v, want net", m.view)
+	}
+	m = press(t, m, "tab")
 	if m.view != viewPeers {
-		t.Fatalf("after third tab view = %v, want peers", m.view)
+		t.Fatalf("after fourth tab view = %v, want peers", m.view)
 	}
 }
 
@@ -364,6 +368,7 @@ func TestResizeKeepsLayout(t *testing.T) {
 			"detail":    press(t, m, "enter"),
 			"groups":    press(t, m, "2"),
 			"status":    press(t, m, "3"),
+			"net":       press(t, m, "4"),
 			"filtering": press(t, m, "/", "a"),
 		}
 		for name, state := range states {
@@ -519,7 +524,7 @@ func TestFooterHintsPerState(t *testing.T) {
 	}
 	d := press(t, m, "enter")
 	dv := d.View()
-	for _, want := range []string{"esc back", "tab/1/2/3 views", "/ filter"} {
+	for _, want := range []string{"esc back", "tab/1/2/3/4 views", "/ filter"} {
 		if !strings.Contains(dv, want) {
 			t.Errorf("detail hints missing %q:\n%s", want, dv)
 		}
