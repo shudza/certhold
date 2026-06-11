@@ -24,6 +24,7 @@ type healthInfo struct {
 }
 
 type healthMsg struct {
+	seq  int
 	info healthInfo
 	err  error
 }
@@ -59,14 +60,19 @@ func fetchHealth(ctx context.Context, client *http.Client, baseURL string) (heal
 	return info, nil
 }
 
-func (m Model) healthCmd() tea.Cmd {
+// healthCmd numbers each fetch and clears the shown result so the view reads
+// "checking…" while a refetch is in flight; a result from a superseded fetch
+// is dropped on arrival instead of overwriting a newer one.
+func (m *Model) healthCmd() tea.Cmd {
 	if m.data.BaseURL == "" {
 		return nil
 	}
-	ctx, client, baseURL := m.ctx, m.health, m.data.BaseURL
+	m.healthSeq++
+	m.serve = nil
+	seq, ctx, client, baseURL := m.healthSeq, m.ctx, m.health, m.data.BaseURL
 	return func() tea.Msg {
 		info, err := fetchHealth(ctx, client, baseURL)
-		return healthMsg{info: info, err: err}
+		return healthMsg{seq: seq, info: info, err: err}
 	}
 }
 
@@ -96,24 +102,27 @@ func (m Model) statusLines(w, bodyH int) []string {
 	field := func(label, value string) string {
 		return truncLine(labelStyle.Render(fmt.Sprintf("%-13s", label))+value, w)
 	}
-	certs := fmt.Sprintf("%d expired · %d expiring ≤30d", expired, expiring)
+	expiredSeg := fmt.Sprintf("%d expired", expired)
 	if expired > 0 {
-		certs = expiredStyle.Render(fmt.Sprintf("%d expired", expired)) +
-			fmt.Sprintf(" · %d expiring ≤30d", expiring)
+		expiredSeg = expiredStyle.Render(expiredSeg)
 	}
-	lines := []string{
+	expiringSeg := fmt.Sprintf("%d expiring ≤30d", expiring)
+	if expiring > 0 {
+		expiringSeg = warnStyle.Render(expiringSeg)
+	}
+	// SERVE leads and sections pack without separators so liveness (incl.
+	// STALE/down) survives short terminals, which clip from the bottom.
+	lines := []string{truncLine(colHeadStyle.Render("SERVE"), w)}
+	lines = append(lines, m.serveLines(w)...)
+	lines = append(lines,
 		truncLine(colHeadStyle.Render("FLEET"), w),
 		field("peers", fmt.Sprintf("%d total · %d inbound · %d client", len(m.data.Peers), inbound, clients)),
 		field("revoked", fmt.Sprintf("%d", revoked)),
-		field("certs", certs),
-		"",
+		field("certs", expiredSeg+" · "+expiringSeg),
 		truncLine(colHeadStyle.Render("MANAGER"), w),
 		field("fleet rev", fmt.Sprintf("%d", m.data.FleetRev)),
 		field("ca", ca),
-		"",
-		truncLine(colHeadStyle.Render("SERVE"), w),
-	}
-	lines = append(lines, m.serveLines(w)...)
+	)
 	if len(lines) > bodyH && bodyH >= 2 {
 		hidden := len(lines) - (bodyH - 1)
 		lines = append(lines[:bodyH-1:bodyH-1],

@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -191,7 +192,7 @@ func TestStatusTabAndFooter(t *testing.T) {
 	if !strings.Contains(v, "[3 status]") {
 		t.Fatalf("status tab missing textual marker:\n%s", v)
 	}
-	if !strings.Contains(v, "tab/1/2/3 views · r refresh · q quit") {
+	if !strings.Contains(v, "tab/1/2/3/4 views · r refresh · q quit") {
 		t.Fatalf("status footer hints wrong:\n%s", v)
 	}
 	m = press(t, m, "1", "tab", "tab")
@@ -199,8 +200,12 @@ func TestStatusTabAndFooter(t *testing.T) {
 		t.Fatalf("tab,tab from peers = %v, want status", m.view)
 	}
 	m = press(t, m, "tab")
+	if m.view != viewNet {
+		t.Fatalf("tab from status = %v, want net", m.view)
+	}
+	m = press(t, m, "tab")
 	if m.view != viewPeers {
-		t.Fatalf("tab from status = %v, want peers", m.view)
+		t.Fatalf("tab from net = %v, want peers", m.view)
 	}
 }
 
@@ -290,5 +295,97 @@ func TestStatusLayoutClamped(t *testing.T) {
 	}
 	if !sawANSI {
 		t.Fatal("forced color profile produced no ANSI — overflow checks are vacuous")
+	}
+}
+
+func TestStatusSupersededHealthResultDropped(t *testing.T) {
+	m := newTestModel(nil)
+	m.data.BaseURL = "https://mgr.example:8443"
+	calls := 0
+	m.health = fakeHealthClient(func(r *http.Request) (*http.Response, error) {
+		calls++
+		return jsonResponse(http.StatusOK, fmt.Sprintf(`{"fleet_rev":%d,"ca_version":2}`, calls)), nil
+	})
+	nm, first := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	m = nm.(Model)
+	nm, second := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	m = nm.(Model)
+	batch, ok := second().(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("'r' on status must batch reload and health check, got %T", second())
+	}
+	for _, c := range batch {
+		nm, _ = m.Update(c())
+		m = nm.(Model)
+	}
+	if m.serve == nil || m.serve.info.FleetRev != 1 {
+		t.Fatalf("newest dispatch must be shown, serve = %+v", m.serve)
+	}
+	nm, _ = m.Update(first())
+	m = nm.(Model)
+	if m.serve.info.FleetRev != 1 {
+		t.Fatalf("superseded fetch overwrote a newer result: rev %d", m.serve.info.FleetRev)
+	}
+	if calls != 2 {
+		t.Fatalf("fetches = %d, want 2", calls)
+	}
+}
+
+func TestStatusRefetchShowsChecking(t *testing.T) {
+	m := newTestModel(nil)
+	m.data.BaseURL = "https://mgr.example:8443"
+	m.health = fakeHealthClient(func(r *http.Request) (*http.Response, error) {
+		return jsonResponse(http.StatusOK, `{"fleet_rev":7,"ca_version":2}`), nil
+	})
+	m = pressStatusAndFetch(t, m)
+	if !strings.Contains(m.View(), "serve: up") {
+		t.Fatalf("precondition: first result must render up:\n%s", m.View())
+	}
+	nm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	m = nm.(Model)
+	if cmd == nil {
+		t.Fatal("'r' on status must return a cmd")
+	}
+	if !strings.Contains(m.View(), "serve: checking") {
+		t.Fatalf("refetch in flight must not show the stale result:\n%s", m.View())
+	}
+}
+
+func TestStatusServeOrderedAboveManager(t *testing.T) {
+	v := press(t, newTestModel(nil), "3").View()
+	si, mi := strings.Index(v, "SERVE"), strings.Index(v, "MANAGER")
+	if si < 0 || mi < 0 || si > mi {
+		t.Fatalf("SERVE (%d) must render above MANAGER (%d):\n%s", si, mi, v)
+	}
+}
+
+func TestStatusStaleVisibleAt60x12(t *testing.T) {
+	m := newTestModel(nil)
+	m.data.BaseURL = "https://mgr.example:8443"
+	m.health = fakeHealthClient(func(r *http.Request) (*http.Response, error) {
+		return jsonResponse(http.StatusOK, `{"fleet_rev":99,"ca_version":2}`), nil
+	})
+	nm, _ := m.Update(tea.WindowSizeMsg{Width: 60, Height: 12})
+	m = pressStatusAndFetch(t, nm.(Model))
+	if !strings.Contains(m.View(), "STALE: serve rev 99 ≠ db rev 7") {
+		t.Fatalf("STALE must survive a 60x12 terminal:\n%s", m.View())
+	}
+}
+
+func TestStatusExpiringSoonHighlighted(t *testing.T) {
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	defer lipgloss.SetColorProfile(prev)
+
+	d := testData()
+	d.Peers = append(d.Peers, peerRow{Name: "soon", DialHost: "soon", Inbound: true,
+		Expires: certExpiry{state: certAt, until: time.Now().Add(10 * 24 * time.Hour)}})
+	v := press(t, NewModel(context.Background(), d, nil), "3").View()
+	if !strings.Contains(v, warnStyle.Render("1 expiring ≤30d")) {
+		t.Fatalf("nonzero expiring count must carry the warning style:\n%q", v)
+	}
+	v0 := press(t, newTestModel(nil), "3").View()
+	if strings.Contains(v0, warnStyle.Render("0 expiring ≤30d")) || !strings.Contains(v0, "0 expiring ≤30d") {
+		t.Fatalf("zero expiring count must stay unstyled:\n%q", v0)
 	}
 }
