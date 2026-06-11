@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"io"
+	"net/http"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -15,6 +16,8 @@ type view int
 const (
 	viewPeers view = iota
 	viewGroups
+	viewStatus
+	viewCount
 )
 
 // reloader abstracts the data source so tests can drive Update with a seeded
@@ -38,9 +41,12 @@ type Model struct {
 	peerIdx    int
 	groupIdx   int
 
+	health *http.Client
+	serve  *healthMsg
+
 	filtering bool
 	filter    textinput.Model
-	filters   [2]string
+	filters   [viewCount]string
 
 	width  int
 	height int
@@ -56,6 +62,7 @@ func NewModel(ctx context.Context, data fleetData, reload reloader) Model {
 		reload: reload,
 		data:   data,
 		view:   viewPeers,
+		health: defaultHealthClient(),
 		filter: ti,
 	}
 }
@@ -98,6 +105,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.data = msg.data
 		m.clampSelection()
 		return m, nil
+	case healthMsg:
+		m.serve = &msg
+		return m, nil
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -133,8 +143,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "q", "ctrl+c":
 		return m, tea.Quit
 	case "tab":
-		m.view = 1 - m.view
+		m.view = (m.view + 1) % viewCount
 		m.closeDetail()
+		if m.view == viewStatus {
+			return m, m.healthCmd()
+		}
 		return m, nil
 	case "1":
 		m.view = viewPeers
@@ -144,6 +157,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.view = viewGroups
 		m.closeDetail()
 		return m, nil
+	case "3":
+		m.view = viewStatus
+		m.closeDetail()
+		return m, m.healthCmd()
 	case "j", "down":
 		m.move(1)
 		return m, nil
@@ -168,6 +185,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "/":
+		if m.view == viewStatus {
+			return m, nil
+		}
 		m.filtering = true
 		m.closeDetail()
 		m.filter.SetValue(m.filters[m.view])
@@ -175,6 +195,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.filter.Focus()
 		return m, nil
 	case "r":
+		if m.view == viewStatus {
+			return m, tea.Batch(m.reloadCmd(), m.healthCmd())
+		}
 		return m, m.reloadCmd()
 	}
 	return m, nil
