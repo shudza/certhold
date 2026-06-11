@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -44,6 +45,9 @@ func certBlob(t *testing.T, validAfter, validBefore uint64) []byte {
 func seedTuiDB(t *testing.T) (string, time.Time) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "tui.sqlite")
+	if err := os.WriteFile(filepath.Join(filepath.Dir(path), "base_url"), []byte("https://mgr.example:8443\n"), 0644); err != nil {
+		t.Fatalf("write base_url: %v", err)
+	}
 	d, err := db.Open(path)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
@@ -114,6 +118,9 @@ func TestLoad(t *testing.T) {
 	if fd.DBPath != path {
 		t.Errorf("DBPath = %q, want %q", fd.DBPath, path)
 	}
+	if fd.BaseURL != "https://mgr.example:8443" {
+		t.Errorf("BaseURL = %q, want the trimmed base_url file", fd.BaseURL)
+	}
 	if fd.FleetRev < 1 {
 		t.Errorf("FleetRev = %d, want >= 1", fd.FleetRev)
 	}
@@ -170,6 +177,12 @@ func TestLoad(t *testing.T) {
 	}
 }
 
+func TestReadBaseURLMissing(t *testing.T) {
+	if got := readBaseURL(filepath.Join(t.TempDir(), "state.db")); got != "" {
+		t.Errorf("readBaseURL with no file = %q, want empty", got)
+	}
+}
+
 func TestParseCertExpiry(t *testing.T) {
 	if got := parseCertExpiry(nil); got.state != certNone {
 		t.Errorf("nil blob = %+v, want certNone", got)
@@ -204,6 +217,7 @@ func TestPullTokenNeverRendered(t *testing.T) {
 	views = append(views, press(t, m, "enter").View())
 	views = append(views, press(t, m, "j", "j", "enter").View())
 	views = append(views, press(t, m, "2").View())
+	views = append(views, press(t, m, "3").View())
 	views = append(views, press(t, m, "/", "t", "o", "k").View())
 	for i, v := range views {
 		if strings.Contains(v, "tok-secret") {

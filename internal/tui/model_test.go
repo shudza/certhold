@@ -126,8 +126,12 @@ func TestViewSwitching(t *testing.T) {
 		t.Fatalf("after tab view = %v, want groups", m.view)
 	}
 	m = press(t, m, "tab")
+	if m.view != viewStatus {
+		t.Fatalf("after second tab view = %v, want status", m.view)
+	}
+	m = press(t, m, "tab")
 	if m.view != viewPeers {
-		t.Fatalf("after second tab view = %v, want peers", m.view)
+		t.Fatalf("after third tab view = %v, want peers", m.view)
 	}
 }
 
@@ -326,6 +330,7 @@ func TestQuitKeys(t *testing.T) {
 func wideData() fleetData {
 	d := testData()
 	d.DBPath = "/very/long/path/that/easily/overflows/narrow/terminals/certhold/state.db"
+	d.BaseURL = "https://manager.with.a.long.hostname.example.internal:8443"
 	d.Peers[0].TargetUser = "extralongusername"
 	d.Peers[0].Fingerprint = "SHA256:" + strings.Repeat("a", 43)
 	d.Peers[0].Groups = []string{"infrastructure-primary", "database-replicas", "observability-stack"}
@@ -358,6 +363,7 @@ func TestResizeKeepsLayout(t *testing.T) {
 			"table":     m,
 			"detail":    press(t, m, "enter"),
 			"groups":    press(t, m, "2"),
+			"status":    press(t, m, "3"),
 			"filtering": press(t, m, "/", "a"),
 		}
 		for name, state := range states {
@@ -504,9 +510,16 @@ func TestFooterHintsPerState(t *testing.T) {
 	if !strings.Contains(g.View(), "j/k move") {
 		t.Fatal("groups hints missing movement keys")
 	}
+	s := press(t, m, "3")
+	if !strings.Contains(s.View(), "r refresh") {
+		t.Fatal("status hints missing 'r refresh'")
+	}
+	if strings.Contains(s.View(), "/ filter") {
+		t.Fatal("status hints must not advertise filtering (it is a no-op)")
+	}
 	d := press(t, m, "enter")
 	dv := d.View()
-	for _, want := range []string{"esc back", "tab/1/2 views", "/ filter"} {
+	for _, want := range []string{"esc back", "tab/1/2/3 views", "/ filter"} {
 		if !strings.Contains(dv, want) {
 			t.Errorf("detail hints missing %q:\n%s", want, dv)
 		}

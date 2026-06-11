@@ -53,6 +53,8 @@ func (m Model) View() string {
 		body = m.peerDetailLines(w, bodyH)
 	case m.view == viewPeers:
 		body = m.peersTableLines(w, bodyH)
+	case m.view == viewStatus:
+		body = m.statusLines(w, bodyH)
 	default:
 		body = m.groupsLines(w, bodyH)
 	}
@@ -70,16 +72,15 @@ func (m Model) headerLines(w int) []string {
 	top := titleStyle.Render("certhold") + colGap +
 		metaStyle.Render(fmt.Sprintf("db %s%srev %d%sca %s", m.data.DBPath, colGap, m.data.FleetRev, colGap, ca))
 
-	peersTab := fmt.Sprintf("1 peers (%d)", len(m.data.Peers))
-	groupsTab := fmt.Sprintf("2 groups (%d)", len(m.data.Groups))
-	if m.view == viewPeers {
-		peersTab = tabOnStyle.Render("[" + peersTab + "]")
-		groupsTab = tabOffStyle.Render(" " + groupsTab + " ")
-	} else {
-		peersTab = tabOffStyle.Render(" " + peersTab + " ")
-		groupsTab = tabOnStyle.Render("[" + groupsTab + "]")
+	tab := func(v view, label string) string {
+		if m.view == v {
+			return tabOnStyle.Render("[" + label + "]")
+		}
+		return tabOffStyle.Render(" " + label + " ")
 	}
-	tabs := peersTab + colGap + groupsTab
+	tabs := tab(viewPeers, fmt.Sprintf("1 peers (%d)", len(m.data.Peers))) + colGap +
+		tab(viewGroups, fmt.Sprintf("2 groups (%d)", len(m.data.Groups))) + colGap +
+		tab(viewStatus, "3 status")
 	if m.detail && m.view == viewPeers {
 		tabs += colGap + tabOnStyle.Render("[peer detail]")
 	}
@@ -109,11 +110,13 @@ func (m Model) footerLines(w int) []string {
 	case m.filtering:
 		hints = "enter apply · esc clear · ctrl+c quit"
 	case m.detail:
-		hints = "esc back · tab/1/2 views · / filter · r reload · q quit"
+		hints = "esc back · tab/1/2/3 views · / filter · r reload · q quit"
+	case m.view == viewStatus:
+		hints = "tab/1/2/3 views · r refresh · q quit"
 	case m.view == viewGroups:
-		hints = "tab/1/2 views · j/k move · / filter · r reload · q quit"
+		hints = "tab/1/2/3 views · j/k move · / filter · r reload · q quit"
 	default:
-		hints = "tab/1/2 views · j/k move · enter detail · / filter · r reload · q quit"
+		hints = "tab/1/2/3 views · j/k move · enter detail · / filter · r reload · q quit"
 	}
 	return []string{truncLine(status, w), truncLine(dimStyle.Render(hints), w)}
 }

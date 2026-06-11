@@ -2,6 +2,9 @@ package tui
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/shudza/certhold/internal/db"
@@ -32,6 +35,7 @@ type groupRow struct {
 
 type fleetData struct {
 	DBPath         string
+	BaseURL        string
 	FleetRev       int64
 	CAVersion      int
 	CAVersionKnown bool
@@ -85,8 +89,23 @@ func (c certExpiry) expired() bool {
 	return c.state == certAt && time.Now().After(c.until)
 }
 
+func (c certExpiry) expiringWithin(d time.Duration, now time.Time) bool {
+	return c.state == certAt && now.Before(c.until) && !c.until.After(now.Add(d))
+}
+
+// readBaseURL mirrors internal/cli's LoadBaseURL (a plain base_url file in the
+// data dir, which also holds the db); duplicated here so tui never imports cli,
+// whose files another task edits in parallel. Absent or unreadable means unknown.
+func readBaseURL(dbPath string) string {
+	b, err := os.ReadFile(filepath.Join(filepath.Dir(dbPath), "base_url"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
 func load(ctx context.Context, d *db.DB, dbPath string) (fleetData, error) {
-	fd := fleetData{DBPath: dbPath}
+	fd := fleetData{DBPath: dbPath, BaseURL: readBaseURL(dbPath)}
 
 	rev, err := d.FleetRev(ctx)
 	if err != nil {
