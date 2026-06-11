@@ -30,6 +30,7 @@ type fakeDialer struct {
 	mu       sync.Mutex
 	calls    []fakeCall
 	failDial map[string]error
+	readData map[string][]byte
 }
 
 func (f *fakeDialer) dial(ctx context.Context, host string, opts sshpush.Options) (sshpush.Pusher, error) {
@@ -67,6 +68,11 @@ func (p *fakePusher) WriteFileAtomic(ctx context.Context, remotePath string, con
 
 func (p *fakePusher) ReadFile(ctx context.Context, remotePath string) ([]byte, error) {
 	p.record("read", remotePath, nil)
+	p.d.mu.Lock()
+	defer p.d.mu.Unlock()
+	if b, ok := p.d.readData[remotePath]; ok {
+		return append([]byte(nil), b...), nil
+	}
 	return nil, nil
 }
 

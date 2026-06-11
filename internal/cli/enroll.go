@@ -5,17 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
-	"golang.org/x/crypto/ssh"
 
-	"github.com/shudza/certhold/internal/ca"
-	"github.com/shudza/certhold/internal/clientcli"
 	"github.com/shudza/certhold/internal/db"
-	"github.com/shudza/certhold/internal/peerfiles"
-	"github.com/shudza/certhold/internal/token"
+	"github.com/shudza/certhold/internal/ops"
 )
 
 func newEnrollCmd() *cobra.Command {
@@ -82,123 +77,24 @@ func newEnrollCmd() *cobra.Command {
 				ctx = context.Background()
 			}
 
-			instanceKey, err := EnsureInstanceKey(ctx, d)
-			if err != nil {
-				return fmt.Errorf("ensure instance key: %w", err)
-			}
-
-			if _, err := d.GetPeer(ctx, name); err == nil {
-				return fmt.Errorf("peer %q already exists", name)
-			} else if !errors.Is(err, db.ErrPeerNotFound) {
-				return fmt.Errorf("lookup peer: %w", err)
-			}
-
 			caUnlock := newCAUnlocker()
 			defer caUnlock.Zero()
-			caObj, err := ca.LoadWithPassphrase(filepath.Join(dataDir, "ca"), caUnlock.get)
-			if err != nil {
-				return fmt.Errorf("load ca: %w", err)
-			}
 
-			priv, pubAuth, sshPub, err := ca.GeneratePeerKey()
-			if err != nil {
-				return fmt.Errorf("generate peer key: %w", err)
-			}
-			defer zeroBytes(priv)
-
-			principals := append([]string{name}, groups...)
-			certBytes, serial, err := caObj.SignCert(ca.SignOptions{
-				Pubkey:     sshPub,
-				KeyID:      name,
-				Principals: principals,
+			deps := ops.Deps{DB: d, DataDir: dataDir, CAUnlock: caUnlock.get}
+			res, err := ops.MintEnroll(ctx, deps, ops.EnrollSpec{
+				Name:    name,
+				Groups:  groups,
+				Allowed: groups,
+				User:    targetUser,
+				Address: address,
+				Client:  clientMode,
+				BaseURL: baseURL,
 			})
 			if err != nil {
-				return fmt.Errorf("sign cert: %w", err)
-			}
-
-			fingerprint := ssh.FingerprintSHA256(sshPub)
-
-			pullToken, err := token.Generate()
-			if err != nil {
-				return fmt.Errorf("generate pull token: %w", err)
-			}
-
-			tok, err := token.Generate()
-			if err != nil {
-				return fmt.Errorf("generate token: %w", err)
-			}
-
-			if err := d.WithTx(ctx, func(tx *db.Tx) error {
-				if err := tx.InsertPeer(ctx, name, serial, fingerprint, pubAuth, targetUser, !clientMode, pullToken); err != nil {
-					return fmt.Errorf("insert peer: %w", err)
-				}
-				if address != "" {
-					if err := tx.SetPeerAddress(ctx, name, address); err != nil {
-						return fmt.Errorf("set peer address: %w", err)
-					}
-				}
-				for _, g := range groups {
-					exists, err := tx.GroupExists(ctx, g)
-					if err != nil {
-						return fmt.Errorf("check group %q: %w", g, err)
-					}
-					if !exists {
-						return fmt.Errorf("group %q does not exist (run \"certhold group create %s\" first)", g, g)
-					}
-				}
-				if err := tx.SetPeerGroups(ctx, name, groups); err != nil {
-					return fmt.Errorf("set peer groups: %w", err)
-				}
-				if !clientMode {
-					if err := tx.SetPeerAllowedGroups(ctx, name, groups); err != nil {
-						return fmt.Errorf("set peer allowed groups: %w", err)
-					}
-				}
-				if err := tx.BumpFleetRev(ctx); err != nil {
-					return fmt.Errorf("bump fleet rev: %w", err)
-				}
-				return nil
-			}); err != nil {
 				return err
 			}
 
-			if err := d.SetPeerCert(ctx, name, certBytes, serial); err != nil {
-				return fmt.Errorf("set peer cert: %w", err)
-			}
-
-			reachable, err := d.ReachableHosts(ctx, name)
-			if err != nil {
-				return fmt.Errorf("reachable hosts: %w", err)
-			}
-			hosts := make([]peerfiles.HostEntry, 0, len(reachable))
-			for _, h := range reachable {
-				hosts = append(hosts, peerfiles.HostEntry{Name: h.Name, Address: h.Address, User: h.TargetUser})
-			}
-
-			conf := fmt.Sprintf("BASE_URL=%s\nPULL_TOKEN=%s\nINSTANCE_KEY=%s\nPEER_NAME=%s\nLAST_REV=0\n",
-				baseURL, pullToken, instanceKey, name)
-
-			tarball, err := peerfiles.BuildUser(peerfiles.UserPeerFiles{
-				TargetUser:  targetUser,
-				PrivKey:     priv,
-				CertPub:     certBytes,
-				CAPub:       caObj.PublicKeyAuthorizedKey(),
-				Principals:  groups,
-				InstanceKey: instanceKey,
-				NoInbound:   clientMode,
-				Hosts:       hosts,
-				CLIScript:   clientcli.Script,
-				Conf:        []byte(conf),
-			})
-			if err != nil {
-				return fmt.Errorf("build tarball: %w", err)
-			}
-
-			if err := d.InsertToken(ctx, tok, name, strings.Join(groups, ","), targetUser, tarball); err != nil {
-				return fmt.Errorf("insert token: %w", err)
-			}
-
-			fmt.Fprintf(cmd.OutOrStdout(), "curl -kfsSL %s/enroll/%s.sh | bash\n", baseURL, tok)
+			fmt.Fprintf(cmd.OutOrStdout(), "%s\n", res.OneLiner)
 			if clientMode {
 				fmt.Fprintf(cmd.OutOrStdout(), "client-style peer; manager cannot push to it; updates arrive via `certhold-cli refresh`.\n")
 			}
