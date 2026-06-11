@@ -3,18 +3,28 @@ package cli
 import (
 	"context"
 	"fmt"
-	"io/fs"
 	"os"
-	"path/filepath"
 
 	"github.com/spf13/cobra"
 
 	"github.com/shudza/certhold/internal/db"
+	"github.com/shudza/certhold/internal/ops"
+	"github.com/shudza/certhold/internal/passphrase"
 	"github.com/shudza/certhold/internal/sshpush"
 )
 
 var rekeyDial = func(ctx context.Context, host string, opts sshpush.Options) (sshpush.Pusher, error) {
 	return sshpush.Dial(ctx, host, opts)
+}
+
+// promptNewCAPassphrase obtains a fresh CA passphrase (with confirmation) for
+// --rotate-passphrase. It is a package var so tests can drive a new passphrase
+// distinct from the old one without a tty; production wiring prompts twice via
+// passphrase.PromptConfirm. The empty envVar is deliberate: reusing
+// CERTHOLD_CA_PASSPHRASE here would make the new passphrase indistinguishable
+// from the old one that deps.CAUnlock already reads.
+var promptNewCAPassphrase = func() ([]byte, error) {
+	return passphrase.PromptConfirm("New CA passphrase: ", "")
 }
 
 func newRekeyCmd() *cobra.Command {
@@ -75,57 +85,10 @@ func runRekey(cmd *cobra.Command, hostname string) error {
 	peerUnlock := newPeerUnlocker()
 	defer peerUnlock.Zero()
 
-	deps := rekeyDeps{
-		DataDir:          dataDir,
+	deps := opsDeps(cmd, d, dataDir, caUnlock, peerUnlock, rekeyDial)
+	return ops.Rekey(ctx, deps, ops.RekeyOptions{
 		Hostname:         hostname,
-		DB:               d,
-		Out:              cmd.OutOrStdout(),
-		Err:              cmd.ErrOrStderr(),
-		Dial:             rekeyDial,
-		CAUnlock:         caUnlock.get,
-		PeerPassFn:       peerUnlock.get,
 		RotatePassphrase: rotate,
-	}
-	return runRekeyCore(ctx, deps, nil)
-}
-
-func abortRekey(errOut interface {
-	Write(p []byte) (n int, err error)
-}, cause error, updated []string) error {
-	fmt.Fprintf(errOut, "rekey aborted: %v\n", cause)
-	if len(updated) > 0 {
-		fmt.Fprintf(errOut, "peers already rotated to new CA (recovery may be required): %v\n", updated)
-	}
-	return cause
-}
-
-func writeFileAtomicLocal(path string, content []byte, mode fs.FileMode) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("mkdir %s: %w", dir, err)
-	}
-	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp.*")
-	if err != nil {
-		return fmt.Errorf("create temp: %w", err)
-	}
-	tmpName := tmp.Name()
-	cleanup := func() { _ = os.Remove(tmpName) }
-	if _, err := tmp.Write(content); err != nil {
-		_ = tmp.Close()
-		cleanup()
-		return fmt.Errorf("write temp: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		cleanup()
-		return fmt.Errorf("close temp: %w", err)
-	}
-	if err := os.Chmod(tmpName, mode); err != nil {
-		cleanup()
-		return fmt.Errorf("chmod temp: %w", err)
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		cleanup()
-		return fmt.Errorf("rename %s -> %s: %w", tmpName, path, err)
-	}
-	return nil
+		NewPassphrase:    func() ([]byte, error) { return promptNewCAPassphrase() },
+	})
 }
