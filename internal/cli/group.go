@@ -4,18 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
-	"path/filepath"
-	"sort"
+	"io"
 	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
-	"golang.org/x/crypto/ssh"
 
-	"github.com/shudza/certhold/internal/ca"
 	"github.com/shudza/certhold/internal/db"
-	"github.com/shudza/certhold/internal/peerfiles"
+	"github.com/shudza/certhold/internal/ops"
 	"github.com/shudza/certhold/internal/sshpush"
 )
 
@@ -33,6 +29,33 @@ func newGroupCmd() *cobra.Command {
 	return cmd
 }
 
+// groupEventPrinter renders group-op events. Unlike opsEventPrinter it skips
+// events without a Msg: group per-peer EventPeerDone is purely structural (the
+// CLI historically printed nothing per pushed peer).
+func groupEventPrinter(out, errOut io.Writer) func(ops.Event) {
+	return func(e ops.Event) {
+		switch e.Type {
+		case ops.EventInfo, ops.EventPeerDone:
+			if e.Msg != "" {
+				fmt.Fprintf(out, "%s\n", e.Msg)
+			}
+		case ops.EventWarn:
+			fmt.Fprintf(errOut, "%s\n", e.Msg)
+		}
+	}
+}
+
+func groupOpsDeps(cmd *cobra.Command, d *db.DB, dataDir string, caUnlock, peerUnlock *memoUnlocker) ops.Deps {
+	return ops.Deps{
+		DB:       d,
+		DataDir:  dataDir,
+		CAUnlock: caUnlock.get,
+		PeerPass: peerUnlock.get,
+		Dial:     ops.DialFn(groupDial),
+		OnEvent:  groupEventPrinter(cmd.OutOrStdout(), cmd.ErrOrStderr()),
+	}
+}
+
 func newGroupRenameCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "rename <old> <new>",
@@ -45,11 +68,6 @@ func newGroupRenameCmd() *cobra.Command {
 }
 
 func runGroupRename(cmd *cobra.Command, oldName, newName string) error {
-	newName = strings.TrimSpace(newName)
-	if oldName == peerfiles.ManagerPrincipal || newName == peerfiles.ManagerPrincipal {
-		return fmt.Errorf("group %q is reserved", peerfiles.ManagerPrincipal)
-	}
-
 	dataDir, err := cmd.Root().PersistentFlags().GetString("data-dir")
 	if err != nil {
 		return fmt.Errorf("get data-dir: %w", err)
@@ -72,216 +90,13 @@ func runGroupRename(cmd *cobra.Command, oldName, newName string) error {
 		ctx = context.Background()
 	}
 
-	if oldName == newName {
-		exists, err := d.GroupExists(ctx, oldName)
-		if err != nil {
-			return fmt.Errorf("group exists: %w", err)
-		}
-		if !exists {
-			return fmt.Errorf("group %q does not exist", oldName)
-		}
-		fmt.Fprintf(cmd.OutOrStdout(), "group %q renamed (no change)\n", oldName)
-		return nil
-	}
-
-	members, err := d.GetGroupMembers(ctx, oldName)
-	if err != nil {
-		return fmt.Errorf("get group members: %w", err)
-	}
-	allowedBy, err := d.GetGroupAllowedBy(ctx, oldName)
-	if err != nil {
-		return fmt.Errorf("get group allowed-by: %w", err)
-	}
-
-	memberSet := make(map[string]struct{}, len(members))
-	for _, m := range members {
-		memberSet[m] = struct{}{}
-	}
-	allowedBySet := make(map[string]struct{}, len(allowedBy))
-	for _, a := range allowedBy {
-		allowedBySet[a] = struct{}{}
-	}
-	affectedSet := make(map[string]struct{}, len(members)+len(allowedBy))
-	for k := range memberSet {
-		affectedSet[k] = struct{}{}
-	}
-	for k := range allowedBySet {
-		affectedSet[k] = struct{}{}
-	}
-
-	if err := d.RenameGroup(ctx, oldName, newName); err != nil {
-		switch {
-		case errors.Is(err, db.ErrGroupNotFound):
-			return fmt.Errorf("group %q does not exist", oldName)
-		case errors.Is(err, db.ErrGroupExists):
-			return fmt.Errorf("group %q already exists", newName)
-		case errors.Is(err, db.ErrInvalidGroupName):
-			return fmt.Errorf("invalid group name %q", newName)
-		default:
-			return fmt.Errorf("rename group: %w", err)
-		}
-	}
-	if err := d.BumpFleetRev(ctx); err != nil {
-		return fmt.Errorf("bump fleet_rev: %w", err)
-	}
-
-	if len(affectedSet) == 0 {
-		fmt.Fprintf(cmd.OutOrStdout(), "group renamed: %q → %q (no peers affected)\n", oldName, newName)
-		return nil
-	}
-
-	affected := make([]string, 0, len(affectedSet))
-	for k := range affectedSet {
-		affected = append(affected, k)
-	}
-	sort.Strings(affected)
-
 	caUnlock := newCAUnlocker()
 	defer caUnlock.Zero()
 	peerUnlock := newPeerUnlocker()
 	defer peerUnlock.Zero()
 
-	var caObj *ca.CA
-	if len(members) > 0 {
-		caObj, err = ca.LoadWithPassphrase(filepath.Join(dataDir, "ca"), caUnlock.get)
-		if err != nil {
-			return fmt.Errorf("load ca: %w", err)
-		}
-	}
-
-	caPubBytes, err := ca.LoadPublicKey(filepath.Join(dataDir, "ca"))
-	if err != nil {
-		return fmt.Errorf("load ca public key: %w", err)
-	}
-	caPub, _, _, _, err := ssh.ParseAuthorizedKey(caPubBytes)
-	if err != nil {
-		return fmt.Errorf("parse ca pubkey: %w", err)
-	}
-
-	instanceKey, err := EnsureInstanceKey(ctx, d)
-	if err != nil {
-		return fmt.Errorf("ensure instance key: %w", err)
-	}
-
-	self := resolveSelfIdent(ctx, d)
-	var stragglers []string
-	var touched []string
-
-	for _, peerName := range affected {
-		peer, err := d.GetPeer(ctx, peerName)
-		if err != nil {
-			if errors.Is(err, db.ErrPeerNotFound) {
-				continue
-			}
-			return fmt.Errorf("get peer %q: %w", peerName, err)
-		}
-		if peer.Revoked {
-			continue
-		}
-
-		_, isMember := memberSet[peerName]
-		_, isAllow := allowedBySet[peerName]
-
-		var certBytes []byte
-		if isMember {
-			currentGroups, err := d.GetPeerGroups(ctx, peerName)
-			if err != nil {
-				return fmt.Errorf("get peer groups %q: %w", peerName, err)
-			}
-
-			pk, _, _, _, err := ssh.ParseAuthorizedKey(peer.AuthorizedKey)
-			if err != nil {
-				return fmt.Errorf("parse peer pubkey %q: %w", peerName, err)
-			}
-			principals := append([]string{peerName}, currentGroups...)
-			var serial uint64
-			certBytes, serial, err = caObj.SignCert(ca.SignOptions{
-				Pubkey:     pk,
-				KeyID:      peerName,
-				Principals: principals,
-			})
-			if err != nil {
-				return fmt.Errorf("sign cert %q: %w", peerName, err)
-			}
-			if err := d.SetPeerCert(ctx, peerName, certBytes, serial); err != nil {
-				return fmt.Errorf("set peer cert %q: %w", peerName, err)
-			}
-		}
-
-		var currentAllowed []string
-		if isAllow {
-			currentAllowed, err = d.GetPeerAllowedGroups(ctx, peerName)
-			if err != nil {
-				return fmt.Errorf("get peer allowed groups %q: %w", peerName, err)
-			}
-		}
-
-		if !peer.Inbound {
-			clientPeerNotice(cmd.OutOrStdout(), peerName)
-			continue
-		}
-
-		pushOpts := selfPushOptions(dataDir, self, peerUnlock.get)
-		pushOpts.User = pushUser(peer)
-		host := peer.DialHost()
-		pusher, err := groupDial(ctx, host, pushOpts)
-		if err != nil {
-			stragglers = append(stragglers, peerName)
-			continue
-		}
-
-		if isMember {
-			certPath := peerCertRemotePath(peer, instanceKey)
-			if err := pusher.WriteFileAtomic(ctx, certPath, certBytes, fs.FileMode(0644)); err != nil {
-				stragglers = append(stragglers, peerName)
-				pusher.Close()
-				continue
-			}
-		}
-
-		if isAllow {
-			remote := peerAuthorizedKeysRemotePath(peer)
-			existing, err := pusher.ReadFile(ctx, remote)
-			if err != nil {
-				stragglers = append(stragglers, peerName)
-				pusher.Close()
-				continue
-			}
-			newContent, err := peerfiles.RewritePrincipals(existing, caPub, currentAllowed)
-			if err != nil {
-				stragglers = append(stragglers, peerName)
-				pusher.Close()
-				continue
-			}
-			if err := pusher.WriteFileAtomic(ctx, remote, newContent, fs.FileMode(0644)); err != nil {
-				stragglers = append(stragglers, peerName)
-				pusher.Close()
-				continue
-			}
-		}
-
-		if err := splicePeerConfig(ctx, pusher, d, peer, instanceKey); err != nil {
-			stragglers = append(stragglers, peerName)
-			pusher.Close()
-			continue
-		}
-
-		if err := pusher.VerifyHealth(ctx); err != nil {
-			stragglers = append(stragglers, peerName)
-			pusher.Close()
-			continue
-		}
-		pusher.Close()
-		touched = append(touched, peerName)
-	}
-
-	if len(stragglers) > 0 {
-		fmt.Fprintf(cmd.ErrOrStderr(), "peers with unfinished pushes (DB rename already committed): %s\n", strings.Join(stragglers, ","))
-		return fmt.Errorf("group rename incomplete: %d straggler(s)", len(stragglers))
-	}
-
-	fmt.Fprintf(cmd.OutOrStdout(), "group renamed: %q → %q (peers updated: %s)\n", oldName, newName, strings.Join(touched, ","))
-	return nil
+	hostname, _ := osHostname()
+	return ops.GroupRename(ctx, groupOpsDeps(cmd, d, dataDir, caUnlock, peerUnlock), oldName, newName, hostname)
 }
 
 func newGroupDeleteCmd() *cobra.Command {
@@ -296,10 +111,6 @@ func newGroupDeleteCmd() *cobra.Command {
 }
 
 func runGroupDelete(cmd *cobra.Command, name string) error {
-	if name == peerfiles.ManagerPrincipal {
-		return fmt.Errorf("group %q is reserved", name)
-	}
-
 	dataDir, err := cmd.Root().PersistentFlags().GetString("data-dir")
 	if err != nil {
 		return fmt.Errorf("get data-dir: %w", err)
@@ -322,211 +133,13 @@ func runGroupDelete(cmd *cobra.Command, name string) error {
 		ctx = context.Background()
 	}
 
-	exists, err := d.GroupExists(ctx, name)
-	if err != nil {
-		return fmt.Errorf("group exists: %w", err)
-	}
-	if !exists {
-		return fmt.Errorf("group %q does not exist", name)
-	}
-
-	members, err := d.GetGroupMembers(ctx, name)
-	if err != nil {
-		return fmt.Errorf("get group members: %w", err)
-	}
-	allowedBy, err := d.GetGroupAllowedBy(ctx, name)
-	if err != nil {
-		return fmt.Errorf("get group allowed-by: %w", err)
-	}
-
-	memberSet := make(map[string]struct{}, len(members))
-	for _, m := range members {
-		memberSet[m] = struct{}{}
-	}
-	allowedBySet := make(map[string]struct{}, len(allowedBy))
-	for _, a := range allowedBy {
-		allowedBySet[a] = struct{}{}
-	}
-	affectedSet := make(map[string]struct{}, len(members)+len(allowedBy))
-	for k := range memberSet {
-		affectedSet[k] = struct{}{}
-	}
-	for k := range allowedBySet {
-		affectedSet[k] = struct{}{}
-	}
-
-	if len(affectedSet) == 0 {
-		if err := d.DeleteGroup(ctx, name); err != nil {
-			return fmt.Errorf("delete group: %w", err)
-		}
-		if err := d.BumpFleetRev(ctx); err != nil {
-			return fmt.Errorf("bump fleet_rev: %w", err)
-		}
-		fmt.Fprintf(cmd.OutOrStdout(), "group %q deleted (no peers affected)\n", name)
-		return nil
-	}
-
-	affected := make([]string, 0, len(affectedSet))
-	for k := range affectedSet {
-		affected = append(affected, k)
-	}
-	sort.Strings(affected)
-
 	caUnlock := newCAUnlocker()
 	defer caUnlock.Zero()
 	peerUnlock := newPeerUnlocker()
 	defer peerUnlock.Zero()
 
-	var caObj *ca.CA
-	if len(members) > 0 {
-		caObj, err = ca.LoadWithPassphrase(filepath.Join(dataDir, "ca"), caUnlock.get)
-		if err != nil {
-			return fmt.Errorf("load ca: %w", err)
-		}
-	}
-
-	caPubBytes, err := ca.LoadPublicKey(filepath.Join(dataDir, "ca"))
-	if err != nil {
-		return fmt.Errorf("load ca public key: %w", err)
-	}
-	caPub, _, _, _, err := ssh.ParseAuthorizedKey(caPubBytes)
-	if err != nil {
-		return fmt.Errorf("parse ca pubkey: %w", err)
-	}
-
-	instanceKey, err := EnsureInstanceKey(ctx, d)
-	if err != nil {
-		return fmt.Errorf("ensure instance key: %w", err)
-	}
-
-	self := resolveSelfIdent(ctx, d)
-	var stragglers []string
-	var touched []string
-
-	for _, peerName := range affected {
-		peer, err := d.GetPeer(ctx, peerName)
-		if err != nil {
-			if errors.Is(err, db.ErrPeerNotFound) {
-				continue
-			}
-			return fmt.Errorf("get peer %q: %w", peerName, err)
-		}
-		if peer.Revoked {
-			continue
-		}
-
-		_, isMember := memberSet[peerName]
-		_, isAllow := allowedBySet[peerName]
-
-		var certBytes []byte
-		if isMember {
-			currentGroups, err := d.GetPeerGroups(ctx, peerName)
-			if err != nil {
-				return fmt.Errorf("get peer groups %q: %w", peerName, err)
-			}
-			newGroups := removeStr(currentGroups, name)
-
-			pk, _, _, _, err := ssh.ParseAuthorizedKey(peer.AuthorizedKey)
-			if err != nil {
-				return fmt.Errorf("parse peer pubkey %q: %w", peerName, err)
-			}
-			principals := append([]string{peerName}, newGroups...)
-			var serial uint64
-			certBytes, serial, err = caObj.SignCert(ca.SignOptions{
-				Pubkey:     pk,
-				KeyID:      peerName,
-				Principals: principals,
-			})
-			if err != nil {
-				return fmt.Errorf("sign cert %q: %w", peerName, err)
-			}
-
-			if err := d.SetPeerGroups(ctx, peerName, newGroups); err != nil {
-				return fmt.Errorf("set peer groups %q: %w", peerName, err)
-			}
-			if err := d.SetPeerCert(ctx, peerName, certBytes, serial); err != nil {
-				return fmt.Errorf("set peer cert %q: %w", peerName, err)
-			}
-		}
-
-		var newAllowed []string
-		if isAllow {
-			currentAllowed, err := d.GetPeerAllowedGroups(ctx, peerName)
-			if err != nil {
-				return fmt.Errorf("get peer allowed groups %q: %w", peerName, err)
-			}
-			newAllowed = removeStr(currentAllowed, name)
-			if err := d.SetPeerAllowedGroups(ctx, peerName, newAllowed); err != nil {
-				return fmt.Errorf("set peer allowed groups %q: %w", peerName, err)
-			}
-		}
-
-		if !peer.Inbound {
-			clientPeerNotice(cmd.OutOrStdout(), peerName)
-			continue
-		}
-
-		pushOpts := selfPushOptions(dataDir, self, peerUnlock.get)
-		pushOpts.User = pushUser(peer)
-		host := peer.DialHost()
-		pusher, err := groupDial(ctx, host, pushOpts)
-		if err != nil {
-			stragglers = append(stragglers, peerName)
-			continue
-		}
-
-		if isMember {
-			certPath := peerCertRemotePath(peer, instanceKey)
-			if err := pusher.WriteFileAtomic(ctx, certPath, certBytes, fs.FileMode(0644)); err != nil {
-				stragglers = append(stragglers, peerName)
-				pusher.Close()
-				continue
-			}
-		}
-
-		if isAllow {
-			remote := peerAuthorizedKeysRemotePath(peer)
-			existing, err := pusher.ReadFile(ctx, remote)
-			if err != nil {
-				stragglers = append(stragglers, peerName)
-				pusher.Close()
-				continue
-			}
-			newContent, err := peerfiles.RewritePrincipals(existing, caPub, newAllowed)
-			if err != nil {
-				stragglers = append(stragglers, peerName)
-				pusher.Close()
-				continue
-			}
-			if err := pusher.WriteFileAtomic(ctx, remote, newContent, fs.FileMode(0644)); err != nil {
-				stragglers = append(stragglers, peerName)
-				pusher.Close()
-				continue
-			}
-		}
-
-		if err := pusher.VerifyHealth(ctx); err != nil {
-			stragglers = append(stragglers, peerName)
-			pusher.Close()
-			continue
-		}
-		pusher.Close()
-		touched = append(touched, peerName)
-	}
-
-	if len(stragglers) > 0 {
-		fmt.Fprintf(cmd.ErrOrStderr(), "peers with unfinished pushes (DB not deleted): %s\n", strings.Join(stragglers, ","))
-		return fmt.Errorf("group delete incomplete: %d straggler(s)", len(stragglers))
-	}
-
-	if err := d.DeleteGroup(ctx, name); err != nil {
-		return fmt.Errorf("delete group: %w", err)
-	}
-	if err := d.BumpFleetRev(ctx); err != nil {
-		return fmt.Errorf("bump fleet_rev: %w", err)
-	}
-	fmt.Fprintf(cmd.OutOrStdout(), "group %q deleted; affected peers: %s\n", name, strings.Join(touched, ","))
-	return nil
+	hostname, _ := osHostname()
+	return ops.GroupDelete(ctx, groupOpsDeps(cmd, d, dataDir, caUnlock, peerUnlock), name, hostname)
 }
 
 func newGroupCreateCmd() *cobra.Command {
@@ -552,10 +165,6 @@ func newGroupShowCmd() *cobra.Command {
 }
 
 func runGroupCreate(cmd *cobra.Command, name string) error {
-	if name == peerfiles.ManagerPrincipal {
-		return fmt.Errorf("group %q is reserved", name)
-	}
-
 	dbPath, err := cmd.Root().PersistentFlags().GetString("db")
 	if err != nil {
 		return fmt.Errorf("get db: %w", err)
@@ -573,22 +182,8 @@ func runGroupCreate(cmd *cobra.Command, name string) error {
 		ctx = context.Background()
 	}
 
-	if err := d.CreateGroup(ctx, name); err != nil {
-		switch {
-		case errors.Is(err, db.ErrGroupExists):
-			return fmt.Errorf("group %q already exists", name)
-		case errors.Is(err, db.ErrInvalidGroupName):
-			return fmt.Errorf("invalid group name %q", name)
-		default:
-			return fmt.Errorf("create group: %w", err)
-		}
-	}
-	if err := d.BumpFleetRev(ctx); err != nil {
-		return fmt.Errorf("bump fleet_rev: %w", err)
-	}
-
-	fmt.Fprintf(cmd.OutOrStdout(), "group %q created\n", name)
-	return nil
+	deps := ops.Deps{DB: d, OnEvent: groupEventPrinter(cmd.OutOrStdout(), cmd.ErrOrStderr())}
+	return ops.GroupCreate(ctx, deps, name)
 }
 
 func runGroupShow(cmd *cobra.Command, name string) error {
@@ -711,9 +306,6 @@ func runGroupAction(cmd *cobra.Command, group string, allow bool) error {
 		}
 		return fmt.Errorf("get peer: %w", err)
 	}
-	if host == "" {
-		host = peer.DialHost()
-	}
 	if allow && !peer.Inbound {
 		return fmt.Errorf("peer %s is a client-style peer (enrolled --no-inbound); it accepts no inbound connections", peerName)
 	}
@@ -744,62 +336,14 @@ func runGroupAction(cmd *cobra.Command, group string, allow bool) error {
 		current = removeStr(current, group)
 	}
 
-	if err := d.SetPeerAllowedGroups(ctx, peerName, current); err != nil {
-		return fmt.Errorf("set allowed groups: %w", err)
-	}
-	if err := d.BumpFleetRev(ctx); err != nil {
-		return fmt.Errorf("bump fleet_rev: %w", err)
-	}
-
-	if !peer.Inbound {
-		clientPeerNotice(cmd.OutOrStdout(), peerName)
-		fmt.Fprintf(cmd.OutOrStdout(), "group %q disallowed on %s\n", group, peerName)
-		return nil
-	}
-
-	instanceKey, err := EnsureInstanceKey(ctx, d)
-	if err != nil {
-		return fmt.Errorf("ensure instance key: %w", err)
-	}
-
+	caUnlock := newCAUnlocker()
+	defer caUnlock.Zero()
 	peerUnlock := newPeerUnlocker()
 	defer peerUnlock.Zero()
 
-	pushOpts := selfPushOptions(dataDir, resolveSelfIdent(ctx, d), peerUnlock.get)
-	pushOpts.User = pushUser(peer)
-	pusher, err := groupDial(ctx, host, pushOpts)
-	if err != nil {
-		return fmt.Errorf("ssh dial %s: %w", host, err)
-	}
-	defer pusher.Close()
-
-	// Inbound trust lives in <home>/.ssh/authorized_keys, isolated per CA —
-	// rewrite it in place, no reload.
-	caPubBytes, err := ca.LoadPublicKey(filepath.Join(dataDir, "ca"))
-	if err != nil {
-		return fmt.Errorf("load ca public key: %w", err)
-	}
-	caPub, _, _, _, err := ssh.ParseAuthorizedKey(caPubBytes)
-	if err != nil {
-		return fmt.Errorf("parse ca pubkey: %w", err)
-	}
-	remote := peerAuthorizedKeysRemotePath(peer)
-	existing, err := pusher.ReadFile(ctx, remote)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", remote, err)
-	}
-	newContent, err := peerfiles.RewritePrincipals(existing, caPub, current)
-	if err != nil {
-		return fmt.Errorf("rewrite authorized_keys: %w", err)
-	}
-	if err := pusher.WriteFileAtomic(ctx, remote, newContent, fs.FileMode(0644)); err != nil {
-		return fmt.Errorf("write %s: %w", remote, err)
-	}
-	if err := splicePeerConfig(ctx, pusher, d, peer, instanceKey); err != nil {
-		return fmt.Errorf("splice ssh config: %w", err)
-	}
-	if err := pusher.VerifyHealth(ctx); err != nil {
-		return fmt.Errorf("verify health: %w", err)
+	hostname, _ := osHostname()
+	if err := ops.SetPeerAllowedGroups(ctx, groupOpsDeps(cmd, d, dataDir, caUnlock, peerUnlock), peerName, current, host, hostname); err != nil {
+		return err
 	}
 
 	if allow {
@@ -808,13 +352,6 @@ func runGroupAction(cmd *cobra.Command, group string, allow bool) error {
 		fmt.Fprintf(cmd.OutOrStdout(), "group %q disallowed on %s\n", group, peerName)
 	}
 	return nil
-}
-
-func pushUser(p *db.Peer) string {
-	if p.TargetUser != "" {
-		return p.TargetUser
-	}
-	return "root"
 }
 
 func contains(xs []string, v string) bool {
