@@ -12,10 +12,10 @@ func TestMemoUnlockerGetReturnsFreshCopy(t *testing.T) {
 	t.Setenv(envCAPassphrase, want)
 
 	calls := 0
-	m := &memoUnlocker{fn: func() ([]byte, error) {
+	m := newMemoUnlocker(func() ([]byte, error) {
 		calls++
 		return passphrase.Prompt("CA passphrase: ", envCAPassphrase)
-	}}
+	})
 
 	first, err := m.get()
 	if err != nil {
@@ -60,7 +60,12 @@ func TestNewPeerUnlockerMemoizesAcrossZeroing(t *testing.T) {
 	}
 
 	m.Zero()
-	if m.got {
-		t.Fatal("Zero did not clear got")
+	t.Setenv(envPeerPassphrase, "re-prompted")
+	third, err := m.get()
+	if err != nil {
+		t.Fatalf("third get: %v", err)
+	}
+	if !bytes.Equal(third, []byte("re-prompted")) {
+		t.Fatalf("get after Zero = %q, want %q (Zero did not clear the cache)", third, "re-prompted")
 	}
 }
