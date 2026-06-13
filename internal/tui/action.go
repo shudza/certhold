@@ -68,10 +68,30 @@ func newPassSession() *passSession {
 	return s
 }
 
+// close retires the last action's reader and zeroes the cached CA passphrase at
+// session exit. The final reader is the one re-armed by answerPassphrase that no
+// subsequent arm() ever closed; closing the current channel here wakes it (!ok →
+// nil) instead of leaving it blocked until process exit. Idempotent: a nil reqs
+// pointer means it was already closed.
+func (s *passSession) close() {
+	if old := s.reqs.Swap(nil); old != nil {
+		close(*old)
+	}
+	s.unlocker.Close()
+}
+
 // arm rotates in a fresh request channel for a new action and returns it, so a
 // leaked waiter from a prior (completed) action — still blocked on the old
-// channel — can never steal the new action's passphrase request.
+// channel — can never steal the new action's passphrase request. It also closes
+// the prior channel, which retires any reader still blocked on it: waitReqCmd
+// observes the closed channel (!ok) and returns nil, so the orphaned reader
+// wakes and exits instead of blocking forever. The prior action's worker has
+// already returned (it sent its terminal error before the next action could
+// arm), so nothing is left to send on the closed channel.
 func (s *passSession) arm() chan passReq {
+	if old := s.reqs.Load(); old != nil {
+		close(*old)
+	}
 	ch := make(chan passReq, 1)
 	s.reqs.Store(&ch)
 	return ch
@@ -104,10 +124,20 @@ func (s *passSession) prompt(label string) ([]byte, error) {
 	return r.pass, r.err
 }
 
+// waitReqCmd captures the current action's request channel and blocks for the
+// next passphrase request on it. A closed channel (next action armed) yields
+// !ok, returning nil so the reader retires instead of leaking: this is what
+// stops the one-reader-per-action leak the re-arm in answerPassphrase would
+// otherwise create. Within a single action the channel stays open, so a second
+// prompt (peer passphrase after CA) is delivered normally.
 func (s *passSession) waitReqCmd() tea.Cmd {
 	ch := *s.reqs.Load()
 	return func() tea.Msg {
-		return passPromptMsg{req: <-ch}
+		req, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return passPromptMsg{req: req}
 	}
 }
 

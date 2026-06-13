@@ -126,6 +126,14 @@ func Run(ctx context.Context, d *db.DB, dbPath string, in io.Reader, out io.Writ
 	} else {
 		m.readOnly = true
 	}
+	// pass and peerPass are pointers constructed once in NewModel and shared by
+	// every copy of the value-type Model, so zeroing them here zeroes the live
+	// caches regardless of which Model copy the program ends with. close also
+	// retires the last action's re-armed passphrase reader. Mirrors the CLI's
+	// defer …Zero() contract for SessionUnlocker.
+	defer m.pass.close()
+	defer m.peerPass.Close()
+
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx), tea.WithInput(in), tea.WithOutput(out))
 	_, err = p.Run()
 	return err
