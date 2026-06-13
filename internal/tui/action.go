@@ -212,6 +212,8 @@ func (m Model) startRevoke() (tea.Model, tea.Cmd) {
 	}
 	m.pushModal(confirmModal{
 		heading: "revoke " + p.Name,
+		subject: p.Name,
+		kind:    confirmRevoke,
 		body: []string{
 			"Revoke peer " + p.Name + " and rekey the CA to exclude it?",
 			"This rotates the CA across all remaining inbound peers.",
@@ -252,10 +254,23 @@ func (m Model) submitModal(top modal) (tea.Model, tea.Cmd) {
 	switch mo := top.(type) {
 	case confirmModal:
 		m.popModal()
-		return m.launchRevoke(mo.heading)
+		if mo.kind == confirmGroupDelete {
+			return m.launchGroupDelete(mo.subject)
+		}
+		return m.launchRevoke(mo.subject)
 	case pickModal:
 		m.popModal()
-		return m.launchEditGroups(mo.subject, mo.selected())
+		switch mo.kind {
+		case pickGroupMembers:
+			return m.launchMembership(mo)
+		case pickPeerAllowed:
+			return m.launchAllowed(mo.subject, mo.selected())
+		default:
+			return m.launchEditGroups(mo.subject, mo.selected())
+		}
+	case textModal:
+		m.popModal()
+		return m.submitText(mo)
 	case passphraseModal:
 		m.popModal()
 		return m.answerPassphrase(passReply{pass: []byte(mo.input.Value())}, mo)
@@ -270,8 +285,7 @@ func (m Model) launchEditGroups(name string, groups []string) (tea.Model, tea.Cm
 	return m.startAction("update "+name, run)
 }
 
-func (m Model) launchRevoke(heading string) (tea.Model, tea.Cmd) {
-	name := strings.TrimPrefix(heading, "revoke ")
+func (m Model) launchRevoke(name string) (tea.Model, tea.Cmd) {
 	hostname := m.action.Hostname
 	run := func(ctx context.Context, deps ops.Deps) error {
 		return ops.RevokePeer(ctx, deps, name, hostname)

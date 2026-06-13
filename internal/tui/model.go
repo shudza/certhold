@@ -319,6 +319,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.startEditGroups()
 	case "x":
 		return m.startRevoke()
+	case "i":
+		return m.startEditAllowed()
+	case "n":
+		return m.startCreateGroup()
+	case "R":
+		return m.startRenameGroup()
+	case "D":
+		return m.startDeleteGroup()
+	case "m":
+		return m.startGroupMembership()
 	}
 	return m, nil
 }

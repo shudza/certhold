@@ -130,10 +130,12 @@ func (m Model) footerLines(w int) []string {
 		hints = "tab/1/2/3/4 views · P probe now · p resume · r reload · q quit"
 	case m.view == viewNet:
 		hints = "tab/1/2/3/4 views · P probe now · p pause · r reload · q quit"
+	case m.view == viewGroups && m.mutationsEnabled():
+		hints = "tab/1/2/3/4 views · j/k move · n new · R rename · D delete · m members · ctrl+l forget pass · / filter · q quit"
 	case m.view == viewGroups:
 		hints = "tab/1/2/3/4 views · j/k move · / filter · r reload · q quit"
 	case m.mutationsEnabled():
-		hints = "tab/1/2/3/4 views · j/k move · enter detail · u groups · x revoke · ctrl+l forget pass · / filter · q quit"
+		hints = "tab/1/2/3/4 views · j/k move · enter detail · u groups · i allowed · x revoke · ctrl+l forget pass · / filter · q quit"
 	default:
 		hints = "tab/1/2/3/4 views · j/k move · enter detail · / filter · r reload · q quit"
 	}

@@ -39,11 +39,21 @@ var (
 	pickOnStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true)
 )
 
+// confirmKind tags which action a confirmModal's yes launches.
+type confirmKind int
+
+const (
+	confirmRevoke confirmKind = iota
+	confirmGroupDelete
+)
+
 // confirmModal is a yes/no gate. submit carries the intent the Model turns into
-// an ops command.
+// an ops command; subject names the peer/group the kind acts on.
 type confirmModal struct {
 	heading string
 	body    []string
+	kind    confirmKind
+	subject string
 }
 
 func (c confirmModal) title() string { return c.heading }
@@ -110,24 +120,45 @@ func (p passphraseModal) view(int) []string {
 	return lines
 }
 
+// pickKind tags which action a pickModal's submit launches, so the one generic
+// multi-select serves all three pickers (peer→groups, group→members,
+// peer→allowed-inbound) without forking the modal.
+type pickKind int
+
+const (
+	pickPeerGroups pickKind = iota
+	pickGroupMembers
+	pickPeerAllowed
+)
+
 // pickModal is a multi-select list. options are sorted names; checked tracks
-// membership. submit hands back the selected set as the Model's action.
+// membership; preChecked is the snapshot at open time so submitModal can diff
+// the selection against it. submit hands back the selected set as the Model's
+// action.
 type pickModal struct {
-	heading string
-	subject string
-	options []string
-	checked map[string]bool
-	cursor  int
+	heading    string
+	subject    string
+	kind       pickKind
+	options    []string
+	checked    map[string]bool
+	prechecked map[string]bool
+	cursor     int
 }
 
 func newPickModal(heading, subject string, options, preChecked []string) pickModal {
+	return newPickModalKind(pickPeerGroups, heading, subject, options, preChecked)
+}
+
+func newPickModalKind(kind pickKind, heading, subject string, options, preChecked []string) pickModal {
 	opts := append([]string(nil), options...)
 	sort.Strings(opts)
 	checked := make(map[string]bool, len(preChecked))
+	pre := make(map[string]bool, len(preChecked))
 	for _, g := range preChecked {
 		checked[g] = true
+		pre[g] = true
 	}
-	return pickModal{heading: heading, subject: subject, options: opts, checked: checked}
+	return pickModal{heading: heading, subject: subject, kind: kind, options: opts, checked: checked, prechecked: pre}
 }
 
 func (p pickModal) handle(msg tea.KeyMsg) (modal, modalResult) {
