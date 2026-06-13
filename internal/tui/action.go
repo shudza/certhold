@@ -60,8 +60,9 @@ type passPromptMsg struct {
 // (modal submit/cancel) always satisfies.
 type passSession struct {
 	unlocker *ops.SessionUnlocker
-	reqs     atomic.Pointer[chan passReq] // per-action channel; rotated by arm
-	gen      atomic.Int64                 // current action gen, stamped onto each request
+	reqs     atomic.Pointer[chan passReq]   // per-action channel; rotated by arm
+	gen      atomic.Int64                   // current action gen, stamped onto each request
+	inflight atomic.Pointer[chan passReply] // the reply chan a worker is parked on, if any
 }
 
 func newPassSession() *passSession {
@@ -75,9 +76,19 @@ func newPassSession() *passSession {
 // close retires the last action's reader and zeroes the cached CA passphrase at
 // session exit. The final reader is the one re-armed by answerPassphrase that no
 // subsequent arm() ever closed; closing the current channel here wakes it (!ok →
-// nil) instead of leaving it blocked until process exit. Idempotent: a nil reqs
-// pointer means it was already closed.
+// nil) instead of leaving it blocked until process exit. A worker parked on a
+// passphrase reply is canceled first: it holds the unlocker lock while blocked,
+// so unlocker.Close() would deadlock against it otherwise (the common case when
+// a test's drain ends with the modal still open). The reply chan is buffered
+// (cap 1) so this send never blocks; a benign no-op if the modal already
+// answered. Idempotent: a nil reqs pointer means it was already closed.
 func (s *passSession) close() {
+	if rp := s.inflight.Swap(nil); rp != nil {
+		select {
+		case *rp <- passReply{err: errPassphraseCanceled}:
+		default:
+		}
+	}
 	if old := s.reqs.Swap(nil); old != nil {
 		close(*old)
 	}
@@ -139,6 +150,11 @@ func (s *passSession) promptErr(heading, label, errMsg string) ([]byte, error) {
 	if chp == nil {
 		return nil, errPassphraseCanceled
 	}
+	// Publish the reply channel so close() can cancel a parked worker (the worker
+	// holds the unlocker lock while blocked here; close must wake it before it
+	// can zero the cache). Cleared on return so a normal answer isn't double-sent.
+	s.inflight.Store(&reply)
+	defer s.inflight.Store(nil)
 	*chp <- passReq{gen: int(s.gen.Load()), heading: heading, prompt: label, errMsg: errMsg, reply: reply}
 	r := <-reply
 	return r.pass, r.err

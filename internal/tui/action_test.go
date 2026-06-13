@@ -121,6 +121,10 @@ func actionModel(t *testing.T, dataDir string, d *db.DB) Model {
 // msgs channel — and proves no step deadlocks the loop.
 func drain(t *testing.T, m Model, cmd tea.Cmd, answers ...string) Model {
 	t.Helper()
+	// Retire the last action's re-armed passphrase reader at test end so a
+	// parked waitReqCmd goroutine never lingers past the test. close is
+	// idempotent, so multiple drains in one test register it safely.
+	t.Cleanup(m.pass.close)
 	msgs := make(chan tea.Msg, 64)
 	var run func(c tea.Cmd)
 	run = func(c tea.Cmd) {

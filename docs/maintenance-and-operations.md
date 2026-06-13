@@ -64,6 +64,13 @@ Every command that dials a peer also re-splices the peer's keyed `config` block
 a cert persists the cert bytes in the database — that stored cert is what the
 pull channel serves.
 
+> **TUI.** Every flow in this document has an equivalent in `certhold tui` (see
+> [`tui`](usage.md#tui)), which runs the identical `ops` paths — `update` is `u`
+> (or `i` for allowed-inbound), `revoke` is `x`, `rekey` is `K`, group CRUD is
+> `n`/`R`/`D`/`m`, enroll is `e` — so the push model, passphrase handling, and
+> straggler reporting described here apply unchanged. The TUI additionally
+> batches `update`/`revoke`/membership over a multi-selected set of peers.
+
 ## The pull channel (client-style peers)
 
 A [client-style peer](architecture.md#client-style-peers-and-the-pull-channel)
@@ -238,7 +245,8 @@ key was encrypted, the same passphrase is reused (you type it once); if it was
 plaintext, the new key is plaintext too. `--rotate-passphrase` prompts for a
 fresh CA passphrase for the new key instead. It affects the **CA key only** —
 the manager peer key's passphrase is never changed by rekey. See
-[security.md](security.md#when-the-manager-prompts).
+[security.md](security.md#when-the-manager-prompts). In the TUI this is the
+`K` rekey modal's *rotate at-rest CA passphrase* toggle.
 
 ## Planned, not built
 

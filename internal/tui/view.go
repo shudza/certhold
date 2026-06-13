@@ -137,9 +137,9 @@ func (m Model) footerLines(w int) []string {
 	case m.view == viewStatus:
 		hints = "tab/1/2/3/4 views · r refresh · q quit"
 	case m.view == viewNet && m.probePaused:
-		hints = "tab/1/2/3/4 views · P probe now · p resume · r reload · q quit"
+		hints = "tab/1/2/3/4 views · j/k move · P probe now · p resume · r reload · q quit"
 	case m.view == viewNet:
-		hints = "tab/1/2/3/4 views · P probe now · p pause · r reload · q quit"
+		hints = "tab/1/2/3/4 views · j/k move · P probe now · p pause · r reload · q quit"
 	case m.view == viewGroups && m.mutationsEnabled():
 		hints = "tab/1/2/3/4 views · j/k move · n new · R rename · D delete · m members · e enroll · K rekey · ctrl+l forget pass · / filter · q quit"
 	case m.view == viewGroups:
@@ -487,7 +487,20 @@ func remap(idx, keep []int) []int {
 // flexible columns (widest first, floor minColW) until the table fits the
 // terminal.
 func fitColumns(headers []string, rows [][]string, flexible []int, w int) []int {
+	return fitColumnsSeed(headers, rows, flexible, w, nil)
+}
+
+// fitColumnsSeed is fitColumns with a per-column lower bound on the natural
+// width: a column whose seed exceeds its widest cell is sized at the seed, so a
+// later wider value (the first LAST OK timestamp) does not grow the column and
+// reflow the table. seed may be nil or shorter than the columns.
+func fitColumnsSeed(headers []string, rows [][]string, flexible []int, w int, seed []int) []int {
 	widths := naturalWidths(headers, rows)
+	for i := range widths {
+		if i < len(seed) && seed[i] > widths[i] {
+			widths[i] = seed[i]
+		}
+	}
 	total := func() int {
 		t := (len(widths) - 1) * len(colGap)
 		for _, cw := range widths {

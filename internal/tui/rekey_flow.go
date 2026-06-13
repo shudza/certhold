@@ -98,7 +98,7 @@ func (r rekeyModal) view(int) []string {
 // startRekey opens the rekey confirm modal. Gated by --read-only and only from
 // a non-modal state; a missing action seam (read-only) makes it a no-op.
 func (m Model) startRekey() (tea.Model, tea.Cmd) {
-	if !m.mutationsEnabled() {
+	if !m.mutationsEnabled() || (m.view != viewPeers && m.view != viewGroups) {
 		return m, nil
 	}
 	m.pushModal(newRekeyModal())

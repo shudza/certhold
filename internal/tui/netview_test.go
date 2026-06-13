@@ -324,6 +324,38 @@ func TestNetSweepConcurrencyCapped(t *testing.T) {
 	}
 }
 
+func TestFmtLatency(t *testing.T) {
+	cases := []struct {
+		d    time.Duration
+		want string
+	}{
+		{0, "<1ms"},
+		{500 * time.Microsecond, "<1ms"},
+		{5 * time.Millisecond, "5ms"},
+		{9999 * time.Millisecond, "9999ms"},
+		{10 * time.Second, "10.0s"},
+		{12345 * time.Millisecond, "12.3s"},
+	}
+	for _, c := range cases {
+		if got := fmtLatency(c.d); got != c.want {
+			t.Errorf("fmtLatency(%v) = %q, want %q", c.d, got, c.want)
+		}
+	}
+}
+
+func TestFmtLastOK(t *testing.T) {
+	now := time.Date(2026, 6, 13, 14, 0, 0, 0, time.Local)
+	// Same calendar day → plain hh:mm:ss, no date marker.
+	if got := fmtLastOK(time.Date(2026, 6, 13, 9, 30, 5, 0, time.Local), now); got != "09:30:05" {
+		t.Errorf("same-day LAST OK = %q, want 09:30:05", got)
+	}
+	// Different day → mm-dd prefix so a >24h-old time is not read as today.
+	got := fmtLastOK(time.Date(2026, 6, 10, 9, 30, 5, 0, time.Local), now)
+	if !strings.Contains(got, "09:30:05") || !strings.Contains(got, "06-10") {
+		t.Errorf("cross-day LAST OK = %q, want 06-10 09:30:05", got)
+	}
+}
+
 func TestNetTabAndHeaderMarker(t *testing.T) {
 	m := press(t, netModel(t, nil), "4")
 	v := m.View()
@@ -337,7 +369,7 @@ func TestNetTabAndHeaderMarker(t *testing.T) {
 	}
 }
 
-func TestNetOverflowShowsMore(t *testing.T) {
+func TestNetOverflowShowsScrollCue(t *testing.T) {
 	d := testData()
 	for i := 0; i < 10; i++ {
 		d.Peers = append(d.Peers, peerRow{Name: fmt.Sprintf("peer%02d", i), DialHost: "host", Inbound: true})
@@ -346,8 +378,44 @@ func TestNetOverflowShowsMore(t *testing.T) {
 	m.tick = func(int) tea.Cmd { return nil }
 	nm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 10})
 	m = press(t, nm.(Model), "4")
-	if v := m.View(); !strings.Contains(v, "more — enlarge the terminal") {
-		t.Fatalf("overflowing net table missing 'more' indicator:\n%s", v)
+	total := len(d.Peers)
+	if v := m.View(); !strings.Contains(v, fmt.Sprintf("1/%d", total)) || !strings.Contains(v, "▼") {
+		t.Fatalf("overflowing net table missing scroll cue:\n%s", v)
+	}
+}
+
+func TestNetScrollFollowsSelection(t *testing.T) {
+	d := testData()
+	for i := 0; i < 20; i++ {
+		d.Peers = append(d.Peers, peerRow{Name: fmt.Sprintf("peer%02d", i), DialHost: "host", Inbound: true})
+	}
+	m := NewModel(context.Background(), d, nil)
+	m.tick = func(int) tea.Cmd { return nil }
+	nm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 12})
+	m = press(t, nm.(Model), "4")
+	total := len(d.Peers)
+	// j past the fold: a peer below the initial window must scroll into view and
+	// the cue must advance off "1/total".
+	for i := 0; i < total-1; i++ {
+		m = press(t, m, "j")
+	}
+	v := m.View()
+	last := d.Peers[total-1].Name
+	if !strings.Contains(v, last) {
+		t.Fatalf("scrolling to the bottom did not reveal %q:\n%s", last, v)
+	}
+	if !strings.Contains(v, fmt.Sprintf("%d/%d", total, total)) || !strings.Contains(v, "▲") {
+		t.Fatalf("bottom scroll cue wrong (want %d/%d with ▲):\n%s", total, total, v)
+	}
+	if l := lineWith(t, v, last); !strings.HasPrefix(strings.TrimSpace(l), ">") {
+		t.Fatalf("bottom peer %q is not the selected (cursor) row: %q", last, l)
+	}
+	// k all the way back to the top restores the 1/total ▼ cue.
+	for i := 0; i < total-1; i++ {
+		m = press(t, m, "k")
+	}
+	if v := m.View(); !strings.Contains(v, fmt.Sprintf("1/%d", total)) {
+		t.Fatalf("scrolling back to top did not restore 1/%d cue:\n%s", total, v)
 	}
 }
 

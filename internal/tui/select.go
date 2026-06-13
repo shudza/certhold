@@ -93,14 +93,22 @@ func (m Model) startBatch(verb string, names []string, op func(ctx context.Conte
 				// matching the single-peer retry. Nothing has been marked yet, so
 				// the outcome holder is left nil → all marks survive for the retry.
 				//
-				// INVARIANT this rerun relies on: every batchable op unlocks the CA
-				// as its FIRST step (UpdatePeer/RevokePeer both LoadWithPassphrase
-				// before any DB write), so a passphrase-class error always surfaces
-				// on the first target before any target has mutated — the rerun
-				// re-does nothing already done. A future op that prompted only for
-				// some targets (a later peer's first prompt) would break this and
-				// could re-run an already-succeeded peer; such an op must store
-				// partial successes before returning a passphrase error.
+				// Why the whole-batch rerun is safe: a passphrase-class error can
+				// surface AFTER some targets have already mutated, so the rerun
+				// re-applies already-done targets. It does NOT rely on any op
+				// unlocking the CA before its first DB write — neither batchable op
+				// does:
+				//   - RevokePeer runs SetPeerRevoked (a DB write) BEFORE the CA
+				//     unlock that happens inside its Rekey, so a bad CA passphrase
+				//     surfaces only after the first target's revoked flag is set.
+				//   - UpdatePeer's manager peer-key passphrase (deps.PeerPass)
+				//     prompts at PUSH time, AFTER its re-sign DB write; the first
+				//     target to push can raise it once an earlier target committed.
+				// The rerun is nonetheless end-state-correct because every batchable
+				// op is idempotent: SetPeerRevoked is idempotent (re-revoking a
+				// revoked peer is a no-op) and UpdatePeer's re-sign+re-push converges
+				// on the same group set. A future op whose rerun is NOT idempotent
+				// must store partial successes before returning a passphrase error.
 				if isPassphraseError(err) {
 					return err
 				}

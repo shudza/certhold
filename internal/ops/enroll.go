@@ -116,6 +116,9 @@ func MintEnroll(ctx context.Context, deps Deps, spec EnrollSpec) (EnrollResult, 
 		if err := tx.InsertPeer(ctx, spec.Name, serial, fingerprint, pubAuth, spec.User, !spec.Client, pullToken); err != nil {
 			return fmt.Errorf("insert peer: %w", err)
 		}
+		if err := tx.SetPeerCert(ctx, spec.Name, certBytes, serial); err != nil {
+			return fmt.Errorf("set peer cert: %w", err)
+		}
 		if spec.Address != "" {
 			if err := tx.SetPeerAddress(ctx, spec.Name, spec.Address); err != nil {
 				return fmt.Errorf("set peer address: %w", err)
@@ -147,10 +150,6 @@ func MintEnroll(ctx context.Context, deps Deps, spec EnrollSpec) (EnrollResult, 
 		return nil
 	}); err != nil {
 		return EnrollResult{}, err
-	}
-
-	if err := deps.DB.SetPeerCert(ctx, spec.Name, certBytes, serial); err != nil {
-		return EnrollResult{}, fmt.Errorf("set peer cert: %w", err)
 	}
 
 	return EnrollResult{

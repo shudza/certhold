@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"strings"
 	"text/tabwriter"
 
@@ -29,22 +28,6 @@ func newGroupCmd() *cobra.Command {
 	return cmd
 }
 
-// groupEventPrinter renders group-op events. Unlike opsEventPrinter it skips
-// events without a Msg: group per-peer EventPeerDone is purely structural (the
-// CLI historically printed nothing per pushed peer).
-func groupEventPrinter(out, errOut io.Writer) func(ops.Event) {
-	return func(e ops.Event) {
-		switch e.Type {
-		case ops.EventInfo, ops.EventPeerDone:
-			if e.Msg != "" {
-				fmt.Fprintf(out, "%s\n", e.Msg)
-			}
-		case ops.EventWarn:
-			fmt.Fprintf(errOut, "%s\n", e.Msg)
-		}
-	}
-}
-
 func groupOpsDeps(cmd *cobra.Command, d *db.DB, dataDir string, caUnlock, peerUnlock *memoUnlocker) ops.Deps {
 	return ops.Deps{
 		DB:       d,
@@ -52,7 +35,7 @@ func groupOpsDeps(cmd *cobra.Command, d *db.DB, dataDir string, caUnlock, peerUn
 		CAUnlock: caUnlock.get,
 		PeerPass: peerUnlock.get,
 		Dial:     ops.DialFn(groupDial),
-		OnEvent:  groupEventPrinter(cmd.OutOrStdout(), cmd.ErrOrStderr()),
+		OnEvent:  opsEventPrinter(cmd.OutOrStdout(), cmd.ErrOrStderr()),
 	}
 }
 
@@ -182,7 +165,7 @@ func runGroupCreate(cmd *cobra.Command, name string) error {
 		ctx = context.Background()
 	}
 
-	deps := ops.Deps{DB: d, OnEvent: groupEventPrinter(cmd.OutOrStdout(), cmd.ErrOrStderr())}
+	deps := ops.Deps{DB: d, OnEvent: opsEventPrinter(cmd.OutOrStdout(), cmd.ErrOrStderr())}
 	return ops.GroupCreate(ctx, deps, name)
 }
 
