@@ -64,6 +64,22 @@ func (t *Tx) InsertPeer(ctx context.Context, name string, serial uint64, fingerp
 	return nil
 }
 
+func (t *Tx) SetPeerCert(ctx context.Context, name string, cert []byte, serial uint64) error {
+	res, err := t.tx.ExecContext(ctx,
+		`UPDATE peers SET cert = ?, cert_serial = ? WHERE name = ?`, cert, int64(serial), name)
+	if err != nil {
+		return fmt.Errorf("set peer cert: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set peer cert rows: %w", err)
+	}
+	if n == 0 {
+		return ErrPeerNotFound
+	}
+	return nil
+}
+
 func (t *Tx) SetPeerAddress(ctx context.Context, name, address string) error {
 	res, err := t.tx.ExecContext(ctx, `UPDATE peers SET address = ? WHERE name = ?`, address, name)
 	if err != nil {

@@ -26,11 +26,17 @@ func opsDeps(cmd *cobra.Command, d *db.DB, dataDir string, caUnlock, peerUnlock 
 	}
 }
 
+// opsEventPrinter renders ops events to a command's stdout/stderr. It skips
+// info/done events without a Msg: per-peer EventPeerDone is purely structural
+// for some ops (the CLI historically printed nothing per pushed peer), and an
+// empty Msg must not emit a blank line.
 func opsEventPrinter(out, errOut io.Writer) func(ops.Event) {
 	return func(e ops.Event) {
 		switch e.Type {
 		case ops.EventInfo, ops.EventPeerDone:
-			fmt.Fprintf(out, "%s\n", e.Msg)
+			if e.Msg != "" {
+				fmt.Fprintf(out, "%s\n", e.Msg)
+			}
 		case ops.EventWarn:
 			fmt.Fprintf(errOut, "%s\n", e.Msg)
 		}

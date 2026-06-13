@@ -89,6 +89,7 @@ func (m Model) netLines(w, bodyH int) []string {
 		return []string{dimStyle.Render("no peers enrolled — see 'certhold enroll'")}
 	}
 
+	now := m.now()
 	headers := []string{"PEER", "HOST", "STATUS", "LATENCY", "LAST OK"}
 	rows := make([][]string, len(peers))
 	styles := make([]lipgloss.Style, len(peers))
@@ -102,31 +103,68 @@ func (m Model) netLines(w, bodyH int) []string {
 					status, style = "○ down", errStyle
 				}
 				if !st.lastOK.IsZero() {
-					lastOK = st.lastOK.Format("15:04:05")
+					lastOK = fmtLastOK(st.lastOK, now)
 				}
 			}
 		}
 		rows[i] = []string{p.Name, p.DialHost, status, latency, lastOK}
 		styles[i] = style
 	}
-	widths := fitColumns(headers, rows, []int{0, 1}, w)
+	// Seed LAST OK at the hh:mm:ss width (8) so the column does not grow when the
+	// first timestamp lands and shift HOST mid-sweep; fitColumns only widens.
+	natLastOK := []int{0, 0, 0, 0, len("00:00:00")}
+	widths := fitColumnsSeed(headers, rows, []int{0, 1}, w, natLastOK)
 
-	lines := []string{renderRow("", headers, widths, w, colHeadStyle)}
-	for i := range rows {
-		cells := padCells(rows[i], widths)
-		cells[2] = styles[i].Render(cells[2])
-		lines = append(lines, truncLine(strings.Join(cells, colGap), w))
+	sel := clamp(m.netIdx, 0, len(peers)-1)
+	visible := bodyH - 1
+	if len(peers) > visible && visible > 2 {
+		visible--
 	}
-	if len(lines) > bodyH && bodyH >= 2 {
-		hidden := len(lines) - (bodyH - 1)
-		lines = append(lines[:bodyH-1:bodyH-1],
-			dimStyle.Render(fmt.Sprintf("… %d more — enlarge the terminal", hidden)))
+	if visible < 1 {
+		visible = 1
+	}
+	top := 0
+	if sel >= visible {
+		top = sel - visible + 1
+	}
+
+	lines := []string{renderRow(noMarker, headers, widths, w, colHeadStyle)}
+	for i := top; i < len(peers) && i < top+visible; i++ {
+		marker := noMarker
+		if i == sel {
+			marker = selMarker
+		}
+		cells := padCells(rows[i], widths)
+		if i == sel {
+			lines = append(lines, selStyle.Render(truncCell(marker+strings.Join(cells, colGap), w)))
+			continue
+		}
+		cells[2] = styles[i].Render(cells[2])
+		lines = append(lines, truncLine(marker+strings.Join(cells, colGap), w))
+	}
+	if len(peers) > visible {
+		lines = append(lines, scrollCue(sel, top, visible, len(peers)))
 	}
 	return lines
 }
 
+// fmtLastOK renders a successful-probe timestamp. Same calendar day shows the
+// plain hh:mm:ss; a different day prefixes mm-dd so a timestamp older than the
+// current time-of-day is not mistaken for today (the time-of-day alone is
+// ambiguous past 24h).
+func fmtLastOK(at, now time.Time) string {
+	at, now = at.Local(), now.Local()
+	clock := at.Format("15:04:05")
+	if at.YearDay() == now.YearDay() && at.Year() == now.Year() {
+		return clock
+	}
+	return at.Format("01-02") + " " + clock
+}
+
 func fmtLatency(d time.Duration) string {
-	if ms := d.Milliseconds(); ms > 0 {
+	if ms := d.Milliseconds(); ms > 9999 {
+		return fmt.Sprintf("%.1fs", d.Seconds())
+	} else if ms > 0 {
 		return fmt.Sprintf("%dms", ms)
 	}
 	return "<1ms"

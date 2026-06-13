@@ -185,6 +185,17 @@ func Rekey(ctx context.Context, deps Deps, opts RekeyOptions) error {
 
 	timestamp := time.Now().UTC().Format("20060102T150405")
 	oldCADir := filepath.Join(deps.DataDir, fmt.Sprintf("ca.old.%s", timestamp))
+	// Two rekeys in the same wall-clock second (e.g. a TUI batch revoke) would
+	// otherwise collide on this second-resolution archive name and fail the
+	// non-empty-dir rename; disambiguate with a numeric suffix.
+	for i := 1; ; i++ {
+		if _, err := os.Stat(oldCADir); errors.Is(err, os.ErrNotExist) {
+			break
+		} else if err != nil {
+			return fmt.Errorf("stat old ca archive: %w", err)
+		}
+		oldCADir = filepath.Join(deps.DataDir, fmt.Sprintf("ca.old.%s.%d", timestamp, i))
+	}
 	if err := os.Rename(caDir, oldCADir); err != nil {
 		return fmt.Errorf("rename old ca: %w", err)
 	}

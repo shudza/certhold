@@ -314,42 +314,111 @@ and `N` for [client-style peers](#client-style-peers-enroll---client).
 ### `tui`
 
 ```
-certhold tui
+certhold tui [--read-only]
 ```
 
-Interactive read-only dashboard over the same state `list` reads, in the
-terminal's alternate screen. No push, no passphrase: it never loads the CA key,
-never dials SSH, and performs zero writes — safe to leave open. Two views,
-switched with `tab` (or `1` / `2`):
+Interactive fleet dashboard in the terminal's alternate screen, over the same
+state `list` reads. By default it can also **mutate** the fleet in place —
+enroll, edit groups, revoke, rekey, group CRUD — running the very same
+[`ops`](#command-reference) paths the individual commands do, so a TUI action is
+byte-for-byte equivalent to its CLI counterpart (same signing, same SSH push,
+same fleet-rev bump). Pass `--read-only` for the v1 dashboard: no mutating keys,
+no CA key load, no SSH dial, zero writes — safe to leave open.
 
-- **Peers** (default): `NAME ADDRESS USER GROUPS ALLOWED INBOUND REVOKED SERIAL
-  EXPIRES`. `ADDRESS` is the dial target (recorded address, falling back to the
-  peer name — see [Name vs. address](#name-vs-address)). `EXPIRES` is read from
-  the peer's stored signed cert: `-` for peers enrolled before certs were
+Four views, switched with `tab` (cycles) or the number keys `1`–`4`:
+
+- **`1` Peers** (default): `NAME ADDRESS USER GROUPS ALLOWED INBOUND REVOKED
+  SERIAL EXPIRES`. `ADDRESS` is the dial target (recorded address, falling back
+  to the peer name — see [Name vs. address](#name-vs-address)). `EXPIRES` is read
+  from the peer's stored signed cert: `-` for peers enrolled before certs were
   persisted, `∞` for a no-expiry cert. Revoked peers are dimmed red; expired
   certs highlighted. On terminals too narrow for every column, low-priority
   columns (`INBOUND`, `SERIAL`, then `ALLOWED`, …) are dropped so `REVOKED` and
   `EXPIRES` stay readable. `enter` opens a detail pane with the full record
-  (status, cert validity window, fingerprint, created, …); the pane stays
-  pinned to that peer across reloads. Pull token values are never displayed —
-  the detail pane only says whether one exists.
-- **Groups**: groups with peer counts; the pane under the table shows the
+  (status, cert validity window, fingerprint, created, …); the pane stays pinned
+  to that peer across reloads. Pull token values are never displayed — the detail
+  pane only says whether one exists.
+- **`2` Groups**: groups with peer counts; the pane under the table shows the
   selected group's members and which peers allow it inbound.
+- **`3` Status**: a health snapshot — the `serve` endpoint's liveness and its
+  reported fleet-rev / CA version (fetched from `/healthz`; flags `STALE` when
+  the server's rev lags the local db), then fleet totals (peers / inbound /
+  client, revoked count, expired and ≤30-day-expiring certs), and the manager's
+  own fleet rev and active CA version. `r` refetches `/healthz` and reloads.
+- **`4` Net**: live reachability of inbound peers. Columns `PEER HOST STATUS
+  LATENCY LAST OK`; `STATUS` is `● up` / `○ down` / `–` (not probed, e.g. a
+  client peer). Probes run every 5 s (capped at 8 concurrent); `LAST OK` shows
+  the last success as `hh:mm:ss`, prefixed with `mm-dd` when it is not today.
+  `p` pauses/resumes the sweep, `P` probes once now.
 
-The header shows the db path, fleet revision and active CA version. The
-selected row is marked with `>` and the active tab is bracketed, so the
-dashboard stays usable when styling is stripped (`NO_COLOR`). When a table
-overflows the window, a `sel/total` scroll cue with `▲`/`▼` shows the position.
+The header shows the db path, fleet revision and active CA version, plus the
+view tabs with live peer/group counts. The selected row is marked with `>`, a
+multi-selected row with `▣`, and the active tab is bracketed, so the dashboard
+stays usable when styling is stripped (`NO_COLOR`). When a table overflows the
+window, a `sel/total` scroll cue with `▲`/`▼` shows the position.
+
+**Navigation, filtering, detail (all views):**
 
 | Key | Action |
 |---|---|
-| `tab`, `1`, `2` | Switch between the Peers and Groups views. |
-| `j`/`k`, arrows | Move the selection. |
-| `enter` | Open the selected peer's detail pane. |
-| `esc` | Close the detail pane / clear the current view's filter. |
-| `/` | Fuzzy-filter the current table (per-view; subsequence match; the match count updates live; `enter` applies). |
-| `r` | Reload from the database. |
+| `tab` / `1` `2` `3` `4` | Cycle views / jump to Peers, Groups, Status, Net. |
+| `j` / `k`, `↓` / `↑` | Move the selection (Peers, Groups, Net). |
+| `enter` | Open the selected peer's detail pane (Peers view). |
+| `/` | Fuzzy-filter the current table (Peers/Groups only; subsequence match; the match count updates live; `enter` applies, `esc` clears). |
+| `esc` | Close the detail pane, else clear the current view's filter, else clear all marks. |
+| `r` | Reload from the database (Status also refetches `/healthz`). |
 | `q`, `ctrl+c` | Quit. |
+
+**Net view only:**
+
+| Key | Action |
+|---|---|
+| `p` | Pause / resume the periodic probe sweep. |
+| `P` | Probe every inbound peer once now. |
+
+**Mutating actions** (omitted under `--read-only`). Each opens a modal; `esc`
+cancels at any step, and a passphrase-protected CA / manager key is prompted
+through a masked modal (see *Passphrase session* below). The action runs in a
+progress modal that streams its `ops` events and reports done/failed; `esc`
+dismisses it.
+
+| Key | View | Action |
+|---|---|---|
+| `e` | Peers, Groups | Enroll a new peer (form: name, groups, allowed-inbound, user, address, client toggle). The result screen shows the `curl … \| bash` one-liner; the pull token is never rendered. A duplicate name is rejected live as it is typed. |
+| `u` | Peers | Edit the selected peer's group membership (multi-pick, pre-checked with its current groups). |
+| `i` | Peers | Edit which groups may **connect into** the selected peer (allowed-inbound multi-pick). |
+| `x` | Peers | Revoke the selected peer (confirm → revoke + CA rekey to exclude it). |
+| `K` | Peers, Groups | Rekey the whole fleet (type `rekey` to confirm; optional toggle to rotate the at-rest CA passphrase). |
+| `n` | Groups | Create a new group (name entry). |
+| `R` | Groups | Rename the selected group (cascading re-sign + push to affected peers). |
+| `D` | Groups | Delete the selected group (confirm; body spells out the affected members and allow-by rewrites). |
+| `m` | Groups | Edit the selected group's membership (peer multi-pick). |
+
+**Multi-select + batch (Peers view):** `space` marks/unmarks the selected peer
+(marks are keyed by peer name and survive a filter change; the footer shows the
+mark count, `esc` clears them). With one or more peers marked, `u` / `x` / `m`
+(the last from the Groups view) fan out over the whole marked set as a single
+batch: one confirm/pick modal, one aggregated progress modal with a `✓`/`✗` line
+per peer and an `N ok, M failed` summary. Peers whose op succeeded are unmarked;
+failed ones stay marked for a retry. A wrong passphrase aborts the whole batch
+and re-prompts once, re-running it in place.
+
+**Passphrase session:** the CA key and the manager peer key are each unlocked at
+most once per session — the first action that needs one prompts, and subsequent
+actions reuse the cached value (mirroring the CLI's session unlocker). `ctrl+l`
+forgets both cached passphrases, so the next action prompts again. The entered
+bytes are never echoed (a `•` mask stands in) and never stored in the model
+beyond the modal's transient input.
+
+| Key | Action |
+|---|---|
+| `space` | Mark / unmark the selected peer (Peers view). |
+| `ctrl+l` | Forget the cached CA and manager-peer passphrases. |
+
+Modal keys: confirm modals take `y`/`enter` or `n`/`esc`; multi-pick modals use
+`j`/`k` to move, `space` to toggle, `enter` to apply, `esc` to cancel; the
+enroll form moves between fields with `tab`/`shift+tab` (or `↑`/`↓`), `enter`
+advances (and submits from the last field).
 
 Exits with a clear error (before entering the alternate screen) if the state
 database is missing or not initialized.

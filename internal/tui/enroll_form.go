@@ -146,7 +146,14 @@ func (e enrollFormModal) handle(msg tea.KeyMsg) (modal, modalResult) {
 		var cmd tea.Cmd
 		e.name, cmd = e.name.Update(msg)
 		_ = cmd
-		e.err = ""
+		// Surface a duplicate-name collision live as it is typed (not only on
+		// submit); an empty/required name stays silent until submit so a fresh
+		// field shows no error.
+		if n := strings.TrimSpace(e.name.Value()); n != "" && e.taken[n] {
+			e.err = "peer " + n + " already exists"
+		} else {
+			e.err = ""
+		}
 		return e, modalKeep
 	case efUser:
 		var cmd tea.Cmd
@@ -271,7 +278,7 @@ func (e enrollFormModal) view(w int) []string {
 // names are snapshotted into the name validator so a duplicate is rejected
 // without a db round-trip (the mint still re-checks transactionally).
 func (m Model) startEnroll() (tea.Model, tea.Cmd) {
-	if !m.mutationsEnabled() {
+	if !m.mutationsEnabled() || (m.view != viewPeers && m.view != viewGroups) {
 		return m, nil
 	}
 	groups := make([]string, 0, len(m.data.Groups))

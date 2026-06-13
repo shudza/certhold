@@ -44,6 +44,7 @@ type Model struct {
 	detailName string
 	peerIdx    int
 	groupIdx   int
+	netIdx     int
 
 	health    *http.Client
 	serve     *healthMsg
@@ -393,6 +394,13 @@ func (m *Model) move(delta int) {
 			return
 		}
 		m.groupIdx = clamp(m.groupIdx+delta, 0, n-1)
+	case viewNet:
+		n := len(m.data.Peers)
+		if n == 0 {
+			m.netIdx = 0
+			return
+		}
+		m.netIdx = clamp(m.netIdx+delta, 0, n-1)
 	}
 }
 
@@ -421,6 +429,11 @@ func (m *Model) clampSelection() {
 		m.groupIdx = 0
 	} else if m.groupIdx >= ng {
 		m.groupIdx = ng - 1
+	}
+	if nn := len(m.data.Peers); nn == 0 {
+		m.netIdx = 0
+	} else if m.netIdx >= nn {
+		m.netIdx = nn - 1
 	}
 }
 

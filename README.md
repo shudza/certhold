@@ -13,6 +13,7 @@ Grant, change, and revoke access centrally from the manager; changes reach peers
 - **Client-style peers** — `enroll <name> --client` for devices that should accept no inbound SSH (laptops, workstations): the manager never dials them; they fetch renewed certs themselves with `certhold-cli refresh`.
 - **Name-based ssh** — each peer's `~/.ssh/config` gains a `Host` alias per peer it may reach, so `ssh app1` works by name.
 - **Central revocation & CA rotation** — cut off a device, or roll the whole trust root, from one command.
+- **Interactive TUI** — `certhold tui` is a full-fleet dashboard that also drives the mutating flows in place (enroll, regroup, revoke, rekey, group CRUD, multi-select batch), plus live status and reachability views; `--read-only` for a safe, write-free dashboard.
 - **Runs anywhere OpenSSH does** — effective floor is OpenSSH 6.5 (2014); see [docs/architecture.md](docs/architecture.md#requirements--compatibility).
 
 ## Architecture
