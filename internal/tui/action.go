@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 
@@ -209,14 +210,23 @@ func (m Model) startEditGroups() (tea.Model, tea.Cmd) {
 	if !m.mutationsEnabled() || m.view != viewPeers || m.detail {
 		return m, nil
 	}
-	p, ok := m.selectedPeer()
-	if !ok || p.Revoked {
-		return m, nil
-	}
 	opts := make([]string, 0, len(m.data.Groups))
 	for _, g := range m.data.Groups {
 		opts = append(opts, g.Name)
 	}
+	// With marks present the pick applies the chosen group SET to every marked
+	// peer (an absolute assignment, since the targets' current groups differ).
+	// The picker opens unchecked so the operator dials in the groups to apply.
+	if names := m.markedNames(); len(names) > 0 {
+		m.batchKind = batchEditGroups
+		m.pushModal(newPickModal(fmt.Sprintf("edit groups: %d marked", len(names)), "", opts, nil))
+		return m, nil
+	}
+	p, ok := m.selectedPeer()
+	if !ok || p.Revoked {
+		return m, nil
+	}
+	m.batchKind = batchNone
 	m.pushModal(newPickModal("edit groups: "+p.Name, p.Name, opts, p.Groups))
 	return m, nil
 }
@@ -225,10 +235,33 @@ func (m Model) startRevoke() (tea.Model, tea.Cmd) {
 	if !m.mutationsEnabled() || m.view != viewPeers {
 		return m, nil
 	}
+	// markedNames already drops peers that are already revoked, so a batch revoke
+	// never re-revokes one; an all-revoked marked set yields no targets → no-op.
+	if names := m.markedNames(); len(names) > 0 {
+		var live []string
+		for _, n := range names {
+			if p, ok := m.peerByName(n); ok && !p.Revoked {
+				live = append(live, n)
+			}
+		}
+		if len(live) == 0 {
+			return m, nil
+		}
+		m.batchKind = batchRevoke
+		m.pushModal(confirmModal{
+			heading: fmt.Sprintf("revoke %d marked", len(live)),
+			subject: "",
+			kind:    confirmRevoke,
+			body: batchConfirmBody(
+				fmt.Sprintf("Revoke %d peers and rekey the CA to exclude each?", len(live)), live),
+		})
+		return m, nil
+	}
 	p, ok := m.selectedPeer()
 	if !ok || p.Revoked {
 		return m, nil
 	}
+	m.batchKind = batchNone
 	m.pushModal(confirmModal{
 		heading: "revoke " + p.Name,
 		subject: p.Name,
@@ -276,15 +309,24 @@ func (m Model) submitModal(top modal) (tea.Model, tea.Cmd) {
 		if mo.kind == confirmGroupDelete {
 			return m.launchGroupDelete(mo.subject)
 		}
+		if m.batchKind == batchRevoke {
+			return m.launchBatchRevoke()
+		}
 		return m.launchRevoke(mo.subject)
 	case pickModal:
 		m.popModal()
 		switch mo.kind {
 		case pickGroupMembers:
+			if m.batchKind == batchMembers {
+				return m.launchBatchMembers(mo)
+			}
 			return m.launchMembership(mo)
 		case pickPeerAllowed:
 			return m.launchAllowed(mo.subject, mo.selected())
 		default:
+			if m.batchKind == batchEditGroups {
+				return m.launchBatchEditGroups(mo.selected())
+			}
 			return m.launchEditGroups(mo.subject, mo.selected())
 		}
 	case textModal:
@@ -426,6 +468,28 @@ func (m Model) handleActionDone(msg actionDoneMsg) (tea.Model, tea.Cmd) {
 				return m, m.reloadCmd()
 			}
 		}
+	}
+	// A fully-completed batch clears marks on the peers it touched, keeping only
+	// the failed ones marked for a retry. A canceled passphrase (the run never
+	// reached its outcome store) leaves every mark intact. The outcome holder is
+	// written exactly once by the worker before it returns its terminal error.
+	if m.batchOutcome != nil {
+		if out := m.batchOutcome.Load(); out != nil {
+			failed := map[string]bool{}
+			for _, n := range out.failed {
+				failed[n] = true
+			}
+			for n := range m.marks {
+				if !failed[n] {
+					delete(m.marks, n)
+				}
+			}
+			if len(m.marks) == 0 {
+				m.marks = nil
+			}
+		}
+		m.batchOutcome = nil
+		m.batchKind = batchNone
 	}
 	pm := m.modals[idx].(progressModal)
 	pm.done = true

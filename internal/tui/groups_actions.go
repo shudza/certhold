@@ -127,6 +127,27 @@ func (m Model) startGroupMembership() (tea.Model, tea.Cmd) {
 		}
 		opts = append(opts, p.Name)
 	}
+	// With peers marked, m drives the marked SET into the selected group: the
+	// picker opens pre-checked with current members AND the marked peers, so the
+	// operator confirms the union (or trims) before the batch fans out. batchKind
+	// routes submit to launchBatchMembers, which assigns every chosen peer to the
+	// group via batch UpdatePeer (continue-on-error, one progress modal).
+	if names := m.markedNames(); len(names) > 0 {
+		pre := append([]string(nil), g.Members...)
+		seen := map[string]bool{}
+		for _, p := range pre {
+			seen[p] = true
+		}
+		for _, n := range names {
+			if p, ok := m.peerByName(n); ok && !p.Revoked && !seen[n] {
+				pre = append(pre, n)
+			}
+		}
+		m.batchKind = batchMembers
+		m.pushModal(newPickModalKind(pickGroupMembers, "members of "+g.Name+" (+marked)", g.Name, opts, pre))
+		return m, nil
+	}
+	m.batchKind = batchNone
 	m.pushModal(newPickModalKind(pickGroupMembers, "members of "+g.Name, g.Name, opts, g.Members))
 	return m, nil
 }

@@ -79,9 +79,29 @@ type Model struct {
 	enrollPending bool
 	enrollClient  bool
 
+	// marks is the multi-select set keyed by peer NAME (not row index) so a mark
+	// rides the peer through a filter change. batchOutcome is the per-batch holder
+	// the worker writes its failed-peer set into; handleActionDone reads it to
+	// clear marks on the peers that succeeded and keep failed ones marked.
+	marks        map[string]bool
+	batchKind    batchKind
+	batchOutcome *atomic.Pointer[batchOutcome]
+
 	width  int
 	height int
 }
+
+// batchKind tags which batch a confirm/pick modal's submit should fan out over
+// the marked set, so the existing confirm/pick submit paths can branch into the
+// aggregated run instead of the single-peer one.
+type batchKind int
+
+const (
+	batchNone batchKind = iota
+	batchRevoke
+	batchEditGroups
+	batchMembers
+)
 
 func NewModel(ctx context.Context, data fleetData, reload reloader) Model {
 	ti := textinput.New()
@@ -302,6 +322,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.filters[m.view] = ""
 			m.filter.SetValue("")
 			m.clampSelection()
+		} else if len(m.marks) > 0 {
+			m.marks = nil
+		}
+		return m, nil
+	case " ":
+		if m.view == viewPeers && !m.detail {
+			m.toggleMark()
 		}
 		return m, nil
 	case "/":
@@ -432,6 +459,15 @@ func (m Model) filteredGroups() []groupRow {
 func (m Model) detailPeer() (peerRow, bool) {
 	for _, p := range m.filteredPeers() {
 		if p.Name == m.detailName {
+			return p, true
+		}
+	}
+	return peerRow{}, false
+}
+
+func (m Model) peerByName(name string) (peerRow, bool) {
+	for _, p := range m.data.Peers {
+		if p.Name == name {
 			return p, true
 		}
 	}
