@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -70,6 +71,14 @@ type Model struct {
 	lastHeading string
 	passErr     string
 
+	// enrollResult is a shared holder the mint worker writes on success; it is a
+	// pointer (allocated once) so the goroutine's write is visible to the value-
+	// type Model copy that processes actionDoneMsg. enrollPending marks the
+	// in-flight action as an enroll so its done handler shows the result screen.
+	enrollResult  *atomic.Pointer[ops.EnrollResult]
+	enrollPending bool
+	enrollClient  bool
+
 	width  int
 	height int
 }
@@ -81,18 +90,19 @@ func NewModel(ctx context.Context, data fleetData, reload reloader) Model {
 	ti.CharLimit = 64
 	pass := newPassSession()
 	return Model{
-		ctx:      ctx,
-		reload:   reload,
-		data:     data,
-		view:     viewPeers,
-		health:   defaultHealthClient(),
-		probe:    defaultProbe,
-		tick:     defaultTick,
-		now:      time.Now,
-		probes:   map[string]probeResult{},
-		filter:   ti,
-		pass:     pass,
-		peerPass: pass.peerUnlocker(),
+		ctx:          ctx,
+		reload:       reload,
+		data:         data,
+		view:         viewPeers,
+		health:       defaultHealthClient(),
+		probe:        defaultProbe,
+		tick:         defaultTick,
+		now:          time.Now,
+		probes:       map[string]probeResult{},
+		filter:       ti,
+		pass:         pass,
+		peerPass:     pass.peerUnlocker(),
+		enrollResult: &atomic.Pointer[ops.EnrollResult]{},
 	}
 }
 
@@ -329,6 +339,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.startDeleteGroup()
 	case "m":
 		return m.startGroupMembership()
+	case "e":
+		return m.startEnroll()
+	case "K":
+		return m.startRekey()
 	}
 	return m, nil
 }
