@@ -30,6 +30,13 @@ const (
 	selMarker = "> "
 	noMarker  = "  "
 	minColW   = 6
+	// markMarker is the textual multi-select glyph that shares the single 2-cell
+	// prefix column with the cursor marker: a marked row shows "▣ " (taking
+	// precedence over the cursor's "> ", since the row's reverse styling already
+	// signals the cursor). Textual, not color-only, so a marked row survives
+	// NO_COLOR, and 2 cells wide so it never reflows the table the way a separate
+	// column would.
+	markMarker = "▣ "
 )
 
 func (m Model) View() string {
@@ -107,6 +114,9 @@ func (m Model) footerLines(w int) []string {
 	} else if applied := m.filters[m.view]; applied != "" {
 		parts = append(parts, metaStyle.Render(fmt.Sprintf("filter %q — %d/%d shown (esc clears)", applied, n, total)))
 	}
+	if n := len(m.marks); n > 0 {
+		parts = append(parts, warnStyle.Render(fmt.Sprintf("%d marked", n)))
+	}
 	if m.view == viewNet && m.probePaused {
 		parts = append(parts, metaStyle.Render("probing paused"))
 	}
@@ -135,7 +145,7 @@ func (m Model) footerLines(w int) []string {
 	case m.view == viewGroups:
 		hints = "tab/1/2/3/4 views · j/k move · / filter · r reload · q quit"
 	case m.mutationsEnabled():
-		hints = "tab/1/2/3/4 views · j/k move · enter detail · u groups · i allowed · x revoke · e enroll · K rekey · ctrl+l forget pass · / filter · q quit"
+		hints = "tab/1/2/3/4 views · j/k move · space mark · enter detail · u groups · i allowed · x revoke · e enroll · K rekey · ctrl+l forget pass · / filter · q quit"
 	default:
 		hints = "tab/1/2/3/4 views · j/k move · enter detail · / filter · r reload · q quit"
 	}
@@ -195,6 +205,9 @@ func (m Model) peersTableLines(w, bodyH int) []string {
 		marker := noMarker
 		if i == sel {
 			marker = selMarker
+		}
+		if m.marks[p.Name] {
+			marker = markMarker
 		}
 		var line string
 		switch {

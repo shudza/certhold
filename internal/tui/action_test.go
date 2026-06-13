@@ -209,15 +209,6 @@ func peerGroups(t *testing.T, d *db.DB, name string) []string {
 	return g
 }
 
-func peerByName(m Model, name string) (peerRow, bool) {
-	for _, p := range m.data.Peers {
-		if p.Name == name {
-			return p, true
-		}
-	}
-	return peerRow{}, false
-}
-
 // TestRevokeFlow drives confirm → passphrase → progress and asserts the db row
 // and the reloaded table both show the peer revoked.
 func TestRevokeFlow(t *testing.T) {
@@ -246,7 +237,7 @@ func TestRevokeFlow(t *testing.T) {
 	if !p.Revoked {
 		t.Fatal("db: alpha not revoked")
 	}
-	row, ok := peerByName(m, "alpha")
+	row, ok := m.peerByName("alpha")
 	if !ok || !row.Revoked {
 		t.Fatalf("reloaded table does not show alpha revoked: row=%+v ok=%v", row, ok)
 	}
@@ -277,7 +268,7 @@ func TestEditGroupsFlow(t *testing.T) {
 	if got := peerGroups(t, d, "alpha"); len(got) != 1 || got[0] != "infra" {
 		t.Fatalf("db groups for alpha = %v, want [infra]", got)
 	}
-	row, _ := peerByName(m, "alpha")
+	row, _ := m.peerByName("alpha")
 	if strings.Join(row.Groups, ",") != "infra" {
 		t.Fatalf("reloaded row groups = %v, want [infra]", row.Groups)
 	}
