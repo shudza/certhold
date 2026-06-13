@@ -433,7 +433,22 @@ func modalStates(t *testing.T, w, h int) map[string]Model {
 	pg.done = true
 	prog.pushModal(pg)
 
-	return map[string]Model{"confirm": confirm, "pick": pick, "passphrase": passM, "progress": prog}
+	rekey := base
+	rekey.pushModal(newRekeyModal())
+
+	enroll := base
+	enroll.pushModal(newEnrollFormModal([]string{"infra", "db", "ops"}, map[string]bool{"alpha": true}))
+
+	result := base
+	result.pushModal(newEnrollResultModal(ops.EnrollResult{
+		PeerName: "edge1",
+		OneLiner: "curl -kfsSL https://certhold.home.lan/enroll/zh7_ByXd9epfrwqyaA0w54t--_lUDRxUmAP8_VZb_ZE.sh | bash",
+	}, false))
+
+	return map[string]Model{
+		"confirm": confirm, "pick": pick, "passphrase": passM, "progress": prog,
+		"rekey": rekey, "enroll": enroll, "result": result,
+	}
 }
 
 // TestModalsPreserveLayout asserts the v1 frame invariants hold with each modal

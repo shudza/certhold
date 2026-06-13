@@ -32,7 +32,10 @@ type passReq struct {
 	gen     int
 	heading string
 	prompt  string
-	reply   chan passReply
+	// errMsg pre-decorates the modal with a prior-attempt note (e.g. the rotate
+	// passphrase mismatch); empty for a clean prompt.
+	errMsg string
+	reply  chan passReply
 }
 
 type passReply struct {
@@ -117,9 +120,25 @@ func (s *passSession) peerUnlocker() *ops.SessionUnlocker {
 }
 
 func (s *passSession) prompt(label string) ([]byte, error) {
+	return s.promptLabeled("Unlock", label)
+}
+
+// promptLabeled is the general form behind prompt: it raises a passReq with a
+// caller-chosen heading/prompt and blocks on its reply. The rekey rotate-
+// passphrase source uses it to ask for a new passphrase (and its confirmation)
+// through the very same modal channel CAUnlock rides, so a single arm/launch
+// path serves both without a second bridge.
+func (s *passSession) promptLabeled(heading, label string) ([]byte, error) {
+	return s.promptErr(heading, label, "")
+}
+
+func (s *passSession) promptErr(heading, label, errMsg string) ([]byte, error) {
 	reply := make(chan passReply, 1)
-	ch := *s.reqs.Load()
-	ch <- passReq{gen: int(s.gen.Load()), heading: "Unlock", prompt: label, reply: reply}
+	chp := s.reqs.Load()
+	if chp == nil {
+		return nil, errPassphraseCanceled
+	}
+	*chp <- passReq{gen: int(s.gen.Load()), heading: heading, prompt: label, errMsg: errMsg, reply: reply}
 	r := <-reply
 	return r.pass, r.err
 }
@@ -274,6 +293,14 @@ func (m Model) submitModal(top modal) (tea.Model, tea.Cmd) {
 	case passphraseModal:
 		m.popModal()
 		return m.answerPassphrase(passReply{pass: []byte(mo.input.Value())}, mo)
+	case rekeyModal:
+		m.popModal()
+		return m.submitRekey(mo)
+	case enrollFormModal:
+		return m.submitEnroll(mo)
+	case enrollResultModal:
+		m.popModal()
+		return m, nil
 	}
 	return m, nil
 }
@@ -326,6 +353,9 @@ func (m Model) handlePassPrompt(msg passPromptMsg) (tea.Model, tea.Cmd) {
 	pm := newPassphraseModal(msg.req.heading, msg.req.prompt)
 	pm.reply = msg.req.reply
 	pm.errMsg = m.passErr
+	if msg.req.errMsg != "" {
+		pm.errMsg = msg.req.errMsg
+	}
 	m.passErr = ""
 	// The passphrase modal sits above the (already-pushed) progress modal so
 	// a submit feeds the blocked worker; on dismissal answerPassphrase fails
@@ -384,6 +414,19 @@ func (m Model) handleActionDone(msg actionDoneMsg) (tea.Model, tea.Cmd) {
 		return m.startAction(m.lastHeading, m.lastRun)
 	}
 	m.modals = m.modals[:idx+1] // discard any modal stranded above the progress
+	// A successful mint swaps the progress modal for the result screen showing
+	// the one-liner full-width; the enroll worker stashed the result in the
+	// shared holder. A failed mint falls through to the normal done/err modal.
+	if m.enrollPending {
+		pending := m.enrollPending
+		m.enrollPending = false
+		if msg.err == nil && pending {
+			if res := m.enrollResult.Load(); res != nil {
+				m.modals[idx] = newEnrollResultModal(*res, m.enrollClient)
+				return m, m.reloadCmd()
+			}
+		}
+	}
 	pm := m.modals[idx].(progressModal)
 	pm.done = true
 	pm.err = msg.err
