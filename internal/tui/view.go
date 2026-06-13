@@ -64,6 +64,9 @@ func (m Model) View() string {
 	body = fitLines(body, w, bodyH)
 
 	lines := append(append(header, body...), footer...)
+	if top, ok := m.topModal(); ok {
+		lines = modalFrame(lines, top, w, h)
+	}
 	return strings.Join(lines, "\n")
 }
 
@@ -107,6 +110,9 @@ func (m Model) footerLines(w int) []string {
 	if m.view == viewNet && m.probePaused {
 		parts = append(parts, metaStyle.Render("probing paused"))
 	}
+	if m.readOnly {
+		parts = append(parts, warnStyle.Render("read-only"))
+	}
 	if m.loadErr != nil {
 		parts = append([]string{errStyle.Render("error: " + m.loadErr.Error())}, parts...)
 	}
@@ -126,6 +132,8 @@ func (m Model) footerLines(w int) []string {
 		hints = "tab/1/2/3/4 views · P probe now · p pause · r reload · q quit"
 	case m.view == viewGroups:
 		hints = "tab/1/2/3/4 views · j/k move · / filter · r reload · q quit"
+	case m.mutationsEnabled():
+		hints = "tab/1/2/3/4 views · j/k move · enter detail · u groups · x revoke · ctrl+l forget pass · / filter · q quit"
 	default:
 		hints = "tab/1/2/3/4 views · j/k move · enter detail · / filter · r reload · q quit"
 	}

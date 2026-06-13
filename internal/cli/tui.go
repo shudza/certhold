@@ -7,14 +7,15 @@ import (
 	"os"
 
 	"github.com/shudza/certhold/internal/db"
+	"github.com/shudza/certhold/internal/ops"
 	"github.com/shudza/certhold/internal/tui"
 	"github.com/spf13/cobra"
 )
 
 func newTuiCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "tui",
-		Short: "Interactive read-only fleet dashboard",
+		Short: "Interactive fleet dashboard with in-place edit-groups and revoke",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dbPath, err := cmd.Flags().GetString("db")
 			if err != nil {
@@ -42,7 +43,42 @@ func newTuiCmd() *cobra.Command {
 				}
 				return err
 			}
-			return tui.Run(ctx, d, dbPath, cmd.InOrStdin(), cmd.OutOrStdout())
+
+			readOnly, err := cmd.Flags().GetBool("read-only")
+			if err != nil {
+				return err
+			}
+
+			dataDir, err := cmd.Root().PersistentFlags().GetString("data-dir")
+			if err != nil {
+				return fmt.Errorf("get data-dir: %w", err)
+			}
+			dataDir = expandHome(dataDir)
+			hostname, _ := osHostname()
+
+			// BuildDeps wires ops.Deps from the TUI-owned passphrase closures
+			// (which bridge to the masked modal) and event sink. revoke rekeys,
+			// so it dials over rekeyDial like the CLI revoke command does.
+			action := tui.ActionDeps{
+				Hostname: hostname,
+				BuildDeps: func(onEvent func(ops.Event), caUnlock, peerPass func() ([]byte, error)) ops.Deps {
+					return ops.Deps{
+						DB:       d,
+						DataDir:  dataDir,
+						CAUnlock: caUnlock,
+						PeerPass: peerPass,
+						Dial:     ops.DialFn(rekeyDial),
+						OnEvent:  onEvent,
+					}
+				},
+			}
+
+			return tui.Run(ctx, d, dbPath, cmd.InOrStdin(), cmd.OutOrStdout(), tui.RunOptions{
+				Action:   &action,
+				ReadOnly: readOnly,
+			})
 		},
 	}
+	cmd.Flags().Bool("read-only", false, "disable all mutations (v1 dashboard behavior)")
+	return cmd
 }

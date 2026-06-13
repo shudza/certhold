@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/shudza/certhold/internal/db"
+	"github.com/shudza/certhold/internal/ops"
 )
 
 type view int
@@ -58,6 +59,17 @@ type Model struct {
 	filter    textinput.Model
 	filters   [viewCount]string
 
+	readOnly    bool
+	action      ActionDeps
+	pass        *passSession
+	peerPass    *ops.SessionUnlocker
+	modals      []modal
+	bridge      *actionBridge
+	actionGen   int
+	lastRun     func(ctx context.Context, deps ops.Deps) error
+	lastHeading string
+	passErr     string
+
 	width  int
 	height int
 }
@@ -67,21 +79,40 @@ func NewModel(ctx context.Context, data fleetData, reload reloader) Model {
 	ti.Prompt = "/"
 	ti.Placeholder = "filter"
 	ti.CharLimit = 64
+	pass := newPassSession()
 	return Model{
-		ctx:    ctx,
-		reload: reload,
-		data:   data,
-		view:   viewPeers,
-		health: defaultHealthClient(),
-		probe:  defaultProbe,
-		tick:   defaultTick,
-		now:    time.Now,
-		probes: map[string]probeResult{},
-		filter: ti,
+		ctx:      ctx,
+		reload:   reload,
+		data:     data,
+		view:     viewPeers,
+		health:   defaultHealthClient(),
+		probe:    defaultProbe,
+		tick:     defaultTick,
+		now:      time.Now,
+		probes:   map[string]probeResult{},
+		filter:   ti,
+		pass:     pass,
+		peerPass: pass.peerUnlocker(),
 	}
 }
 
-func Run(ctx context.Context, d *db.DB, dbPath string, in io.Reader, out io.Writer) error {
+// withAction installs the mutation seam; a read-only TUI omits it. Kept
+// separate from NewModel so the read-only constructor and tests share one
+// initializer.
+func (m Model) withAction(a ActionDeps) Model {
+	m.action = a
+	return m
+}
+
+// RunOptions configures Run. Action is nil for a read-only dashboard; when set,
+// the TUI enables mutating keys and builds ops.Deps through it (the seam tests
+// fill with fakes). ReadOnly forces v1 behavior even when Action is set.
+type RunOptions struct {
+	Action   *ActionDeps
+	ReadOnly bool
+}
+
+func Run(ctx context.Context, d *db.DB, dbPath string, in io.Reader, out io.Writer, opts RunOptions) error {
 	reload := func(ctx context.Context) (fleetData, error) {
 		return load(ctx, d, dbPath)
 	}
@@ -90,12 +121,36 @@ func Run(ctx context.Context, d *db.DB, dbPath string, in io.Reader, out io.Writ
 		return err
 	}
 	m := NewModel(ctx, data, reload)
+	if opts.Action != nil && !opts.ReadOnly {
+		m = m.withAction(*opts.Action)
+	} else {
+		m.readOnly = true
+	}
+	// pass and peerPass are pointers constructed once in NewModel and shared by
+	// every copy of the value-type Model, so zeroing them here zeroes the live
+	// caches regardless of which Model copy the program ends with. close also
+	// retires the last action's re-armed passphrase reader. Mirrors the CLI's
+	// defer …Zero() contract for SessionUnlocker.
+	defer m.pass.close()
+	defer m.peerPass.Close()
+
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx), tea.WithInput(in), tea.WithOutput(out))
 	_, err = p.Run()
 	return err
 }
 
 func (m Model) Init() tea.Cmd { return nil }
+
+func (m Model) mutationsEnabled() bool {
+	return !m.readOnly && m.action.BuildDeps != nil
+}
+
+func (m Model) topModal() (modal, bool) {
+	if len(m.modals) == 0 {
+		return nil, false
+	}
+	return m.modals[len(m.modals)-1], true
+}
 
 func (m Model) reloadCmd() tea.Cmd {
 	return func() tea.Msg {
@@ -133,7 +188,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case probeResultMsg:
 		m.applyProbeResult(msg)
 		return m, nil
+	case passPromptMsg:
+		return m.handlePassPrompt(msg)
+	case actionEventMsg:
+		return m.handleActionEvent(msg)
+	case actionDoneMsg:
+		return m.handleActionDone(msg)
 	case tea.KeyMsg:
+		if _, ok := m.topModal(); ok {
+			return m.handleModalKey(msg)
+		}
 		return m.handleKey(msg)
 	}
 	return m, nil
@@ -245,6 +309,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(m.reloadCmd(), m.healthCmd())
 		}
 		return m, m.reloadCmd()
+	case "ctrl+l":
+		if m.mutationsEnabled() {
+			m.pass.unlocker.Forget()
+			m.peerPass.Forget()
+		}
+		return m, nil
+	case "u":
+		return m.startEditGroups()
+	case "x":
+		return m.startRevoke()
 	}
 	return m, nil
 }
