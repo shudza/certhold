@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"golang.org/x/crypto/ssh"
 
 	"github.com/shudza/certhold/internal/ca"
 	"github.com/shudza/certhold/internal/db"
@@ -363,6 +364,79 @@ func TestMembershipNoOpOpensNoAction(t *testing.T) {
 	}
 	if got := rec.dialed(); len(got) != 0 {
 		t.Fatalf("no-op membership pushed hosts = %v, want none", got)
+	}
+}
+
+// TestMembershipSkipsRevokedMember reproduces the reviewer's repro: a group whose
+// members include a revoked peer (ghost, still carrying a peer_groups row) plus a
+// live peer (alpha). Editing membership to add beta must (a) never call
+// ops.UpdatePeer on the revoked ghost — so ghost is never dialed and the action
+// does not fail with "membership update incomplete", (b) succeed, and (c) apply
+// the live toggle (beta gains infra) without disturbing alpha or ghost.
+func TestMembershipSkipsRevokedMember(t *testing.T) {
+	dataDir, d, pass := seedActionEnv(t)
+	ctx := context.Background()
+	// Reshape to the repro: alpha[infra,db] live (already seeded), beta[] live,
+	// ghost[infra] revoked. beta starts with no groups so adding it is the live
+	// toggle; ghost stays in infra but revoked (peer_groups row intact).
+	if err := d.SetPeerGroups(ctx, "beta", nil); err != nil {
+		t.Fatalf("SetPeerGroups beta: %v", err)
+	}
+	_, pubAuth, sshPub, err := ca.GeneratePeerKey()
+	if err != nil {
+		t.Fatalf("GeneratePeerKey ghost: %v", err)
+	}
+	if err := d.InsertPeer(ctx, "ghost", 200, ssh.FingerprintSHA256(sshPub), pubAuth, "root", true, ""); err != nil {
+		t.Fatalf("InsertPeer ghost: %v", err)
+	}
+	if err := d.SetPeerGroups(ctx, "ghost", []string{"infra"}); err != nil {
+		t.Fatalf("SetPeerGroups ghost: %v", err)
+	}
+	if err := d.SetPeerRevoked(ctx, "ghost"); err != nil {
+		t.Fatalf("SetPeerRevoked ghost: %v", err)
+	}
+
+	rec := &recDial{}
+	m := recModel(t, dataDir, d, rec)
+	m = selectGroup(t, m, "infra")
+
+	m = press(t, m, "m")
+	pick, ok := topAny(m).(pickModal)
+	if !ok || pick.kind != pickGroupMembers {
+		t.Fatalf("m did not open members pick; top=%T", topAny(m))
+	}
+	// ghost is excluded from options entirely; alpha is the lone visible member.
+	for _, o := range pick.options {
+		if o == "ghost" {
+			t.Fatalf("revoked ghost should not be a picker option: %v", pick.options)
+		}
+	}
+	if !pick.checked["alpha"] || pick.checked["beta"] {
+		t.Fatalf("members pre-check wrong: %+v", pick.checked)
+	}
+	// Select [alpha,beta]: options sorted [alpha beta], cursor at alpha → down → toggle beta on.
+	m = press(t, m, "j")
+	m = press(t, m, " ")
+	nm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = drain(t, nm.(Model), cmd, pass)
+
+	// (b) action succeeds — no "incomplete" failure from a phantom ghost delta.
+	if pg, ok := topAny(m).(progressModal); !ok || !pg.done || pg.err != nil {
+		t.Fatalf("membership apply not done-ok: %+v", topAny(m))
+	}
+	// (a) ghost is never re-signed/pushed; only the changed live peer beta is dialed.
+	if got := rec.dialed(); strings.Join(got, ",") != "beta" {
+		t.Fatalf("membership pushed hosts = %v, want [beta] (ghost must not be touched)", got)
+	}
+	// (c) beta gains infra; alpha unchanged; ghost still in infra (untouched).
+	if g := peerGroupsSorted(t, d, "beta"); strings.Join(g, ",") != "infra" {
+		t.Fatalf("beta groups = %v, want [infra]", g)
+	}
+	if g := peerGroupsSorted(t, d, "alpha"); strings.Join(g, ",") != "db,infra" {
+		t.Fatalf("alpha groups changed unexpectedly = %v", g)
+	}
+	if g := peerGroupsSorted(t, d, "ghost"); strings.Join(g, ",") != "infra" {
+		t.Fatalf("revoked ghost groups changed = %v, want [infra] (untouched)", g)
 	}
 }
 

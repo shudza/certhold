@@ -208,6 +208,9 @@ func (m Model) membershipDeltas(group string, selected []string) []membershipDel
 	}
 	var deltas []membershipDelta
 	for _, p := range m.data.Peers {
+		if p.Revoked {
+			continue
+		}
 		was := isMember(p.Groups, group)
 		now := want[p.Name]
 		if was == now {
