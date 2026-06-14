@@ -107,6 +107,15 @@ func TestInit_RootUser_HappyPath(t *testing.T) {
 		t.Errorf("allowed groups: got %v want [manager]", allowed)
 	}
 
+	// init must seed an active CA version (version 1) and bump fleet_rev, so
+	// the TUI/serve "is this DB initialized?" gate (ActiveCAVersion) passes.
+	if ver, err := database.ActiveCAVersion(context.Background()); err != nil || ver != 1 {
+		t.Errorf("active ca version after init = %d (err=%v), want 1", ver, err)
+	}
+	if rev, err := database.FleetRev(context.Background()); err != nil || rev != 1 {
+		t.Errorf("fleet_rev after init = %d (err=%v), want 1", rev, err)
+	}
+
 	// v2 root self files live under self/root/.ssh/ with namespaced identity.
 	selfDir := filepath.Join(dataDir, "self")
 	base := filepath.Join(selfDir, "root", ".ssh")

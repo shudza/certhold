@@ -338,8 +338,8 @@ func TestRekeyHappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ActiveCAVersion: %v", err)
 	}
-	if ver != 1 {
-		t.Errorf("active ca version = %d, want 1", ver)
+	if ver != 2 {
+		t.Errorf("active ca version = %d, want 2", ver)
 	}
 
 	if _, err := os.Stat(filepath.Join(dataDir, "ca.next")); !errors.Is(err, os.ErrNotExist) {
@@ -518,8 +518,8 @@ func TestRekeyLogicErrorAborts(t *testing.T) {
 		t.Fatalf("db.Open: %v", err)
 	}
 	defer d.Close()
-	if _, err := d.ActiveCAVersion(context.Background()); !errors.Is(err, db.ErrNoActiveCA) {
-		t.Errorf("expected ErrNoActiveCA after failed rekey, got: %v", err)
+	if ver, err := d.ActiveCAVersion(context.Background()); err != nil || ver != 1 {
+		t.Errorf("active ca version = %d (err=%v) after failed rekey, want 1 (unchanged from init)", ver, err)
 	}
 
 	if dirHasPrefix(t, dataDir, "ca.old.") {
@@ -605,8 +605,8 @@ func TestRekeyResilientToUnreachablePeer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ActiveCAVersion: %v", err)
 	}
-	if ver != 1 {
-		t.Errorf("active ca version = %d, want 1 (swap must complete)", ver)
+	if ver != 2 {
+		t.Errorf("active ca version = %d, want 2 (swap must complete)", ver)
 	}
 
 	beta, err := d2.GetPeer(context.Background(), "beta")
@@ -686,8 +686,8 @@ func TestRekeyTwoUnreachablePeers(t *testing.T) {
 		t.Fatalf("reopen db: %v", err)
 	}
 	defer d2.Close()
-	if ver, err := d2.ActiveCAVersion(context.Background()); err != nil || ver != 1 {
-		t.Errorf("active ca version = %d (err=%v), want 1", ver, err)
+	if ver, err := d2.ActiveCAVersion(context.Background()); err != nil || ver != 2 {
+		t.Errorf("active ca version = %d (err=%v), want 2", ver, err)
 	}
 	for _, name := range []string{"alpha", "beta"} {
 		p, _ := d2.GetPeer(context.Background(), name)
