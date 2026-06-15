@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"regexp"
+	"runtime/debug"
 	"strings"
 
 	"github.com/shudza/certhold/internal/db"
@@ -36,12 +38,28 @@ const peerPassphraseBlock = `if [ "${CERTHOLD_NO_PASSPHRASE:-}" != "1" ]; then
 fi
 `
 
-// New builds the enroll HTTP handler. As of the sign-at-mint design the server no
-// longer holds the CA: tarballs are built and signed by the enroll CLI and stored
-// against the token row, so this handler is a CA-less byte-server.
+// ReachabilityProbe is invoked (in a background goroutine) after a peer redeems
+// its install token, once its dial address is known. It should perform an
+// outbound SSH dial to the peer with host-key capture, record the peer's host
+// key in the manager's known_hosts, and set peers.push_reachable accordingly.
+// It runs on its own context (the request is already answered), so a slow or
+// failing probe never blocks or aborts enrollment. nil disables the probe.
+type ReachabilityProbe func(peerName, host, targetUser string)
+
+// New builds the enroll HTTP handler with no reachability probe (the historical
+// CA-less byte-server). As of the sign-at-mint design the server no longer
+// holds the CA: tarballs are built and signed by the enroll CLI and stored
+// against the token row.
 func New(database *db.DB) http.Handler {
+	return NewWithProbe(database, nil)
+}
+
+// NewWithProbe is New plus an enroll-time reachability/host-key-capture probe
+// fired after a token is redeemed and the peer's address is backfilled. `serve`
+// wires the real SSH probe; tests pass nil or a stub.
+func NewWithProbe(database *db.DB, probe ReachabilityProbe) http.Handler {
 	mux := http.NewServeMux()
-	tarball := enrollHandler(database)
+	tarball := enrollHandler(database, probe)
 	script := scriptHandler(database)
 	mux.HandleFunc("GET /enroll/{token}", func(w http.ResponseWriter, r *http.Request) {
 		tok := r.PathValue("token")
@@ -189,7 +207,7 @@ func writeV2Body(sb *strings.Builder, curl, keyFile, block, instanceKey string) 
 	fmt.Fprintf(sb, "echo \"address is reachable from the manager, pass --address to certhold enroll next time.\"\n")
 }
 
-func enrollHandler(database *db.DB) http.HandlerFunc {
+func enrollHandler(database *db.DB, probe ReachabilityProbe) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 
@@ -258,6 +276,29 @@ func enrollHandler(database *db.DB) http.HandlerFunc {
 			_ = database.SetPeerAddressIfEmpty(ctx, peerName, host)
 		} else if r.RemoteAddr != "" {
 			_ = database.SetPeerAddressIfEmpty(ctx, peerName, r.RemoteAddr)
+		}
+
+		// Fire the enroll-time reachability/host-key-capture probe. It runs in
+		// its own goroutine on its own context: the response below is sent
+		// immediately and enrollment always succeeds, while the probe (which may
+		// need to wait for the peer's sshd / retry) records reachability + the
+		// peer's host key out of band. Read the dial target NOW (the resolved
+		// address + target user) so the goroutine does not race a later mutation.
+		if probe != nil {
+			if p, perr := database.GetPeer(ctx, peerName); perr == nil {
+				host, targetUser := p.DialHost(), p.TargetUser
+				go func() {
+					// A probe panic must never take down the serve process; the
+					// probe is best-effort and enrollment already succeeded. Log a
+					// recovered panic (with stack) to stderr so it is diagnosable.
+					defer func() {
+						if rec := recover(); rec != nil {
+							fmt.Fprintf(os.Stderr, "enroll probe for %q panicked: %v\n%s\n", peerName, rec, debug.Stack())
+						}
+					}()
+					probe(peerName, host, targetUser)
+				}()
+			}
 		}
 
 		if tarball == nil {

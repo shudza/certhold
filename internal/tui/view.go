@@ -161,7 +161,7 @@ func (m Model) peersTableLines(w, bodyH int) []string {
 		return []string{dimStyle.Render("no peers enrolled — see 'certhold enroll'")}
 	}
 
-	headers := []string{"NAME", "ADDRESS", "USER", "GROUPS", "ALLOWED", "INBOUND", "REVOKED", "SERIAL", "EXPIRES"}
+	headers := []string{"NAME", "ADDRESS", "USER", "GROUPS", "ALLOWED", "INBOUND", "DELIVERY", "REVOKED", "SERIAL", "EXPIRES"}
 	rows := make([][]string, len(peers))
 	for i, p := range peers {
 		rows[i] = []string{
@@ -171,6 +171,7 @@ func (m Model) peersTableLines(w, bodyH int) []string {
 			joinOrDash(p.Groups),
 			joinOrDash(p.Allowed),
 			yn(p.Inbound),
+			peerDeliveryShort(p),
 			yn(p.Revoked),
 			fmt.Sprintf("%d", p.Serial),
 			p.Expires.short(),
@@ -178,7 +179,7 @@ func (m Model) peersTableLines(w, bodyH int) []string {
 	}
 	tableW := w - len(selMarker)
 	flexible := []int{0, 1, 2, 3, 4}
-	dropOrder := []int{5, 7, 4, 3, 2, 1}
+	dropOrder := []int{6, 5, 8, 4, 3, 2, 1}
 	keep := dropColumns(headers, rows, flexible, dropOrder, tableW)
 	headers = project(headers, keep)
 	for i := range rows {
@@ -319,6 +320,7 @@ func (m Model) peerDetailLines(w, bodyH int) []string {
 		field("groups", joinOrDash(p.Groups)),
 		field("allowed in", joinOrDash(p.Allowed)),
 		field("inbound", yn(p.Inbound)),
+		field("delivery", peerDelivery(p)),
 		field("pull token", token),
 	}
 	if len(lines) > bodyH && bodyH >= 2 {
@@ -327,6 +329,30 @@ func (m Model) peerDetailLines(w, bodyH int) []string {
 			dimStyle.Render(fmt.Sprintf("… %d more — enlarge the terminal", hidden)))
 	}
 	return lines
+}
+
+// peerDelivery / peerDeliveryShort describe how the manager delivers updates to
+// a peer: push (inbound + reachable), self-fetch (client-style), or
+// push-unreachable + self-fetch (inbound but the manager currently cannot dial
+// it back). The short form fits the peer table column.
+func peerDelivery(p peerRow) string {
+	if !p.Inbound {
+		return "self-fetch"
+	}
+	if !p.PushReachable {
+		return "push-unreachable, self-fetch"
+	}
+	return "push"
+}
+
+func peerDeliveryShort(p peerRow) string {
+	if !p.Inbound {
+		return "pull"
+	}
+	if !p.PushReachable {
+		return "unreach"
+	}
+	return "push"
 }
 
 func scrollCue(sel, top, visible, total int) string {

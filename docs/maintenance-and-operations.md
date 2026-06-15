@@ -34,16 +34,49 @@ instead.) The shape is the same for all commands:
 
 The push connection verifies the peer's host key strictly via the manager's own
 `known_hosts` (`<data-dir>/self/<home>/.ssh/known_hosts`) — **not** blind
-trust-on-first-use. Because certhold does not sign host keys, that file starts
-**empty**, so the operator must seed the manager's host trust for the peers it
-pushes to, e.g.:
+trust-on-first-use at push time.
 
-```
-ssh-keyscan <peer-address> >> <data-dir>/self/<home>/.ssh/known_hosts
-```
+That file is populated **automatically at enroll time**. Right after a peer
+redeems its install token, `serve` makes an outbound capture dial to the peer
+(keyed by the address the manager dials — the `enroll --address` value, else the
+peer's name), records the presented host key, and confirms the manager can reach
+the peer for pushes. So the **first** `group allow`/`update`/`rekey` push works
+with no manual `ssh-keyscan`. Verification at push time stays strict: pushes
+never learn a new key.
 
-keyed by the address the manager dials (the `enroll --address` value, else the
-peer name). Without seeding, every push fails host-key verification.
+Two cases still need a hand:
+
+- **The manager cannot dial the peer back (non-bidirectional).** Enrollment
+  *requires* peer→manager (the curl), so a peer behind NAT/a firewall, or one
+  whose `--address` is unreachable from the manager, enrolls fine but cannot be
+  pushed to. Such a peer is flagged **`push-unreachable`** and routed onto the
+  [self-fetch (pull) channel](#the-pull-channel-client-style-peers): push
+  commands skip dialing it and print the same pending-refresh notice as a
+  client-style peer, and it picks up changes when `certhold-cli refresh` runs on
+  it. `certhold list` shows its delivery as `push-unreachable,self-fetch`. The
+  flag is set only by the enroll-time probe, and pushes intentionally skip the
+  peer, so nothing re-probes it on its own — it stays on self-fetch even after
+  reachability returns. **To restore manager-push delivery, re-enroll the peer**
+  (which re-runs the probe and re-captures its host key). Automatic
+  re-probe/recovery is planned but not yet built.
+- **The peer's host key *changed* (reinstall), but the peer is still
+  reachable.** A changed key is a `knownhosts: key mismatch` (distinct from the
+  first-contact `key is unknown`), and the manager refuses it strictly rather
+  than silently re-trusting it. Clear the stale entry by hand for now:
+
+  ```
+  ssh-keygen -R <peer-address> -f <data-dir>/self/<home>/.ssh/known_hosts
+  ```
+
+  then the next push re-captures the new key. (A `relearn` command to automate
+  this is planned.)
+
+If the manager's own peer key is passphrase-protected, the unattended enroll
+probe reads the passphrase from `CERTHOLD_PEER_PASSPHRASE` (the same env the
+`serve` systemd unit carries); without it the probe cannot dial and the peer is
+recorded `push-unreachable`. As above, pushes then skip it, so recovery is to
+re-enroll it once the passphrase is available (the probe re-runs and captures
+the host key).
 
 ### Encrypted manager key
 

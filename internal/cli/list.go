@@ -56,7 +56,7 @@ func runListPeers(ctx context.Context, cmd *cobra.Command, d *db.DB) error {
 		return err
 	}
 	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME \tGROUPS \tALLOWED \tINBOUND \tREVOKED")
+	fmt.Fprintln(w, "NAME \tGROUPS \tALLOWED \tINBOUND \tDELIVERY \tREVOKED")
 	for _, p := range peers {
 		gs, err := d.GetPeerGroups(ctx, p.Name)
 		if err != nil {
@@ -74,10 +74,26 @@ func runListPeers(ctx context.Context, cmd *cobra.Command, d *db.DB) error {
 		if p.Revoked {
 			revoked = "Y"
 		}
-		fmt.Fprintf(w, "%s \t%s \t%s \t%s \t%s\n",
-			p.Name, strings.Join(gs, ","), strings.Join(as, ","), inbound, revoked)
+		fmt.Fprintf(w, "%s \t%s \t%s \t%s \t%s \t%s\n",
+			p.Name, strings.Join(gs, ","), strings.Join(as, ","), inbound, peerDelivery(p), revoked)
 	}
 	return w.Flush()
+}
+
+// peerDelivery describes how the manager delivers updates to a peer:
+//   - push: an inbound peer the manager can dial.
+//   - self-fetch: a client-style peer (no inbound), pulled via certhold-cli.
+//   - push-unreachable,self-fetch: an inbound peer the manager currently cannot
+//     dial back (non-bidirectional); skipped by push paths and routed to pull
+//     until reachability returns.
+func peerDelivery(p db.Peer) string {
+	if !p.Inbound {
+		return "self-fetch"
+	}
+	if !p.PushReachable {
+		return "push-unreachable,self-fetch"
+	}
+	return "push"
 }
 
 func runListGroups(ctx context.Context, cmd *cobra.Command, d *db.DB) error {

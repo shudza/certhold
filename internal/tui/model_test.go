@@ -22,13 +22,13 @@ func testData() fleetData {
 		Peers: []peerRow{
 			{
 				Name: "alpha", DialHost: "10.0.0.5", TargetUser: "alice",
-				Fingerprint: "SHA256:fp-alpha", Serial: 11, Inbound: true,
+				Fingerprint: "SHA256:fp-alpha", Serial: 11, Inbound: true, PushReachable: true,
 				HasPullToken: true, CreatedAt: time.Date(2026, 1, 2, 15, 4, 0, 0, time.UTC),
 				Groups: []string{"infra"}, Allowed: []string{"ops"},
 				Expires: certExpiry{state: certAt, until: time.Date(2027, 3, 1, 0, 0, 0, 0, time.UTC)},
 			},
 			{
-				Name: "beta", DialHost: "beta", Serial: 12, Inbound: true, Revoked: true,
+				Name: "beta", DialHost: "beta", Serial: 12, Inbound: true, PushReachable: true, Revoked: true,
 				Expires: certExpiry{state: certNone},
 			},
 			{
@@ -85,6 +85,26 @@ func TestViewDefaultPeersTable(t *testing.T) {
 	} {
 		if !strings.Contains(v, want) {
 			t.Errorf("peers view missing %q:\n%s", want, v)
+		}
+	}
+}
+
+func TestPeerDeliveryRendering(t *testing.T) {
+	cases := []struct {
+		p     peerRow
+		long  string
+		short string
+	}{
+		{peerRow{Inbound: true, PushReachable: true}, "push", "push"},
+		{peerRow{Inbound: false}, "self-fetch", "pull"},
+		{peerRow{Inbound: true, PushReachable: false}, "push-unreachable, self-fetch", "unreach"},
+	}
+	for _, c := range cases {
+		if got := peerDelivery(c.p); got != c.long {
+			t.Errorf("peerDelivery(%+v) = %q, want %q", c.p, got, c.long)
+		}
+		if got := peerDeliveryShort(c.p); got != c.short {
+			t.Errorf("peerDeliveryShort(%+v) = %q, want %q", c.p, got, c.short)
 		}
 	}
 }

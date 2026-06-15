@@ -146,8 +146,8 @@ func GroupRename(ctx context.Context, deps Deps, oldName, newName, hostname stri
 			}
 		}
 
-		if !peer.Inbound {
-			deps.info(peerName, ClientPeerNoticeMsg(peerName))
+		if skip, notice := skipPushNotice(peer); skip {
+			deps.info(peerName, notice)
 			continue
 		}
 
@@ -269,8 +269,8 @@ func GroupDelete(ctx context.Context, deps Deps, name, hostname string) error {
 			}
 		}
 
-		if !peer.Inbound {
-			deps.info(peerName, ClientPeerNoticeMsg(peerName))
+		if skip, notice := skipPushNotice(peer); skip {
+			deps.info(peerName, notice)
 			continue
 		}
 
@@ -324,8 +324,8 @@ func SetPeerAllowedGroups(ctx context.Context, deps Deps, peerName string, group
 		return fmt.Errorf("bump fleet_rev: %w", err)
 	}
 
-	if !peer.Inbound {
-		deps.info(peerName, ClientPeerNoticeMsg(peerName))
+	if skip, notice := skipPushNotice(peer); skip {
+		deps.info(peerName, notice)
 		return nil
 	}
 

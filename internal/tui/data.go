@@ -12,18 +12,19 @@ import (
 )
 
 type peerRow struct {
-	Name         string
-	DialHost     string
-	TargetUser   string
-	Fingerprint  string
-	Serial       uint64
-	Revoked      bool
-	Inbound      bool
-	HasPullToken bool
-	CreatedAt    time.Time
-	Groups       []string
-	Allowed      []string
-	Expires      certExpiry
+	Name          string
+	DialHost      string
+	TargetUser    string
+	Fingerprint   string
+	Serial        uint64
+	Revoked       bool
+	Inbound       bool
+	PushReachable bool
+	HasPullToken  bool
+	CreatedAt     time.Time
+	Groups        []string
+	Allowed       []string
+	Expires       certExpiry
 }
 
 type groupRow struct {
@@ -132,18 +133,19 @@ func load(ctx context.Context, d *db.DB, dbPath string) (fleetData, error) {
 			return fd, err
 		}
 		fd.Peers = append(fd.Peers, peerRow{
-			Name:         p.Name,
-			DialHost:     p.DialHost(),
-			TargetUser:   p.TargetUser,
-			Fingerprint:  p.Fingerprint,
-			Serial:       p.Serial,
-			Revoked:      p.Revoked,
-			Inbound:      p.Inbound,
-			HasPullToken: p.PullToken != "",
-			CreatedAt:    p.CreatedAt,
-			Groups:       groups,
-			Allowed:      allowed,
-			Expires:      parseCertExpiry(p.Cert),
+			Name:          p.Name,
+			DialHost:      p.DialHost(),
+			TargetUser:    p.TargetUser,
+			Fingerprint:   p.Fingerprint,
+			Serial:        p.Serial,
+			Revoked:       p.Revoked,
+			Inbound:       p.Inbound,
+			PushReachable: p.PushReachable,
+			HasPullToken:  p.PullToken != "",
+			CreatedAt:     p.CreatedAt,
+			Groups:        groups,
+			Allowed:       allowed,
+			Expires:       parseCertExpiry(p.Cert),
 		})
 	}
 

@@ -27,15 +27,21 @@ type fakeCall struct {
 }
 
 type fakeDialer struct {
-	mu       sync.Mutex
-	calls    []fakeCall
-	failDial map[string]error
-	readData map[string][]byte
+	mu          sync.Mutex
+	calls       []fakeCall
+	failDial    map[string]error
+	readData    map[string][]byte
+	dialedHosts []string
+	captureSeen bool
 }
 
 func (f *fakeDialer) dial(ctx context.Context, host string, opts sshpush.Options) (sshpush.Pusher, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.dialedHosts = append(f.dialedHosts, host)
+	if opts.CaptureHostKey {
+		f.captureSeen = true
+	}
 	if err, ok := f.failDial[host]; ok {
 		return nil, err
 	}
