@@ -165,8 +165,10 @@ of scope:
 
 - **No host certificates.** certhold does not sign peers' *host* keys, so each
   peer's `known_hosts` starts empty and outbound connections bootstrap host trust
-  via **trust-on-first-use** (TOFU). The manager seeds its own outbound
-  `known_hosts` for pushes — see
+  via **trust-on-first-use** (TOFU). The manager learns each peer's host key
+  **automatically at enroll time** (an outbound capture dial run from `serve`
+  right after the install), so the first push works with no manual seeding;
+  pushes themselves stay strict. See
   [maintenance-and-operations.md](maintenance-and-operations.md#host-key-trust-on-the-push).
 - **No native KRL revocation.** `RevokedKeys` is a `sshd_config` directive, so it
   is not used. Revocation is always a **partial CA rotation** that reissues to

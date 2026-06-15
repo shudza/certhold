@@ -75,8 +75,8 @@ func UpdatePeer(ctx context.Context, deps Deps, name string, groups []string, ho
 		return fmt.Errorf("bump fleet_rev: %w", err)
 	}
 
-	if !peer.Inbound {
-		deps.info(name, ClientPeerNoticeMsg(name))
+	if skip, notice := skipPushNotice(peer); skip {
+		deps.info(name, notice)
 		deps.emit(Event{Type: EventPeerDone, Peer: name, Msg: fmt.Sprintf("updated %s (serial %d)", name, serial)})
 		return nil
 	}

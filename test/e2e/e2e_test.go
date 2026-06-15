@@ -244,6 +244,34 @@ func seedManagerKnownHosts(ctx context.Context, t *testing.T, dialHosts ...strin
 	}
 }
 
+// assertManagerKnownHostsHas waits (the enroll-time probe is async, with a few
+// seconds of retry/backoff) for each dial host to appear in the manager's
+// outbound known_hosts, proving auto-capture worked without any manual
+// ssh-keyscan. It fails the test if a host is still absent after the deadline.
+func assertManagerKnownHostsHas(ctx context.Context, t *testing.T, dialHosts ...string) {
+	t.Helper()
+	khPath := "/root/.certhold/self/home/" + targetUser + "/.ssh/known_hosts"
+	deadline := time.Now().Add(30 * time.Second)
+	for _, h := range dialHosts {
+		found := false
+		for time.Now().Before(deadline) {
+			// ssh-keygen -F finds a (possibly hashed) host entry; grep is a
+			// fallback for plain entries. Either non-zero match means captured.
+			res := composeExec(ctx, t, "", "manager",
+				fmt.Sprintf("ssh-keygen -F %s -f %s >/dev/null 2>&1 && echo HIT || (grep -q %s %s 2>/dev/null && echo HIT || echo MISS)", h, khPath, h, khPath))
+			if strings.Contains(res.out, "HIT") {
+				found = true
+				break
+			}
+			time.Sleep(1 * time.Second)
+		}
+		if !found {
+			dump := composeExec(ctx, t, "", "manager", "cat "+khPath+" 2>/dev/null; echo '---serve.log---'; tail -n 40 /tmp/serve.log 2>/dev/null")
+			t.Fatalf("manager known_hosts did not auto-capture host %q (no manual ssh-keyscan) within deadline:\n%s", h, dump.out)
+		}
+	}
+}
+
 // TestMain brings the compose stack up (building images) before the suite and
 // always tears it down with `down -v` afterwards, even on panic/failure.
 func TestMain(m *testing.M) {
@@ -342,11 +370,18 @@ func TestE2E(t *testing.T) {
 		}
 		assertPeerInstall(ctx, t, "peer2", targetUser, "/home/"+targetUser, instanceKey, []string{"manager", "db"})
 
-		// Now that the peers' sshd are reachable, seed the manager's outbound
-		// known_hosts so subsequent pushes pass strict host-key verification.
-		// peer3 is included here so the manager can later push to root@peer3
-		// (step 09); the host key is per-host, not per-login-user.
-		seedManagerKnownHosts(ctx, t, "peer1", "peer2", "peer3")
+		// T136: the enroll-time reachability probe (run inside `serve` after each
+		// install) must have auto-captured peer1 and peer2 into the manager's
+		// outbound known_hosts WITH NO manual ssh-keyscan. Assert that here — this
+		// is the acceptance criterion for reachable auto-capture.
+		assertManagerKnownHostsHas(ctx, t, "peer1", "peer2")
+
+		// Defense-in-depth fallback only (idempotent, deduped): ensure peer3 is
+		// present for the later root push at step 09. peer3 is auto-captured at
+		// its own install (step 09); keep this so a probe hiccup cannot flake the
+		// suite. peer1/peer2 are intentionally NOT re-seeded here — the assertion
+		// above already proved auto-capture worked for them.
+		seedManagerKnownHosts(ctx, t, "peer3")
 	})
 
 	t.Run("04_manager_push_update_web01", func(t *testing.T) {
@@ -478,6 +513,57 @@ func TestE2E(t *testing.T) {
 
 	t.Run("10_client_peer_flow", func(t *testing.T) {
 		runClientPeerFlow(ctx, t, instanceKey)
+	})
+
+	t.Run("11_non_bidirectional_enroll", func(t *testing.T) {
+		// T136 non-bidirectional case: a NORMAL (inbound) peer whose dial address
+		// the manager cannot reach. We model it by enrolling with a bogus,
+		// unroutable --address (10.255.255.1) while the install still runs on a
+		// real peer (peer4) — peer->manager works (the one-liner uses the
+		// `manager` DNS name, independent of the recorded dial address), but the
+		// enroll-time probe dials the dead address and fails.
+		//
+		// Expected: enrollment SUCCEEDS, the peer is flagged push-unreachable +
+		// self-fetch, and a later `update` SKIPS it with the self-fetch notice
+		// instead of erroring with `knownhosts: key is unknown` / a dial failure.
+		certhold(ctx, t, "group", "create", "edge")
+		line := enrollOneLiner(ctx, t, "isolated01", "10.255.255.1", "root", "edge")
+		res := composeExec(ctx, t, "", "peer4", line)
+		if res.exitCode != 0 {
+			t.Fatalf("install isolated01 on peer4 exit=%d:\n%s", res.exitCode, res.out)
+		}
+
+		// Wait for the async probe to record the peer as push-unreachable. The
+		// probe dials the bogus address with retries/backoff (each attempt can sit
+		// out a TCP timeout), so allow generous slack beyond probeRetries*timeout.
+		deadline := time.Now().Add(90 * time.Second)
+		unreachable := false
+		for time.Now().Before(deadline) {
+			out := certhold(ctx, t, "list")
+			for _, ln := range strings.Split(out, "\n") {
+				if strings.HasPrefix(strings.TrimSpace(ln), "isolated01") && strings.Contains(ln, "push-unreachable") {
+					unreachable = true
+				}
+			}
+			if unreachable {
+				break
+			}
+			time.Sleep(2 * time.Second)
+		}
+		if !unreachable {
+			dump := composeExec(ctx, t, "", "manager", "tail -n 60 /tmp/serve.log 2>/dev/null")
+			t.Fatalf("isolated01 was not flagged push-unreachable in `list`:\n%s\n---serve.log---\n%s", certhold(ctx, t, "list"), dump.out)
+		}
+
+		// A push (update) must NOT error and must emit the self-fetch notice —
+		// the manager must not even attempt the dead dial.
+		out := certhold(ctx, t, "update", "isolated01", "--groups", "edge")
+		if !strings.Contains(out, "isolated01") || !strings.Contains(out, "push-unreachable") {
+			t.Fatalf("update isolated01 should skip with a push-unreachable self-fetch notice, got:\n%s", out)
+		}
+		if strings.Contains(out, "knownhosts") || strings.Contains(out, "dial tcp") {
+			t.Fatalf("update isolated01 attempted a dial it should have skipped:\n%s", out)
+		}
 	})
 }
 

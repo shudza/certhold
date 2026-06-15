@@ -22,6 +22,10 @@ type Peer struct {
 	Inbound       bool
 	PullToken     string
 	Cert          []byte
+	// PushReachable is whether the manager can dial this peer back for pushes.
+	// False routes the peer onto the self-fetch (pull) channel: push paths skip
+	// dialing it (like a client-style peer) until reachability returns.
+	PushReachable bool
 }
 
 // DialHost returns the network address certhold dials to reach this peer:
@@ -60,18 +64,19 @@ func boolToInt(b bool) int {
 	return 0
 }
 
-const peerColumns = `name, cert_serial, pubkey_fingerprint, authorized_key, revoked, created_at, target_user, address, inbound, pull_token, cert`
+const peerColumns = `name, cert_serial, pubkey_fingerprint, authorized_key, revoked, created_at, target_user, address, inbound, pull_token, cert, push_reachable`
 
 func scanPeer(row interface{ Scan(dest ...any) error }) (*Peer, error) {
 	p := &Peer{}
 	var serial int64
-	var revoked, inbound int
-	if err := row.Scan(&p.Name, &serial, &p.Fingerprint, &p.AuthorizedKey, &revoked, &p.CreatedAt, &p.TargetUser, &p.Address, &inbound, &p.PullToken, &p.Cert); err != nil {
+	var revoked, inbound, pushReachable int
+	if err := row.Scan(&p.Name, &serial, &p.Fingerprint, &p.AuthorizedKey, &revoked, &p.CreatedAt, &p.TargetUser, &p.Address, &inbound, &p.PullToken, &p.Cert, &pushReachable); err != nil {
 		return nil, err
 	}
 	p.Serial = uint64(serial)
 	p.Revoked = revoked != 0
 	p.Inbound = inbound != 0
+	p.PushReachable = pushReachable != 0
 	return p, nil
 }
 
@@ -218,6 +223,19 @@ func (db *DB) SetPeerAddress(ctx context.Context, name, address string) error {
 func (db *DB) SetPeerAddressIfEmpty(ctx context.Context, name, address string) error {
 	if _, err := db.sql.ExecContext(ctx, `UPDATE peers SET address = ? WHERE name = ? AND address = ''`, address, name); err != nil {
 		return fmt.Errorf("set peer address if empty: %w", err)
+	}
+	return nil
+}
+
+// SetPeerReachable records whether the manager can dial this peer back for
+// pushes. The enroll-time probe sets it (1 on a successful capture dial, 0 when
+// the manager cannot reach the peer); push paths route an unreachable peer onto
+// the self-fetch channel. Matching 0 rows (no such peer) is NOT an error: the
+// background probe may race a revoke/delete.
+func (db *DB) SetPeerReachable(ctx context.Context, name string, reachable bool) error {
+	if _, err := db.sql.ExecContext(ctx,
+		`UPDATE peers SET push_reachable = ? WHERE name = ?`, boolToInt(reachable), name); err != nil {
+		return fmt.Errorf("set peer reachable: %w", err)
 	}
 	return nil
 }

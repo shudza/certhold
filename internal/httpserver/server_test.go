@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/shudza/certhold/internal/ca"
 	"github.com/shudza/certhold/internal/db"
@@ -160,6 +161,57 @@ func TestEnrollBackfillsAddressFromRemoteAddr(t *testing.T) {
 	}
 	if peer.Address != "203.0.113.7" {
 		t.Errorf("Address = %q, want 203.0.113.7 (host of RemoteAddr)", peer.Address)
+	}
+}
+
+// TestEnrollFiresReachabilityProbe verifies the enroll handler invokes the
+// reachability/host-key-capture probe after a token is redeemed, with the
+// peer's resolved dial address (the backfilled source IP) and target user.
+func TestEnrollFiresReachabilityProbe(t *testing.T) {
+	env := setupTestEnv(t)
+	ctx := context.Background()
+
+	type probeArgs struct{ name, host, user string }
+	got := make(chan probeArgs, 1)
+	probe := func(name, host, user string) { got <- probeArgs{name, host, user} }
+
+	inner := NewWithProbe(env.db, probe)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.RemoteAddr = "203.0.113.9:5555"
+		inner.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+
+	const tok = "tok-probe"
+	tb := env.seedUserTarball(t, "vmP", "alice", []string{"infra"})
+	env.seedPeerRow(t, "vmP", "alice")
+	if err := env.db.InsertToken(ctx, tok, "vmP", "infra", "alice", tb); err != nil {
+		t.Fatalf("InsertToken: %v", err)
+	}
+
+	resp, err := http.Get(srv.URL + "/enroll/" + tok + "?user=alice")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	select {
+	case a := <-got:
+		if a.name != "vmP" {
+			t.Errorf("probe peer = %q, want vmP", a.name)
+		}
+		if a.host != "203.0.113.9" {
+			t.Errorf("probe host = %q, want backfilled 203.0.113.9", a.host)
+		}
+		if a.user != "alice" {
+			t.Errorf("probe user = %q, want alice", a.user)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("reachability probe was not fired within 2s")
 	}
 }
 

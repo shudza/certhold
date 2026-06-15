@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
+	"io/fs"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -14,6 +17,7 @@ import (
 
 	"github.com/shudza/certhold/internal/ca"
 	"github.com/shudza/certhold/internal/db"
+	"github.com/shudza/certhold/internal/sshpush"
 )
 
 type syncBuf struct {
@@ -177,6 +181,161 @@ func TestServeAutoTLSAcceptsHTTPSHandshake(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("serve did not shut down within timeout")
+	}
+}
+
+func seedReachableTestPeer(t *testing.T, dataDir string) *db.DB {
+	t.Helper()
+	if _, err := ca.Generate(filepath.Join(dataDir, "ca")); err != nil {
+		t.Fatalf("ca.Generate: %v", err)
+	}
+	d, err := db.Open(filepath.Join(dataDir, "state.db"))
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	if err := d.InsertPeer(context.Background(), "p1", 1, "fp", []byte("k"), "root", true, "tok"); err != nil {
+		t.Fatalf("InsertPeer: %v", err)
+	}
+	return d
+}
+
+func TestEnrollReachabilityProbeRetriesThenMarksUnreachable(t *testing.T) {
+	dataDir := t.TempDir()
+	d := seedReachableTestPeer(t, dataDir)
+
+	origDial, origRetries, origBackoff := serveDial, probeRetries, probeBackoff
+	t.Cleanup(func() { serveDial, probeRetries, probeBackoff = origDial, origRetries, origBackoff })
+
+	var dials int
+	probeRetries = 3
+	probeBackoff = time.Millisecond
+	serveDial = func(ctx context.Context, host string, opts sshpush.Options) (sshpush.Pusher, error) {
+		dials++
+		if !opts.CaptureHostKey {
+			t.Errorf("probe dial must request host-key capture")
+		}
+		return nil, errors.New("dial tcp: connection refused")
+	}
+
+	probe := enrollReachabilityProbe(d, dataDir)
+	probe("p1", "10.0.0.9", "root")
+
+	if dials != probeRetries {
+		t.Errorf("dials = %d, want %d (one per retry)", dials, probeRetries)
+	}
+	p, err := d.GetPeer(context.Background(), "p1")
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if p.PushReachable {
+		t.Fatal("peer should be marked push-unreachable after all retries fail")
+	}
+}
+
+func TestEnrollReachabilityProbeMarksReachableOnFirstSuccess(t *testing.T) {
+	dataDir := t.TempDir()
+	d := seedReachableTestPeer(t, dataDir)
+	// Pre-mark unreachable so we can observe the probe flip it back to true.
+	if err := d.SetPeerReachable(context.Background(), "p1", false); err != nil {
+		t.Fatalf("SetPeerReachable: %v", err)
+	}
+
+	origDial, origRetries := serveDial, probeRetries
+	t.Cleanup(func() { serveDial, probeRetries = origDial, origRetries })
+
+	var dials int
+	probeRetries = 3
+	serveDial = func(ctx context.Context, host string, opts sshpush.Options) (sshpush.Pusher, error) {
+		dials++
+		return stubPusher{}, nil
+	}
+
+	enrollReachabilityProbe(d, dataDir)("p1", "10.0.0.9", "root")
+
+	if dials != 1 {
+		t.Errorf("dials = %d, want 1 (stop after first success)", dials)
+	}
+	p, _ := d.GetPeer(context.Background(), "p1")
+	if !p.PushReachable {
+		t.Fatal("a successful probe should mark the peer reachable")
+	}
+}
+
+type stubPusher struct{}
+
+func (stubPusher) WriteFileAtomic(context.Context, string, []byte, fs.FileMode) error { return nil }
+func (stubPusher) ReadFile(context.Context, string) ([]byte, error)                   { return nil, nil }
+func (stubPusher) SpliceConfigBlock(context.Context, string, string, string) error    { return nil }
+func (stubPusher) ReloadSSHD(context.Context) error                                   { return nil }
+func (stubPusher) VerifyHealth(context.Context) error                                 { return nil }
+func (stubPusher) Close() error                                                       { return nil }
+
+// TestEnrollReachabilityProbeRealDialUnreachable exercises the FULL serve-side
+// probe path (real sshpush.Dial, real manager self files from init) against an
+// unreachable address — the e2e non-bidirectional case. It must not panic and
+// must mark the peer push-unreachable. (Regression guard: the probe goroutine
+// once panicked here, which the handler now also recovers from.)
+func TestEnrollReachabilityProbeRealDialUnreachable(t *testing.T) {
+	t.Setenv(envCAPassphrase, "test-ca-pw")
+	t.Setenv(envPeerPassphrase, "test-peer-pw")
+	dataDir := t.TempDir()
+	dbPath := filepath.Join(dataDir, "state.db")
+
+	host, err := os.Hostname()
+	if err != nil {
+		t.Fatalf("hostname: %v", err)
+	}
+	// init names the manager self peer after --hostname; use the real machine
+	// hostname so resolveSelfIdent (os.Hostname) finds the self row and the probe
+	// uses the manager's real self cert/key (encrypted via the init passphrases).
+	icmd := NewRootCmd()
+	var iout bytes.Buffer
+	icmd.SetOut(&iout)
+	icmd.SetErr(&iout)
+	icmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", host, "--user", "root", "--listen-ip", "127.0.0.1", "--no-prompt"})
+	if err := icmd.Execute(); err != nil {
+		t.Fatalf("init: %v\n%s", err, iout.String())
+	}
+
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	ctx := context.Background()
+	if err := d.InsertPeer(ctx, "isolated01", 1, "fp", []byte("k"), "root", true, "tok"); err != nil {
+		t.Fatalf("InsertPeer: %v", err)
+	}
+
+	origRetries, origBackoff := probeRetries, probeBackoff
+	t.Cleanup(func() { probeRetries, probeBackoff = origRetries, origBackoff })
+	probeRetries, probeBackoff = 1, time.Millisecond
+
+	// 192.0.2.0/24 (TEST-NET-1) is reserved and unroutable: the dial fails fast
+	// without hitting a real host, modeling a non-bidirectional peer.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer func() {
+			if rec := recover(); rec != nil {
+				t.Errorf("probe panicked (must be panic-free): %v", rec)
+			}
+		}()
+		enrollReachabilityProbe(d, dataDir)("isolated01", "192.0.2.1", "root")
+	}()
+	select {
+	case <-done:
+	case <-time.After(90 * time.Second):
+		t.Fatal("probe did not finish in time")
+	}
+
+	p, err := d.GetPeer(ctx, "isolated01")
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if p.PushReachable {
+		t.Fatal("unreachable peer must be marked push_reachable=false by the real-dial probe")
 	}
 }
 

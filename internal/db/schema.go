@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-const schemaVersion = 7
+const schemaVersion = 8
 
 // The peers table extends PLAN.md with authorized_key BLOB and created_at TIMESTAMP.
 // We persist the peer's pubkey so certhold can re-sign certs on update/rekey without
@@ -104,6 +104,9 @@ func (db *DB) migrate(ctx context.Context) error {
 		}
 	}
 	if err := db.addClientPeerColumns(ctx); err != nil {
+		return err
+	}
+	if err := db.addPushReachableColumn(ctx); err != nil {
 		return err
 	}
 	if err := db.backfillActiveCAVersion(ctx); err != nil {
@@ -220,6 +223,27 @@ func (db *DB) addClientPeerColumns(ctx context.Context) error {
 		if _, err := db.sql.ExecContext(ctx,
 			`ALTER TABLE peers ADD COLUMN cert BLOB`); err != nil {
 			return fmt.Errorf("alter peers add cert: %w", err)
+		}
+	}
+	return nil
+}
+
+// addPushReachableColumn adds peers.push_reachable (schema_version=8). It marks
+// whether the manager can dial the peer back for pushes: captured at enroll
+// time, set to 0 for a peer the manager cannot reach (firewall/NAT/down), so
+// push paths skip it and route it onto the self-fetch (pull) channel instead.
+// Existing rows DEFAULT 1, preserving the pre-feature behavior (every peer was
+// assumed dialable); they get corrected on the next successful probe. It is
+// presence-gated (idempotent) and unconditional, like addClientPeerColumns.
+func (db *DB) addPushReachableColumn(ctx context.Context) error {
+	has, err := db.tableHasColumns(ctx, "peers")
+	if err != nil {
+		return err
+	}
+	if !has["push_reachable"] {
+		if _, err := db.sql.ExecContext(ctx,
+			`ALTER TABLE peers ADD COLUMN push_reachable INTEGER NOT NULL DEFAULT 1`); err != nil {
+			return fmt.Errorf("alter peers add push_reachable: %w", err)
 		}
 	}
 	return nil

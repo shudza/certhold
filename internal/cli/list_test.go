@@ -40,7 +40,28 @@ func seedListDB(t *testing.T) string {
 	if err := d.InsertPeer(ctx, "gamma", 3, "fp-g", []byte("kg"), "alice", false, "tok-g"); err != nil {
 		t.Fatalf("InsertPeer gamma: %v", err)
 	}
+	// delta is a normal (inbound) peer the manager cannot dial back: it must
+	// surface as push-unreachable + self-fetch, not as a plain push peer.
+	if err := d.InsertPeer(ctx, "delta", 4, "fp-d", []byte("kd"), "", true, "tok-d"); err != nil {
+		t.Fatalf("InsertPeer delta: %v", err)
+	}
+	if err := d.SetPeerReachable(ctx, "delta", false); err != nil {
+		t.Fatalf("SetPeerReachable delta: %v", err)
+	}
 	return path
+}
+
+// peerLine returns the rendered list row whose first field is name.
+func peerLine(t *testing.T, out, name string) string {
+	t.Helper()
+	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		f := strings.Fields(line)
+		if len(f) > 0 && f[0] == name {
+			return line
+		}
+	}
+	t.Fatalf("no row for peer %q in:\n%s", name, out)
+	return ""
 }
 
 func runList(t *testing.T, args ...string) (string, error) {
@@ -149,22 +170,24 @@ func TestListPeersInboundColumn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute: %v\noutput:\n%s", err, got)
 	}
-	if !strings.Contains(got, "INBOUND") {
-		t.Fatalf("header missing INBOUND column:\n%s", got)
-	}
-	lines := strings.Split(strings.TrimRight(got, "\n"), "\n")
-	inboundOf := map[string]string{}
-	for _, line := range lines {
-		f := strings.Fields(line)
-		if len(f) < 3 || f[0] == "NAME" {
-			continue
+	for _, h := range []string{"INBOUND", "DELIVERY"} {
+		if !strings.Contains(got, h) {
+			t.Fatalf("header missing %s column:\n%s", h, got)
 		}
-		inboundOf[f[0]] = f[len(f)-2]
 	}
-	if inboundOf["alpha"] != "Y" {
-		t.Errorf("alpha INBOUND = %q, want Y", inboundOf["alpha"])
+	// alpha: inbound + reachable -> push.
+	alpha := peerLine(t, got, "alpha")
+	if !strings.Contains(alpha, "push") {
+		t.Errorf("alpha DELIVERY should be push: %q", alpha)
 	}
-	if inboundOf["gamma"] != "N" {
-		t.Errorf("gamma INBOUND = %q, want N (client-style peer)", inboundOf["gamma"])
+	// gamma: client-style (no inbound) -> self-fetch.
+	gamma := peerLine(t, got, "gamma")
+	if !strings.Contains(gamma, "self-fetch") {
+		t.Errorf("gamma DELIVERY should be self-fetch: %q", gamma)
+	}
+	// delta: inbound but push-unreachable -> push-unreachable,self-fetch.
+	delta := peerLine(t, got, "delta")
+	if !strings.Contains(delta, "push-unreachable,self-fetch") {
+		t.Errorf("delta DELIVERY should be push-unreachable,self-fetch: %q", delta)
 	}
 }

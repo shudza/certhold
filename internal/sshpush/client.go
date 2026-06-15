@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"os"
 	"path"
 	"strings"
@@ -34,6 +35,12 @@ type Options struct {
 	// invoked when the key file turns out to be encrypted; plaintext keys never
 	// call it, so callers with plaintext keys may leave it nil.
 	PassphraseFn func() ([]byte, error)
+	// CaptureHostKey enables enroll-time host-key capture: a presented key that
+	// is *unknown* (no known_hosts entry yet) is accepted and recorded into the
+	// known_hosts file at dial time, while a *mismatch* against an existing
+	// entry still fails strictly. Leave false for ordinary pushes, which must
+	// stay strict and never learn a new key.
+	CaptureHostKey bool
 }
 
 type Client struct {
@@ -86,9 +93,14 @@ func Dial(ctx context.Context, host string, opts Options) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("new cert signer: %w", err)
 	}
-	hkCallback, err := knownhosts.New(opts.KnownHostsPath)
+	hkCallback, err := loadHostKeyCallback(opts.KnownHostsPath, opts.CaptureHostKey)
 	if err != nil {
 		return nil, fmt.Errorf("load known_hosts %s: %w", opts.KnownHostsPath, err)
+	}
+	var capturer *capturingCallback
+	if opts.CaptureHostKey {
+		capturer = &capturingCallback{strict: hkCallback}
+		hkCallback = capturer.callback
 	}
 	user := opts.User
 	if user == "" {
@@ -108,7 +120,34 @@ func Dial(ctx context.Context, host string, opts Options) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ssh dial %s: %w", addr, err)
 	}
+	// On a capturing dial, persist any newly learned host key keyed by the dial
+	// address so subsequent strict pushes verify against it. A write failure is
+	// non-fatal: the connection is already up and the caller (enroll probe) can
+	// still record reachability; the next push just re-captures.
+	if capturer != nil {
+		if key := capturer.captured(); key != nil {
+			_ = AppendKnownHost(opts.KnownHostsPath, addr, key)
+		}
+	}
 	return &Client{client: sshClient}, nil
+}
+
+// loadHostKeyCallback builds the strict knownhosts callback. When capture is
+// requested the known_hosts file may not exist yet on a fresh fleet; in that
+// case an empty callback (reject-everything-as-unknown) is returned so the
+// capturing wrapper can learn the first key. For ordinary (non-capture) dials a
+// missing file is a real error: pushes must verify against a seeded file.
+func loadHostKeyCallback(path string, capture bool) (ssh.HostKeyCallback, error) {
+	cb, err := knownhosts.New(path)
+	if err == nil {
+		return cb, nil
+	}
+	if capture && errors.Is(err, fs.ErrNotExist) {
+		return func(string, net.Addr, ssh.PublicKey) error {
+			return &knownhosts.KeyError{}
+		}, nil
+	}
+	return nil, err
 }
 
 type dialFn struct {
@@ -218,6 +257,11 @@ func (c *Client) VerifyHealth(ctx context.Context) error {
 }
 
 func (c *Client) Close() error {
+	// Defensive: a failed Dial can surface a nil *Client through the Pusher
+	// interface (typed nil), and callers may still call Close on it.
+	if c == nil {
+		return nil
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed || c.client == nil {

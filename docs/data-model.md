@@ -30,7 +30,8 @@ CREATE TABLE peers (
   address            TEXT NOT NULL DEFAULT '',
   inbound            INTEGER NOT NULL DEFAULT 1,
   pull_token         TEXT NOT NULL DEFAULT '',
-  cert               BLOB
+  cert               BLOB,
+  push_reachable     INTEGER NOT NULL DEFAULT 1
 );
 ```
 
@@ -47,6 +48,7 @@ CREATE TABLE peers (
 | `inbound` | `1` if the peer accepts inbound SSH: it carries a `cert-authority` line, can hold `peer_allowed_groups` rows, appears in other peers' `Host` alias blocks, and is dialed by pushes. `0` for a client-style peer (`enroll --no-inbound`/`--client`), which is skipped by every push path. |
 | `pull_token` | Standing token the peer presents to `GET /pull/<token>` for refresh bundles. Minted at every enroll (push-managed peers get one too). `''` on pre-feature rows — an empty token never matches a lookup. |
 | `cert` | The peer's latest signed certificate (public material), persisted at every (re)sign — enroll, `update`, the `rekey`/`revoke` loop — together with `cert_serial`, so `serve` can assemble refresh bundles without the CA key. `NULL` on pre-feature rows (a pull then answers `409`). |
+| `push_reachable` | `1` if the manager can dial this peer back for pushes. Set by the enroll-time reachability probe (`0` when the manager cannot reach the peer — a non-bidirectional peer behind NAT/firewall). A `0` peer is skipped by every push path and routed onto the pull channel, exactly like a client-style peer. `1` on pre-feature rows (preserves the prior assumption that every peer is dialable; corrected on the next successful probe). |
 
 > **Removed columns (migration history).** Earlier schemas carried `mode`,
 > `layout_version`, and `last_krl_version`, plus a `krl_version` table. The
@@ -152,7 +154,7 @@ A small key/value table; it is not a general configuration store. It holds:
 
 | Key | Meaning |
 |---|---|
-| `schema_version` | Migration bookkeeping (currently `7`). |
+| `schema_version` | Migration bookkeeping (currently `8`). |
 | `instance_key` | The per-instance key (16 lowercase hex chars) namespacing all peer files. |
 | `fleet_rev` | The **fleet revision**: a monotonic counter bumped exactly once per successful mutating command (`enroll`, `update`, `rekey`, `revoke`, `group create`/`delete`/`rename`/`allow`/`disallow`); absent reads as `0`. Refresh-bundle manifests and `GET /pull/<token>/rev` report it, so `certhold-cli status` can tell whether a peer is stale without downloading a bundle. |
 
@@ -167,7 +169,9 @@ the removal of root mode and KRL revocation. The rebuild preserves foreign keys
 (`peer_groups` / `peer_allowed_groups`) and is idempotent — once the dead columns
 are gone it no-ops. These legacy steps only run for databases below schema
 version 6; after them, the additive client-peer migration adds
-`peers.inbound` / `pull_token` / `cert` (schema version 7). The result is the
+`peers.inbound` / `pull_token` / `cert` (schema version 7), and a further
+additive step adds `peers.push_reachable` (schema version 8). The result is the
 schema shown above. Pre-existing rows default to `inbound=1`, an empty
-`pull_token`, and a `NULL` cert — exactly the push-managed behavior they had;
-only a re-enroll mints them a pull token.
+`pull_token`, a `NULL` cert, and `push_reachable=1` — exactly the push-managed,
+assumed-dialable behavior they had; only a re-enroll mints them a pull token, and
+the next successful enroll-time probe corrects `push_reachable`.

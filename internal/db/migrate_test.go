@@ -141,8 +141,8 @@ func TestMigratePreV3AddsTarballColumnPreservingRows(t *testing.T) {
 	if err := raw.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='schema_version'`).Scan(&ver); err != nil {
 		t.Fatalf("read schema_version: %v", err)
 	}
-	if ver != "7" {
-		t.Errorf("schema_version = %q, want \"7\"", ver)
+	if ver != "8" {
+		t.Errorf("schema_version = %q, want \"8\"", ver)
 	}
 
 	if err := raw.Close(); err != nil {
@@ -245,8 +245,8 @@ func TestMigratePreV4PreservesRowsDroppingDeadColumns(t *testing.T) {
 	if err := raw.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='schema_version'`).Scan(&ver); err != nil {
 		t.Fatalf("read schema_version: %v", err)
 	}
-	if ver != "7" {
-		t.Errorf("schema_version = %q, want \"7\"", ver)
+	if ver != "8" {
+		t.Errorf("schema_version = %q, want \"8\"", ver)
 	}
 
 	if err := raw.Close(); err != nil {
@@ -378,8 +378,8 @@ func TestMigratePreV5AddsAddressColumnPreservingRows(t *testing.T) {
 	if err := raw.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='schema_version'`).Scan(&ver); err != nil {
 		t.Fatalf("read schema_version: %v", err)
 	}
-	if ver != "7" {
-		t.Errorf("schema_version = %q, want \"7\"", ver)
+	if ver != "8" {
+		t.Errorf("schema_version = %q, want \"8\"", ver)
 	}
 
 	if err := raw.Close(); err != nil {
@@ -648,8 +648,8 @@ func TestMigrateV5DropsDeadColumnsPreservingRows(t *testing.T) {
 	if err := raw.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='schema_version'`).Scan(&ver); err != nil {
 		t.Fatalf("read schema_version: %v", err)
 	}
-	if ver != "7" {
-		t.Errorf("schema_version = %q, want \"7\"", ver)
+	if ver != "8" {
+		t.Errorf("schema_version = %q, want \"8\"", ver)
 	}
 
 	// Foreign keys clean.
@@ -784,9 +784,10 @@ func TestMigrateV6AddsClientPeerColumns(t *testing.T) {
 		notnull int
 		dflt    string
 	}{
-		"inbound":    {notnull: 1, dflt: "1"},
-		"pull_token": {notnull: 1, dflt: "''"},
-		"cert":       {notnull: 0, dflt: "<nil>"},
+		"inbound":        {notnull: 1, dflt: "1"},
+		"pull_token":     {notnull: 1, dflt: "''"},
+		"cert":           {notnull: 0, dflt: "<nil>"},
+		"push_reachable": {notnull: 1, dflt: "1"},
 	}
 	for col, w := range want {
 		ci, ok := got[col]
@@ -813,6 +814,9 @@ func TestMigrateV6AddsClientPeerColumns(t *testing.T) {
 	if !p.Inbound {
 		t.Error("migrated peer should default to Inbound=true")
 	}
+	if !p.PushReachable {
+		t.Error("migrated peer should default to PushReachable=true (preserves pre-feature behavior)")
+	}
 	if p.PullToken != "" {
 		t.Errorf("PullToken = %q, want empty for a migrated row", p.PullToken)
 	}
@@ -824,8 +828,8 @@ func TestMigrateV6AddsClientPeerColumns(t *testing.T) {
 	if err := raw.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='schema_version'`).Scan(&ver); err != nil {
 		t.Fatalf("read schema_version: %v", err)
 	}
-	if ver != "7" {
-		t.Errorf("schema_version = %q, want \"7\"", ver)
+	if ver != "8" {
+		t.Errorf("schema_version = %q, want \"8\"", ver)
 	}
 
 	if err := raw.Close(); err != nil {

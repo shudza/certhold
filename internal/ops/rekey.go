@@ -118,11 +118,11 @@ func Rekey(ctx context.Context, deps Deps, opts RekeyOptions) error {
 			return deps.abortRekey(fmt.Errorf("sign cert for %s: %w", p.Name, err), updated)
 		}
 
-		if !p.Inbound {
+		if skip, notice := skipPushNotice(&p); skip {
 			if err := deps.DB.SetPeerCert(ctx, p.Name, certBytes, serial); err != nil {
 				return deps.abortRekey(fmt.Errorf("set peer cert %s: %w", p.Name, err), updated)
 			}
-			deps.info(p.Name, ClientPeerNoticeMsg(p.Name))
+			deps.info(p.Name, notice)
 			updated = append(updated, p.Name)
 			deps.emit(Event{Type: EventPeerDone, Peer: p.Name, Msg: fmt.Sprintf("rekeyed %s (serial %d)", p.Name, serial)})
 			continue
