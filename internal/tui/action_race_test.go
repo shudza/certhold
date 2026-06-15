@@ -1,8 +1,8 @@
 package tui
 
 import (
-	"sync"
 	"testing"
+	"time"
 )
 
 // TestPromptErrCloseNoRace exercises the hazard from issue #129: a worker parked
@@ -13,9 +13,15 @@ import (
 // panic). The fix must make promptErr's send and close()'s teardown mutually
 // exclusive so neither races the other.
 //
-// Each iteration arms a fresh single-cap channel with no consumer, so the
-// worker's send blocks (the buffer fills only if it wins); close() then races in.
-// We retry many times to hit the narrow window between Load and send.
+// The same race window also hides a missed-cancellation hang: if close() cancels
+// inflight before the worker has published it, but the worker then wins the send,
+// the worker parks on its reply forever. So each iteration asserts the worker
+// goroutine actually returns within a deadline — a parked worker fails the test
+// deterministically (per iteration) instead of only hanging the suite to timeout.
+//
+// Each iteration arms a fresh single-cap channel with no consumer, so the worker's
+// send blocks (the buffer fills only if it wins); close() then races in. We retry
+// many times to hit the narrow window between the inflight publish and the send.
 func TestPromptErrCloseNoRace(t *testing.T) {
 	const iters = 2000
 	for i := 0; i < iters; i++ {
@@ -23,25 +29,30 @@ func TestPromptErrCloseNoRace(t *testing.T) {
 		s.arm()
 
 		start := make(chan struct{})
-		var wg sync.WaitGroup
-		wg.Add(2)
+		workerDone := make(chan struct{})
+		closeDone := make(chan struct{})
 
 		go func() {
-			defer wg.Done()
 			<-start
 			// The worker tries to raise a prompt; if close() wins the worker is
 			// canceled (errPassphraseCanceled) or sees a nil/closed channel. Either
-			// outcome is fine — what must never happen is a race or panic.
+			// outcome is fine — what must never happen is a race, panic, or hang.
 			_, _ = s.promptErr("Unlock", "CA passphrase: ", "")
+			close(workerDone)
 		}()
 
 		go func() {
-			defer wg.Done()
 			<-start
 			s.close()
+			close(closeDone)
 		}()
 
 		close(start)
-		wg.Wait()
+		<-closeDone
+		select {
+		case <-workerDone:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("iter %d: worker parked in promptErr after close() — missed cancellation", i)
+		}
 	}
 }
