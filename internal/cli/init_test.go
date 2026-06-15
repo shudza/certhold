@@ -112,6 +112,12 @@ func TestInit_RootUser_HappyPath(t *testing.T) {
 	if ver, err := database.ActiveCAVersion(context.Background()); err != nil || ver != 1 {
 		t.Errorf("active ca version after init = %d (err=%v), want 1", ver, err)
 	}
+	// init opens the DB (running migrate's CA backfill) BEFORE inserting the
+	// manager peer, so the backfill is a no-op and init seeds the lone version-1
+	// row itself — there must be exactly one ca row, not a backfilled duplicate.
+	if n, err := database.CountCAVersions(context.Background()); err != nil || n != 1 {
+		t.Errorf("ca version count after init = %d (err=%v), want 1 (no double-insert)", n, err)
+	}
 	if rev, err := database.FleetRev(context.Background()); err != nil || rev != 1 {
 		t.Errorf("fleet_rev after init = %d (err=%v), want 1", rev, err)
 	}
