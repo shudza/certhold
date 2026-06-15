@@ -214,8 +214,8 @@ func TestRevokeStragglerStillCompletes(t *testing.T) {
 		t.Fatalf("reopen db: %v", err)
 	}
 	defer d2.Close()
-	if ver, err := d2.ActiveCAVersion(ctx); err != nil || ver != 1 {
-		t.Errorf("active ca version = %d (err=%v), want 1; CA swap must complete on revoke straggler", ver, err)
+	if ver, err := d2.ActiveCAVersion(ctx); err != nil || ver != 2 {
+		t.Errorf("active ca version = %d (err=%v), want 2; CA swap must complete on revoke straggler", ver, err)
 	}
 	beta, _ := d2.GetPeer(ctx, "beta")
 	if beta.Serial != prevBeta.Serial {

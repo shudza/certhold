@@ -186,6 +186,15 @@ func newInitCmd() *cobra.Command {
 			if err := database.SetPeerAllowedGroups(ctx, hostname, []string{peerfiles.ManagerPrincipal}); err != nil {
 				return fmt.Errorf("set allowed groups: %w", err)
 			}
+			if err := database.InsertCAVersion(ctx, 1); err != nil {
+				return fmt.Errorf("insert ca version: %w", err)
+			}
+			if err := database.SetActiveCAVersion(ctx, 1); err != nil {
+				return fmt.Errorf("set active ca version: %w", err)
+			}
+			if err := database.BumpFleetRev(ctx); err != nil {
+				return fmt.Errorf("bump fleet_rev: %w", err)
+			}
 
 			selfDir := filepath.Join(dataDir, "self")
 			if err := peerfiles.WriteUserSelfFiles(selfDir, peerfiles.UserPeerFiles{
