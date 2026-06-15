@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -63,6 +64,11 @@ type passSession struct {
 	reqs     atomic.Pointer[chan passReq]   // per-action channel; rotated by arm
 	gen      atomic.Int64                   // current action gen, stamped onto each request
 	inflight atomic.Pointer[chan passReply] // the reply chan a worker is parked on, if any
+	// mu serializes promptErr's send-on-reqs against the close()/arm() that retire
+	// that same channel, so a worker's send can never race (or panic on) a close.
+	// closed latches at session teardown so a late worker abandons its send.
+	mu     sync.Mutex
+	closed bool
 }
 
 func newPassSession() *passSession {
@@ -89,7 +95,11 @@ func (s *passSession) close() {
 		default:
 		}
 	}
-	if old := s.reqs.Swap(nil); old != nil {
+	s.mu.Lock()
+	s.closed = true
+	old := s.reqs.Swap(nil)
+	s.mu.Unlock()
+	if old != nil {
 		close(*old)
 	}
 	s.unlocker.Close()
@@ -104,11 +114,13 @@ func (s *passSession) close() {
 // already returned (it sent its terminal error before the next action could
 // arm), so nothing is left to send on the closed channel.
 func (s *passSession) arm() chan passReq {
-	if old := s.reqs.Load(); old != nil {
+	ch := make(chan passReq, 1)
+	s.mu.Lock()
+	old := s.reqs.Swap(&ch)
+	s.mu.Unlock()
+	if old != nil {
 		close(*old)
 	}
-	ch := make(chan passReq, 1)
-	s.reqs.Store(&ch)
 	return ch
 }
 
@@ -146,16 +158,24 @@ func (s *passSession) promptLabeled(heading, label string) ([]byte, error) {
 
 func (s *passSession) promptErr(heading, label, errMsg string) ([]byte, error) {
 	reply := make(chan passReply, 1)
-	chp := s.reqs.Load()
-	if chp == nil {
-		return nil, errPassphraseCanceled
-	}
 	// Publish the reply channel so close() can cancel a parked worker (the worker
 	// holds the unlocker lock while blocked here; close must wake it before it
 	// can zero the cache). Cleared on return so a normal answer isn't double-sent.
 	s.inflight.Store(&reply)
 	defer s.inflight.Store(nil)
+	// The send runs under mu so it can never race the close()/arm() that retire the
+	// request channel: once closed is latched (or reqs cleared) the worker abandons
+	// its send instead of sending on a closed channel. The channel is buffered
+	// (cap 1) and per-action, so a live channel always accepts this send without
+	// blocking under the lock. The blocking reply wait stays outside the lock.
+	s.mu.Lock()
+	chp := s.reqs.Load()
+	if s.closed || chp == nil {
+		s.mu.Unlock()
+		return nil, errPassphraseCanceled
+	}
 	*chp <- passReq{gen: int(s.gen.Load()), heading: heading, prompt: label, errMsg: errMsg, reply: reply}
+	s.mu.Unlock()
 	r := <-reply
 	return r.pass, r.err
 }
