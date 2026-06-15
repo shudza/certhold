@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"time"
 )
 
 const schemaVersion = 7
@@ -103,6 +104,9 @@ func (db *DB) migrate(ctx context.Context) error {
 		}
 	}
 	if err := db.addClientPeerColumns(ctx); err != nil {
+		return err
+	}
+	if err := db.backfillActiveCAVersion(ctx); err != nil {
 		return err
 	}
 	if _, err := db.sql.ExecContext(ctx,
@@ -300,6 +304,40 @@ DROP TABLE IF EXISTS krl_version;
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iter foreign_key_check: %w", err)
+	}
+	return nil
+}
+
+// backfillActiveCAVersion self-heals installs created before init learned to seed
+// CA version 1: those databases have peers but an empty ca table, so the tui/serve
+// "is this initialized?" gate (ActiveCAVersion) fails until their first rekey. The
+// guards keep this safe and idempotent:
+//   - peers exist  -> the DB was actually initialized (a never-init'd DB has no peers
+//     and must not be backfilled; init itself seeds the row after this runs).
+//   - ca table empty -> it predates the fix and never rekeyed (a rekeyed DB already
+//     has a row; we never overwrite or duplicate it).
+//
+// It runs inline within migrate (during db.Open, before the DB struct is returned),
+// matching InsertCAVersion's column layout and UTC created_at.
+func (db *DB) backfillActiveCAVersion(ctx context.Context) error {
+	var caRows, peerRows int
+	if err := db.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM ca`).Scan(&caRows); err != nil {
+		return fmt.Errorf("count ca rows: %w", err)
+	}
+	if caRows != 0 {
+		return nil
+	}
+	if err := db.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM peers`).Scan(&peerRows); err != nil {
+		return fmt.Errorf("count peers: %w", err)
+	}
+	if peerRows == 0 {
+		return nil
+	}
+	if _, err := db.sql.ExecContext(ctx,
+		`INSERT INTO ca(version, active, created_at) VALUES (1, 1, ?)`,
+		time.Now().UTC(),
+	); err != nil {
+		return fmt.Errorf("backfill active ca version: %w", err)
 	}
 	return nil
 }

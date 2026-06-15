@@ -33,6 +33,14 @@ func (db *DB) ActiveCAVersion(ctx context.Context) (int, error) {
 	return v, nil
 }
 
+func (db *DB) CountCAVersions(ctx context.Context) (int, error) {
+	var n int
+	if err := db.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM ca`).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count ca versions: %w", err)
+	}
+	return n, nil
+}
+
 func (db *DB) SetActiveCAVersion(ctx context.Context, v int) error {
 	tx, err := db.sql.BeginTx(ctx, nil)
 	if err != nil {
