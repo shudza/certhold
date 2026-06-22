@@ -100,14 +100,15 @@ func actionModel(t *testing.T, dataDir string, d *db.DB) Model {
 	m := NewModel(context.Background(), data, reload)
 	m = m.withAction(ActionDeps{
 		Hostname: "alpha",
-		BuildDeps: func(onEvent func(ops.Event), caUnlock, peerPass func() ([]byte, error)) ops.Deps {
+		BuildDeps: func(onEvent func(ops.Event), caUnlock, peerPass func() ([]byte, error), hostKeyConfirm func(host, fingerprint, keyType string) (bool, error)) ops.Deps {
 			return ops.Deps{
-				DB:       d,
-				DataDir:  dataDir,
-				CAUnlock: caUnlock,
-				PeerPass: peerPass,
-				Dial:     fakeDial,
-				OnEvent:  onEvent,
+				DB:             d,
+				DataDir:        dataDir,
+				CAUnlock:       caUnlock,
+				PeerPass:       peerPass,
+				Dial:           fakeDial,
+				OnEvent:        onEvent,
+				HostKeyConfirm: hostKeyConfirm,
 			}
 		},
 	})
@@ -404,7 +405,7 @@ func TestReadOnlyBlocksMutations(t *testing.T) {
 func modalStates(t *testing.T, w, h int) map[string]Model {
 	t.Helper()
 	base := NewModel(context.Background(), testData(), nil).withAction(ActionDeps{
-		BuildDeps: func(func(ops.Event), func() ([]byte, error), func() ([]byte, error)) ops.Deps {
+		BuildDeps: func(func(ops.Event), func() ([]byte, error), func() ([]byte, error), func(host, fingerprint, keyType string) (bool, error)) ops.Deps {
 			return ops.Deps{}
 		},
 	})
@@ -501,7 +502,7 @@ func TestModalKeepsPullTokenHidden(t *testing.T) {
 		t.Fatalf("load: %v", err)
 	}
 	m := NewModel(context.Background(), fd, nil).withAction(ActionDeps{
-		BuildDeps: func(func(ops.Event), func() ([]byte, error), func() ([]byte, error)) ops.Deps {
+		BuildDeps: func(func(ops.Event), func() ([]byte, error), func() ([]byte, error), func(host, fingerprint, keyType string) (bool, error)) ops.Deps {
 			return ops.Deps{}
 		},
 	})

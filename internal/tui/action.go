@@ -18,12 +18,19 @@ import (
 // cleanly instead of leaving the worker blocked forever.
 var errPassphraseCanceled = errors.New("passphrase entry canceled")
 
+// errHostKeyRejected is returned to the ops goroutine's dial when the operator
+// answers no to the host-key modal (or the session is closing with a prompt
+// inflight), so the unknown-host dial fails cleanly instead of leaving the
+// worker blocked forever.
+var errHostKeyRejected = errors.New("host key rejected")
+
 // ActionDeps is the seam cli/tui.go fills with real wiring and tests fill with
-// fakes. BuildDeps receives the OnEvent sink and CAUnlock/PeerPass closures the
-// TUI owns (they bridge to the passphrase modal) and returns a fully wired
-// ops.Deps; Hostname is certhold's own peer name for revoke's rekey.
+// fakes. BuildDeps receives the OnEvent sink, the CAUnlock/PeerPass closures the
+// TUI owns (they bridge to the passphrase modal), and the hostKeyConfirm closure
+// (it bridges to the host-key modal), and returns a fully wired ops.Deps;
+// Hostname is certhold's own peer name for revoke's rekey.
 type ActionDeps struct {
-	BuildDeps func(onEvent func(ops.Event), caUnlock, peerPass func() ([]byte, error)) ops.Deps
+	BuildDeps func(onEvent func(ops.Event), caUnlock, peerPass func() ([]byte, error), hostKeyConfirm func(host, fingerprint, keyType string) (bool, error)) ops.Deps
 	Hostname  string
 }
 
@@ -52,6 +59,32 @@ type passPromptMsg struct {
 	req passReq
 }
 
+// hostKeyReq is one synchronous host-key confirmation raised from inside the ops
+// goroutine's dial (deps.HostKeyConfirm) when a peer presents an unknown host
+// key. reply is buffered (cap 1) so the worker's send never blocks even if the
+// event loop has already moved on. It rides the same arm/gen lifecycle and mu
+// latch as passReq, so a stale prompt is dropped and a parked worker is canceled
+// on session close exactly as the passphrase path is.
+type hostKeyReq struct {
+	gen         int
+	host        string
+	fingerprint string
+	keyType     string
+	reply       chan hostKeyReply
+}
+
+type hostKeyReply struct {
+	ok  bool
+	err error
+}
+
+// hostKeyPromptMsg is the tea message a reader-cmd produces when the ops dial
+// asks the operator to verify an unknown host key; the Model opens the host-key
+// modal and remembers reply so a yes/no can answer the worker.
+type hostKeyPromptMsg struct {
+	req hostKeyReq
+}
+
 // passSession owns the per-Model passphrase channels. The ops goroutine's
 // unlocker prompt sends a passReq on reqs and blocks on the request's own reply
 // channel; the event loop reads reqs via waitPassReqCmd and never blocks on the
@@ -64,6 +97,13 @@ type passSession struct {
 	reqs     atomic.Pointer[chan passReq]   // per-action channel; rotated by arm
 	gen      atomic.Int64                   // current action gen, stamped onto each request
 	inflight atomic.Pointer[chan passReply] // the reply chan a worker is parked on, if any
+	// hkReqs/hkInflight mirror reqs/inflight for the host-key confirm prompt.
+	// They share mu and the closed latch so confirmHostKey's send and inflight
+	// publish obey the exact same race discipline as promptErr, and one close()
+	// cancels a worker parked on either prompt. hkReqs is rotated by arm() so a
+	// stale dial-confirm from a superseded action can never steal the live one.
+	hkReqs     atomic.Pointer[chan hostKeyReq]
+	hkInflight atomic.Pointer[chan hostKeyReply]
 	// mu serializes promptErr's send-on-reqs against the close()/arm() that retire
 	// that same channel, so a worker's send can never race (or panic on) a close.
 	// closed latches at session teardown so a late worker abandons its send.
@@ -75,6 +115,8 @@ func newPassSession() *passSession {
 	s := &passSession{}
 	ch := make(chan passReq, 1)
 	s.reqs.Store(&ch)
+	hk := make(chan hostKeyReq, 1)
+	s.hkReqs.Store(&hk)
 	s.unlocker = ops.NewSessionUnlocker(s.promptCA)
 	return s
 }
@@ -103,10 +145,23 @@ func (s *passSession) close() {
 		default:
 		}
 	}
+	// Cancel a host-key prompt parked under the same lock, for the same reason:
+	// the worker either published hkInflight before close took mu (canceled here)
+	// or it takes mu after us, sees closed, and abandons its send.
+	if rp := s.hkInflight.Swap(nil); rp != nil {
+		select {
+		case *rp <- hostKeyReply{err: errHostKeyRejected}:
+		default:
+		}
+	}
 	old := s.reqs.Swap(nil)
+	oldHK := s.hkReqs.Swap(nil)
 	s.mu.Unlock()
 	if old != nil {
 		close(*old)
+	}
+	if oldHK != nil {
+		close(*oldHK)
 	}
 	s.unlocker.Close()
 }
@@ -121,11 +176,16 @@ func (s *passSession) close() {
 // arm), so nothing is left to send on the closed channel.
 func (s *passSession) arm() chan passReq {
 	ch := make(chan passReq, 1)
+	hk := make(chan hostKeyReq, 1)
 	s.mu.Lock()
 	old := s.reqs.Swap(&ch)
+	oldHK := s.hkReqs.Swap(&hk)
 	s.mu.Unlock()
 	if old != nil {
 		close(*old)
+	}
+	if oldHK != nil {
+		close(*oldHK)
 	}
 	return ch
 }
@@ -186,6 +246,30 @@ func (s *passSession) promptErr(heading, label, errMsg string) ([]byte, error) {
 	return r.pass, r.err
 }
 
+// confirmHostKey runs on the ops goroutine (from dialPush's HostKeyConfirmFn).
+// It mirrors promptErr exactly for locking: the send-on-hkReqs and the
+// hkInflight publish both happen under mu, so they can never race the
+// close()/arm() that retire the channel. Once closed is latched (or hkReqs
+// cleared) the worker abandons its send and returns errHostKeyRejected instead
+// of sending on a closed channel; otherwise close cancels the published reply.
+// The blocking reply wait stays outside the lock so the event loop (which the
+// modal's keystrokes drive) is never starved.
+func (s *passSession) confirmHostKey(host, fingerprint, keyType string) (bool, error) {
+	reply := make(chan hostKeyReply, 1)
+	defer s.hkInflight.Store(nil)
+	s.mu.Lock()
+	chp := s.hkReqs.Load()
+	if s.closed || chp == nil {
+		s.mu.Unlock()
+		return false, errHostKeyRejected
+	}
+	s.hkInflight.Store(&reply)
+	*chp <- hostKeyReq{gen: int(s.gen.Load()), host: host, fingerprint: fingerprint, keyType: keyType, reply: reply}
+	s.mu.Unlock()
+	r := <-reply
+	return r.ok, r.err
+}
+
 // waitReqCmd captures the current action's request channel and blocks for the
 // next passphrase request on it. A closed channel (next action armed) yields
 // !ok, returning nil so the reader retires instead of leaking: this is what
@@ -200,6 +284,24 @@ func (s *passSession) waitReqCmd() tea.Cmd {
 			return nil
 		}
 		return passPromptMsg{req: req}
+	}
+}
+
+// waitHostKeyReqCmd mirrors waitReqCmd for the host-key channel: it captures the
+// current action's channel and blocks for the next host-key request. A closed
+// channel (next action armed, or session close) yields !ok → nil so the reader
+// retires. Within one action the channel stays open, so a host-key prompt that
+// follows a passphrase prompt in the same action is delivered normally. After a
+// no/yes answer the loop re-arms this reader (answerHostKey) so a single action
+// can confirm more than one unknown host.
+func (s *passSession) waitHostKeyReqCmd() tea.Cmd {
+	ch := *s.hkReqs.Load()
+	return func() tea.Msg {
+		req, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return hostKeyPromptMsg{req: req}
 	}
 }
 
@@ -219,6 +321,7 @@ func (m *Model) runActionCmd(run func(ctx context.Context, deps ops.Deps) error)
 		func(e ops.Event) { bridge.events <- e },
 		m.pass.unlocker.Get,
 		m.peerPass.Get,
+		m.pass.confirmHostKey,
 	)
 	ctx := m.ctx
 
@@ -228,7 +331,7 @@ func (m *Model) runActionCmd(run func(ctx context.Context, deps ops.Deps) error)
 		close(bridge.events)
 		return nil
 	}
-	return tea.Batch(worker, bridge.waitEventCmd(), bridge.waitDoneCmd(), m.pass.waitReqCmd())
+	return tea.Batch(worker, bridge.waitEventCmd(), bridge.waitDoneCmd(), m.pass.waitReqCmd(), m.pass.waitHostKeyReqCmd())
 }
 
 func (m *Model) pushModal(mo modal) { m.modals = append(m.modals, mo) }
@@ -337,6 +440,9 @@ func (m Model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if pm, isPass := next.(passphraseModal); isPass {
 			return m.answerPassphrase(passReply{err: errPassphraseCanceled}, pm)
 		}
+		if hm, isHK := next.(hostKeyModal); isHK {
+			return m.answerHostKey(hostKeyReply{ok: false}, hm)
+		}
 		return m, nil
 	case modalSubmit:
 		return m.submitModal(next)
@@ -377,6 +483,9 @@ func (m Model) submitModal(top modal) (tea.Model, tea.Cmd) {
 	case passphraseModal:
 		m.popModal()
 		return m.answerPassphrase(passReply{pass: []byte(mo.input.Value())}, mo)
+	case hostKeyModal:
+		m.popModal()
+		return m.answerHostKey(hostKeyReply{ok: true}, mo)
 	case rekeyModal:
 		m.popModal()
 		return m.submitRekey(mo)
@@ -462,6 +571,34 @@ func (m Model) answerPassphrase(r passReply, pm passphraseModal) (tea.Model, tea
 		return m, nil
 	}
 	return m, m.pass.waitReqCmd()
+}
+
+// handleHostKeyPrompt opens the host-key modal for a confirm request raised by
+// the ops dial and remembers the reply channel. A stale request (gen mismatch,
+// e.g. a superseded action's dial) is rejected so the orphaned worker unblocks.
+func (m Model) handleHostKeyPrompt(msg hostKeyPromptMsg) (tea.Model, tea.Cmd) {
+	if msg.req.gen != m.actionGen {
+		msg.req.reply <- hostKeyReply{err: errHostKeyRejected}
+		return m, nil
+	}
+	hm := newHostKeyModal(msg.req.host, msg.req.fingerprint, msg.req.keyType)
+	hm.reply = msg.req.reply
+	// The host-key modal sits above the (already-pushed) progress modal so a
+	// yes/no feeds the blocked worker; on dismissal answerHostKey rejects the
+	// dial and the progress modal renders the cancellation.
+	m.pushModal(hm)
+	return m, nil
+}
+
+// answerHostKey feeds the worker's reply channel. Unlike answerPassphrase a no
+// is a normal reject (the dial fails, no whole-action retry). After answering we
+// re-arm the host-key reader so a single action can confirm more than one
+// unknown host before it completes.
+func (m Model) answerHostKey(r hostKeyReply, hm hostKeyModal) (tea.Model, tea.Cmd) {
+	if hm.reply != nil {
+		hm.reply <- r
+	}
+	return m, m.pass.waitHostKeyReqCmd()
 }
 
 func (m Model) handleActionEvent(msg actionEventMsg) (tea.Model, tea.Cmd) {

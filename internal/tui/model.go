@@ -221,6 +221,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case passPromptMsg:
 		return m.handlePassPrompt(msg)
+	case hostKeyPromptMsg:
+		return m.handleHostKeyPrompt(msg)
 	case actionEventMsg:
 		return m.handleActionEvent(msg)
 	case actionDoneMsg:
