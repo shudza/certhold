@@ -19,12 +19,15 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 
 	"github.com/shudza/certhold/internal/passphrase"
 )
+
+const defaultConnectTimeout = 15 * time.Second
 
 type Options struct {
 	CertPath       string
@@ -41,6 +44,17 @@ type Options struct {
 	// entry still fails strictly. Leave false for ordinary pushes, which must
 	// stay strict and never learn a new key.
 	CaptureHostKey bool
+	// ConnectTimeout bounds TCP connect + SSH handshake for a single dial. Zero means use the package default.
+	ConnectTimeout time.Duration
+}
+
+// effectiveConnectTimeout returns opts.ConnectTimeout when positive, else the
+// package default.
+func effectiveConnectTimeout(opts Options) time.Duration {
+	if opts.ConnectTimeout > 0 {
+		return opts.ConnectTimeout
+	}
+	return defaultConnectTimeout
 }
 
 type Client struct {
@@ -110,12 +124,20 @@ func Dial(ctx context.Context, host string, opts Options) (*Client, error) {
 	if !strings.Contains(addr, ":") {
 		addr += ":22"
 	}
+	to := effectiveConnectTimeout(opts)
 	cfg := &ssh.ClientConfig{
 		User:            user,
 		Auth:            []ssh.AuthMethod{ssh.PublicKeys(certSigner)},
 		HostKeyCallback: hkCallback,
+		Timeout:         to,
 	}
-	dialer := &dialFn{ctx: ctx, addr: addr, cfg: cfg}
+	dctx := ctx
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		dctx, cancel = context.WithTimeout(ctx, to)
+		defer cancel()
+	}
+	dialer := &dialFn{ctx: dctx, addr: addr, cfg: cfg}
 	sshClient, err := dialer.dial()
 	if err != nil {
 		return nil, fmt.Errorf("ssh dial %s: %w", addr, err)
