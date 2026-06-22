@@ -38,6 +38,8 @@ func NewRootCmd() *cobra.Command {
 		newRekeyCmd(),
 		newServeCmd(),
 		newInstallCmd(),
+		newAddressCmd(),
+		newMakeClientCmd(),
 	)
 
 	return cmd

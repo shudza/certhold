@@ -251,6 +251,25 @@ func (db *DB) SetPeerAddress(ctx context.Context, name, address string) error {
 	return nil
 }
 
+// SetPeerInbound flips whether other peers may SSH into this one. T147's
+// make-client flow sets it false (inbound -> client) after the peer's
+// authorized_keys has been stripped of the CA trust line. Matching 0 rows is
+// the peer-not-found error so callers can map it.
+func (db *DB) SetPeerInbound(ctx context.Context, name string, inbound bool) error {
+	res, err := db.sql.ExecContext(ctx, `UPDATE peers SET inbound = ? WHERE name = ?`, boolToInt(inbound), name)
+	if err != nil {
+		return fmt.Errorf("set peer inbound: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set peer inbound rows: %w", err)
+	}
+	if n == 0 {
+		return ErrPeerNotFound
+	}
+	return nil
+}
+
 // SetPeerAddressIfEmpty records address only when the peer has none yet, so an
 // explicit address set at enroll time is never overwritten by the install-time
 // source-IP backfill. Matching 0 rows (no peer, or address already set) is NOT
