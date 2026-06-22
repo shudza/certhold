@@ -16,13 +16,15 @@ import (
 // events back to the command's stdout/stderr so output stays byte-identical
 // to the historical inline implementations.
 func opsDeps(cmd *cobra.Command, d *db.DB, dataDir string, caUnlock, peerUnlock *memoUnlocker, dial func(context.Context, string, sshpush.Options) (sshpush.Pusher, error)) ops.Deps {
+	trustFlag, _ := cmd.Flags().GetBool(flagTrustNewHostKeys)
 	return ops.Deps{
-		DB:       d,
-		DataDir:  dataDir,
-		CAUnlock: caUnlock.get,
-		PeerPass: peerUnlock.get,
-		Dial:     ops.DialFn(dial),
-		OnEvent:  opsEventPrinter(cmd.OutOrStdout(), cmd.ErrOrStderr()),
+		DB:             d,
+		DataDir:        dataDir,
+		CAUnlock:       caUnlock.get,
+		PeerPass:       peerUnlock.get,
+		Dial:           ops.DialFn(dial),
+		HostKeyConfirm: newHostKeyConfirm(trustNewHostKeys(trustFlag)),
+		OnEvent:        opsEventPrinter(cmd.OutOrStdout(), cmd.ErrOrStderr()),
 	}
 }
 
