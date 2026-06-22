@@ -24,6 +24,7 @@ func NewRootCmd() *cobra.Command {
 
 	cmd.PersistentFlags().String("db", defaultDB, "path to state database")
 	cmd.PersistentFlags().String("data-dir", defaultDataDir, "path to data directory")
+	cmd.PersistentFlags().Bool(flagTrustNewHostKeys, false, "accept unknown peer host keys without prompting (TOFU); also via CERTHOLD_TRUST_NEW_HOST_KEYS=1")
 
 	cmd.AddCommand(
 		newInitCmd(),
