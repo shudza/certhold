@@ -295,7 +295,7 @@ func (m Model) startRevoke() (tea.Model, tea.Cmd) {
 			subject: "",
 			kind:    confirmRevoke,
 			body: batchConfirmBody(
-				fmt.Sprintf("Revoke %d peers and rekey the CA to exclude each?", len(live)), live),
+				fmt.Sprintf("Clear certhold off %d peers over SSH and delete each? (Does not rotate the CA.)", len(live)), live),
 		})
 		return m, nil
 	}
@@ -309,8 +309,8 @@ func (m Model) startRevoke() (tea.Model, tea.Cmd) {
 		subject: p.Name,
 		kind:    confirmRevoke,
 		body: []string{
-			"Revoke peer " + p.Name + " and rekey the CA to exclude it?",
-			"This rotates the CA across all remaining inbound peers.",
+			"Clear certhold off " + p.Name + " over SSH and delete its row?",
+			"This does not rotate the CA.",
 		},
 	})
 	return m, nil
@@ -396,10 +396,12 @@ func (m Model) launchEditGroups(name string, groups []string) (tea.Model, tea.Cm
 	return m.startAction("update "+name, run)
 }
 
+// launchRevoke runs the default clear+delete revoke path (rekey=false). A TUI
+// affordance for --rekey / DB-only remove is a follow-up (out of T142 scope).
 func (m Model) launchRevoke(name string) (tea.Model, tea.Cmd) {
 	hostname := m.action.Hostname
 	run := func(ctx context.Context, deps ops.Deps) error {
-		return ops.RevokePeer(ctx, deps, name, hostname)
+		return ops.RevokePeer(ctx, deps, name, hostname, false)
 	}
 	return m.startAction("revoke "+name, run)
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/shudza/certhold/internal/ca"
 	"github.com/shudza/certhold/internal/db"
 	"github.com/shudza/certhold/internal/ops"
+	"github.com/shudza/certhold/internal/peerfiles"
 	"github.com/shudza/certhold/internal/sshpush"
 )
 
@@ -27,9 +28,12 @@ type fakePusher struct{}
 func (p fakePusher) WriteFileAtomic(context.Context, string, []byte, fs.FileMode) error { return nil }
 func (p fakePusher) ReadFile(context.Context, string) ([]byte, error)                   { return nil, nil }
 func (p fakePusher) SpliceConfigBlock(context.Context, string, string, string) error    { return nil }
-func (p fakePusher) ReloadSSHD(context.Context) error                                   { return nil }
-func (p fakePusher) VerifyHealth(context.Context) error                                 { return nil }
-func (p fakePusher) Close() error                                                       { return nil }
+func (p fakePusher) ClearPeer(context.Context, peerfiles.RemotePaths, string, ssh.PublicKey) error {
+	return nil
+}
+func (p fakePusher) ReloadSSHD(context.Context) error   { return nil }
+func (p fakePusher) VerifyHealth(context.Context) error { return nil }
+func (p fakePusher) Close() error                       { return nil }
 
 func fakeDial(context.Context, string, sshpush.Options) (sshpush.Pusher, error) {
 	return fakePusher{}, nil
@@ -213,8 +217,9 @@ func peerGroups(t *testing.T, d *db.DB, name string) []string {
 	return g
 }
 
-// TestRevokeFlow drives confirm → passphrase → progress and asserts the db row
-// and the reloaded table both show the peer revoked.
+// TestRevokeFlow drives confirm → progress on the default (clear+delete) revoke
+// path and asserts the db row is deleted and the reloaded table no longer lists
+// the peer.
 func TestRevokeFlow(t *testing.T) {
 	dataDir, d, pass := seedActionEnv(t)
 	m := actionModel(t, dataDir, d)
@@ -234,16 +239,11 @@ func TestRevokeFlow(t *testing.T) {
 		t.Fatalf("progress not done-ok: done=%v err=%v lines=%v", pg.done, pg.err, pg.lines)
 	}
 
-	p, err := d.GetPeer(context.Background(), "alpha")
-	if err != nil {
-		t.Fatalf("GetPeer: %v", err)
+	if _, err := d.GetPeer(context.Background(), "alpha"); !errors.Is(err, db.ErrPeerNotFound) {
+		t.Fatalf("db: alpha row should be deleted after default revoke, got err=%v", err)
 	}
-	if !p.Revoked {
-		t.Fatal("db: alpha not revoked")
-	}
-	row, ok := m.peerByName("alpha")
-	if !ok || !row.Revoked {
-		t.Fatalf("reloaded table does not show alpha revoked: row=%+v ok=%v", row, ok)
+	if _, ok := m.peerByName("alpha"); ok {
+		t.Fatal("reloaded table still lists alpha after a clear+delete revoke")
 	}
 }
 

@@ -11,8 +11,11 @@ import (
 	"sync"
 	"testing"
 
+	"golang.org/x/crypto/ssh"
+
 	"github.com/shudza/certhold/internal/ca"
 	"github.com/shudza/certhold/internal/db"
+	"github.com/shudza/certhold/internal/peerfiles"
 	"github.com/shudza/certhold/internal/sshpush"
 )
 
@@ -60,6 +63,10 @@ func (f *fakePusher) ReadFile(ctx context.Context, path string) ([]byte, error) 
 
 func (f *fakePusher) SpliceConfigBlock(ctx context.Context, configPath, instanceKey, block string) error {
 	return f.record(fakePushCall{op: "splice", path: configPath, content: []byte(block)})
+}
+
+func (f *fakePusher) ClearPeer(ctx context.Context, paths peerfiles.RemotePaths, instanceKey string, caPubKey ssh.PublicKey) error {
+	return f.record(fakePushCall{op: "clear", path: paths.ConfigTarget})
 }
 
 func (f *fakePusher) ReloadSSHD(ctx context.Context) error {

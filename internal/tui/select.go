@@ -95,20 +95,20 @@ func (m Model) startBatch(verb string, names []string, op func(ctx context.Conte
 				//
 				// Why the whole-batch rerun is safe: a passphrase-class error can
 				// surface AFTER some targets have already mutated, so the rerun
-				// re-applies already-done targets. It does NOT rely on any op
-				// unlocking the CA before its first DB write — neither batchable op
-				// does:
-				//   - RevokePeer runs SetPeerRevoked (a DB write) BEFORE the CA
-				//     unlock that happens inside its Rekey, so a bad CA passphrase
-				//     surfaces only after the first target's revoked flag is set.
-				//   - UpdatePeer's manager peer-key passphrase (deps.PeerPass)
-				//     prompts at PUSH time, AFTER its re-sign DB write; the first
-				//     target to push can raise it once an earlier target committed.
-				// The rerun is nonetheless end-state-correct because every batchable
-				// op is idempotent: SetPeerRevoked is idempotent (re-revoking a
-				// revoked peer is a no-op) and UpdatePeer's re-sign+re-push converges
-				// on the same group set. A future op whose rerun is NOT idempotent
-				// must store partial successes before returning a passphrase error.
+				// re-applies already-done targets. The default revoke path clears
+				// the peer over SSH (the manager peer-key passphrase, deps.PeerPass,
+				// is prompted at DIAL time) and only deletes the row on a successful
+				// clear; UpdatePeer prompts the same passphrase at PUSH time, AFTER
+				// its re-sign DB write. In both ops the passphrase prompt for a given
+				// target precedes that target's committing mutation, so a bad
+				// passphrase cannot leave a half-applied target.
+				// The rerun is nonetheless end-state-correct because each batchable
+				// op converges: a re-cleared+re-deleted peer that an earlier batch
+				// iteration already removed simply fails its GetPeer with
+				// ErrPeerNotFound on the rerun (recorded as a per-peer failure, not a
+				// corruption), and UpdatePeer's re-sign+re-push converges on the same
+				// group set. A future op whose rerun is NOT idempotent must store
+				// partial successes before returning a passphrase error.
 				if isPassphraseError(err) {
 					return err
 				}
@@ -150,7 +150,7 @@ func (m Model) launchBatchRevoke() (tea.Model, tea.Cmd) {
 	}
 	hostname := m.action.Hostname
 	op := func(ctx context.Context, deps ops.Deps, name string) error {
-		return ops.RevokePeer(ctx, deps, name, hostname)
+		return ops.RevokePeer(ctx, deps, name, hostname, false)
 	}
 	return m.startBatch("revoke", live, op)
 }

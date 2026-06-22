@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"context"
+	"errors"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -249,10 +250,8 @@ func TestIntegrationFullSurface(t *testing.T) {
 	}
 
 	// --- 3. batch-revoke beta + gamma from the peers view -------------------
-	revStart, err := d.FleetRev(ctx)
-	if err != nil {
-		t.Fatalf("FleetRev pre-revoke: %v", err)
-	}
+	// Default revoke clears certhold off each (reachable, fake-dialled) peer and
+	// hard-deletes its row; it does not rotate the CA or bump fleet_rev.
 	key("1")
 	waitFrame("1 peers")
 	// Peers table is in db order: alpha(0), beta(1), edge1(2), gamma(3). Reset to
@@ -265,38 +264,24 @@ func TestIntegrationFullSurface(t *testing.T) {
 	key(" ")       // mark gamma
 	waitFrame("2 marked")
 	key("x")
-	waitFrame("Revoke 2 peers")
+	waitFrame("Clear certhold off 2 peers")
 	key("y")
-	// Each revoke rekeys, reusing the cached CA passphrase (no second prompt).
+	// Each revoke clears the peer over the fake dial, reusing the cached manager
+	// peer-key passphrase (no second prompt).
 	waitFrame("2 ok, 0 failed")
 	waitFrame("done")
 	special(tea.KeyEsc)
 
-	// --- 4. status view (3) reflects the revocations and a bumped rev -------
+	// --- 4. status view (3) renders and the revoked peers are gone ----------
 	key("3")
 	waitFrame("FLEET")
-	// beta was pre-existing live, gamma too → 2 newly revoked.
-	if !waitDBRevoked(t, d, "beta") || !waitDBRevoked(t, d, "gamma") {
-		t.Fatal("db: beta/gamma not revoked after batch")
+	// beta and gamma were cleared+deleted; their rows must be gone, while the
+	// manager peer alpha survives.
+	if !waitDBDeleted(t, d, "beta") || !waitDBDeleted(t, d, "gamma") {
+		t.Fatal("db: beta/gamma rows not deleted after default batch revoke")
 	}
-	revEnd, err := d.FleetRev(ctx)
-	if err != nil {
-		t.Fatalf("FleetRev post-revoke: %v", err)
-	}
-	if revEnd <= revStart {
-		t.Fatalf("fleet rev did not bump across the batch revoke: %d → %d", revStart, revEnd)
-	}
-	// The status frame's "revoked" line must show 2 (beta + gamma), and the
-	// MANAGER fleet rev line must show the bumped value.
-	waitFrame("revoked")
-	frame := lastFrame(sink.snapshot())
-	revLine := frameLine(frame, "revoked")
-	if !strings.Contains(revLine, "2") {
-		t.Fatalf("status revoked line does not show 2: %q\nframe:\n%s", revLine, frame)
-	}
-	revStr := lineWithDigit(frame, "fleet rev", revEnd)
-	if revStr == "" {
-		t.Fatalf("status fleet-rev line does not show %d:\n%s", revEnd, frame)
+	if _, err := d.GetPeer(ctx, "alpha"); err != nil {
+		t.Fatalf("db: manager peer alpha must survive a peer revoke: %v", err)
 	}
 
 	// quit cleanly and confirm a clean program exit (no deadlock).
@@ -386,7 +371,7 @@ func groupRowIndex(t *testing.T, d *db.DB, name string) int {
 	return 0
 }
 
-// waitDBPeer / waitDBRevoked poll the db (the action's reload is async) for the
+// waitDBPeer / waitDBDeleted poll the db (the action's reload is async) for the
 // expected committed state, bounded so a failure surfaces instead of hanging.
 func waitDBPeer(t *testing.T, d *db.DB, name string) bool {
 	t.Helper()
@@ -403,12 +388,11 @@ func waitDBPeer(t *testing.T, d *db.DB, name string) bool {
 	}
 }
 
-func waitDBRevoked(t *testing.T, d *db.DB, name string) bool {
+func waitDBDeleted(t *testing.T, d *db.DB, name string) bool {
 	t.Helper()
 	deadline := time.After(10 * time.Second)
 	for {
-		p, err := d.GetPeer(context.Background(), name)
-		if err == nil && p.Revoked {
+		if _, err := d.GetPeer(context.Background(), name); errors.Is(err, db.ErrPeerNotFound) {
 			return true
 		}
 		select {

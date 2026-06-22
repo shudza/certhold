@@ -171,8 +171,11 @@ of scope:
   pushes themselves stay strict. See
   [maintenance-and-operations.md](maintenance-and-operations.md#host-key-trust-on-the-push).
 - **No native KRL revocation.** `RevokedKeys` is a `sshd_config` directive, so it
-  is not used. Revocation is always a **partial CA rotation** that reissues to
-  everyone except the revoked peer — see
+  is not used. Instead the **default `revoke`** strips certhold off the (reachable)
+  peer — its config block, identity files, and the cert-authority trust line — and
+  then deletes its row, a clean decommission. For a **compromised or unreachable**
+  peer, `revoke --rekey` does a **partial CA rotation** that reissues to everyone
+  except the revoked peer and never contacts it. See
   [revocation](maintenance-and-operations.md#revocation).
 
 ### Multiple instances on one peer

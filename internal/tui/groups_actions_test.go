@@ -16,6 +16,7 @@ import (
 	"github.com/shudza/certhold/internal/ca"
 	"github.com/shudza/certhold/internal/db"
 	"github.com/shudza/certhold/internal/ops"
+	"github.com/shudza/certhold/internal/peerfiles"
 	"github.com/shudza/certhold/internal/sshpush"
 )
 
@@ -42,9 +43,12 @@ func (p recPusher) ReadFile(context.Context, string) ([]byte, error) {
 	return []byte(`cert-authority,principals="manager,infra" ` + p.rec.caLine + "\n"), nil
 }
 func (p recPusher) SpliceConfigBlock(context.Context, string, string, string) error { return nil }
-func (p recPusher) ReloadSSHD(context.Context) error                                { return nil }
-func (p recPusher) VerifyHealth(context.Context) error                              { return nil }
-func (p recPusher) Close() error                                                    { return nil }
+func (p recPusher) ClearPeer(context.Context, peerfiles.RemotePaths, string, ssh.PublicKey) error {
+	return nil
+}
+func (p recPusher) ReloadSSHD(context.Context) error   { return nil }
+func (p recPusher) VerifyHealth(context.Context) error { return nil }
+func (p recPusher) Close() error                       { return nil }
 
 type recDial struct {
 	mu        sync.Mutex

@@ -15,8 +15,11 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/ssh"
+
 	"github.com/shudza/certhold/internal/ca"
 	"github.com/shudza/certhold/internal/db"
+	"github.com/shudza/certhold/internal/peerfiles"
 	"github.com/shudza/certhold/internal/sshpush"
 )
 
@@ -267,9 +270,12 @@ type stubPusher struct{}
 func (stubPusher) WriteFileAtomic(context.Context, string, []byte, fs.FileMode) error { return nil }
 func (stubPusher) ReadFile(context.Context, string) ([]byte, error)                   { return nil, nil }
 func (stubPusher) SpliceConfigBlock(context.Context, string, string, string) error    { return nil }
-func (stubPusher) ReloadSSHD(context.Context) error                                   { return nil }
-func (stubPusher) VerifyHealth(context.Context) error                                 { return nil }
-func (stubPusher) Close() error                                                       { return nil }
+func (stubPusher) ClearPeer(context.Context, peerfiles.RemotePaths, string, ssh.PublicKey) error {
+	return nil
+}
+func (stubPusher) ReloadSSHD(context.Context) error   { return nil }
+func (stubPusher) VerifyHealth(context.Context) error { return nil }
+func (stubPusher) Close() error                       { return nil }
 
 // TestEnrollReachabilityProbeRealDialUnreachable exercises the FULL serve-side
 // probe path (real sshpush.Dial, real manager self files from init) against an
