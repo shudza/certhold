@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -494,6 +495,71 @@ func TestMarkedRowsRenderTextualMarker(t *testing.T) {
 	}
 	if !strings.Contains(v, "2 marked") {
 		t.Fatalf("footer missing mark count:\n%s", v)
+	}
+}
+
+// TestPickModalScrollsBoundedToHeight builds a pickModal with more options than
+// fit a small height and asserts: the rendered body never exceeds the budget,
+// the scroll cue shows, the cursor stays visible as it descends, the LAST option
+// becomes reachable, and toggling works while scrolled.
+func TestPickModalScrollsBoundedToHeight(t *testing.T) {
+	opts := make([]string, 0, 20)
+	for i := 0; i < 20; i++ {
+		opts = append(opts, fmt.Sprintf("grp%02d", i))
+	}
+	pm := newPickModal("pick groups", "alpha", opts, nil)
+
+	const h = 8 // body budget (post-border), like modalFrame passes
+	bodyHas := func(p pickModal, s string) bool {
+		return strings.Contains(strings.Join(p.view(60, h), "\n"), s)
+	}
+
+	// At the top: bounded, cue present, first option shown, last hidden.
+	body := pm.view(60, h)
+	if len(body) > h {
+		t.Fatalf("pick body %d lines exceeds height %d:\n%s", len(body), h, strings.Join(body, "\n"))
+	}
+	if !bodyHas(pm, "▼") {
+		t.Fatalf("overflowing pick missing down cue:\n%s", strings.Join(body, "\n"))
+	}
+	if !bodyHas(pm, "grp00") {
+		t.Fatalf("top of pick missing first option:\n%s", strings.Join(body, "\n"))
+	}
+	if bodyHas(pm, "grp19") {
+		t.Fatalf("last option should be off-screen at top:\n%s", strings.Join(body, "\n"))
+	}
+
+	// Drive the cursor to the bottom; the body stays bounded the whole way and the
+	// cursor row stays rendered.
+	for i := 0; i < 19; i++ {
+		next, _ := pm.handle(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+		pm = next.(pickModal)
+		b := pm.view(60, h)
+		if len(b) > h {
+			t.Fatalf("pick body exceeded height while scrolling (cursor %d):\n%s", pm.cursor, strings.Join(b, "\n"))
+		}
+		if !strings.Contains(strings.Join(b, "\n"), opts[pm.cursor]) {
+			t.Fatalf("cursor option %q not visible at cursor %d:\n%s", opts[pm.cursor], pm.cursor, strings.Join(b, "\n"))
+		}
+	}
+	if pm.cursor != 19 {
+		t.Fatalf("cursor = %d, want 19 at bottom", pm.cursor)
+	}
+	if !bodyHas(pm, "grp19") {
+		t.Fatalf("scrolled-down pick missing the last option:\n%s", strings.Join(pm.view(60, h), "\n"))
+	}
+	if !bodyHas(pm, "▲") {
+		t.Fatalf("scrolled-down pick missing the up cue:\n%s", strings.Join(pm.view(60, h), "\n"))
+	}
+
+	// Toggle while scrolled: the checkbox flips for the bottom option.
+	next, _ := pm.handle(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(" ")})
+	pm = next.(pickModal)
+	if !pm.checked["grp19"] {
+		t.Fatalf("space did not toggle the scrolled-to option: %+v", pm.checked)
+	}
+	if !bodyHas(pm, "[x] grp19") {
+		t.Fatalf("toggled option not rendered checked while scrolled:\n%s", strings.Join(pm.view(60, h), "\n"))
 	}
 }
 

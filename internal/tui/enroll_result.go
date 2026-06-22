@@ -31,7 +31,7 @@ func (e enrollResultModal) handle(msg tea.KeyMsg) (modal, modalResult) {
 	return e, modalKeep
 }
 
-func (e enrollResultModal) view(w int) []string {
+func (e enrollResultModal) view(w, _ int) []string {
 	// The modal frame draws a 2-cell border + 1-cell padding each side, so the
 	// inner content width is w-4 at most. Wrap the one-liner to that so it stays
 	// visible and legible at narrow widths (e.g. 60 cols) rather than truncated.

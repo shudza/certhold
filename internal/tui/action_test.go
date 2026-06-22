@@ -368,7 +368,7 @@ func TestWrongPassphraseErrorShown(t *testing.T) {
 	if !isPassphraseError(errors.New(pm.errMsg)) {
 		t.Fatalf("retry modal errMsg not a passphrase error: %q", pm.errMsg)
 	}
-	v := strings.Join(pm.view(40), "\n")
+	v := strings.Join(pm.view(40, 24), "\n")
 	if !strings.Contains(v, "incorrect") {
 		t.Fatalf("passphrase modal view omits the error: %q", v)
 	}

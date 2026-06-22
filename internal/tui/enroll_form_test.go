@@ -54,8 +54,8 @@ func TestEnrollValidationEmptyName(t *testing.T) {
 	if ef.validateName() == "" {
 		t.Fatal("empty name unexpectedly validated")
 	}
-	if !strings.Contains(strings.Join(ef.view(80), "\n"), "required") {
-		t.Fatalf("empty-name form omits the required note:\n%s", strings.Join(ef.view(80), "\n"))
+	if !strings.Contains(strings.Join(ef.view(80, 24), "\n"), "required") {
+		t.Fatalf("empty-name form omits the required note:\n%s", strings.Join(ef.view(80, 24), "\n"))
 	}
 }
 

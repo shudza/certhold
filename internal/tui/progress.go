@@ -30,7 +30,7 @@ func (p progressModal) handle(msg tea.KeyMsg) (modal, modalResult) {
 	return p, modalKeep
 }
 
-func (p progressModal) view(int) []string {
+func (p progressModal) view(int, int) []string {
 	lines := append([]string(nil), p.lines...)
 	if len(lines) == 0 {
 		lines = append(lines, dimStyle.Render("working…"))

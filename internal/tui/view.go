@@ -30,6 +30,9 @@ const (
 	selMarker = "> "
 	noMarker  = "  "
 	minColW   = 6
+	// groupPaneH is the fixed height of the groups view's lower detail pane (rule +
+	// wrapped members/allowed lists); content beyond it scrolls (J) with a cue.
+	groupPaneH = 4
 	// markMarker is the textual multi-select glyph that shares the single 2-cell
 	// prefix column with the cursor marker: a marked row shows "▣ " (taking
 	// precedence over the cursor's "> ", since the row's reverse styling already
@@ -133,7 +136,7 @@ func (m Model) footerLines(w int) []string {
 	case m.filtering:
 		hints = "enter apply · esc clear · ctrl+c quit"
 	case m.detail:
-		hints = "esc back · tab/1/2/3/4 views · / filter · r reload · q quit"
+		hints = "esc back · j/k scroll · tab/1/2/3/4 views · / filter · r reload · q quit"
 	case m.view == viewStatus:
 		hints = "tab/1/2/3/4 views · r refresh · q quit"
 	case m.view == viewNet && m.probePaused:
@@ -141,9 +144,9 @@ func (m Model) footerLines(w int) []string {
 	case m.view == viewNet:
 		hints = "tab/1/2/3/4 views · j/k move · P probe now · p pause · r reload · q quit"
 	case m.view == viewGroups && m.mutationsEnabled():
-		hints = "tab/1/2/3/4 views · j/k move · n new · R rename · D delete · m members · e enroll · K rekey · ctrl+l forget pass · / filter · q quit"
+		hints = "tab/1/2/3/4 views · j/k move · J scroll detail · n new · R rename · D delete · m members · e enroll · K rekey · ctrl+l forget pass · / filter · q quit"
 	case m.view == viewGroups:
-		hints = "tab/1/2/3/4 views · j/k move · / filter · r reload · q quit"
+		hints = "tab/1/2/3/4 views · j/k move · J scroll detail · / filter · r reload · q quit"
 	case m.mutationsEnabled():
 		hints = "tab/1/2/3/4 views · j/k move · space mark · enter detail · u groups · i allowed · x revoke · e enroll · K rekey · ctrl+l forget pass · / filter · q quit"
 	default:
@@ -247,9 +250,8 @@ func (m Model) groupsLines(w, bodyH int) []string {
 	}
 	widths := fitColumns(headers, rows, []int{0}, w-len(selMarker))
 
-	const paneH = 4
 	sel := clamp(m.groupIdx, 0, len(groups)-1)
-	visible := bodyH - 1 - paneH
+	visible := bodyH - 1 - groupPaneH
 	if len(groups) > visible && visible > 2 {
 		visible--
 	}
@@ -272,30 +274,83 @@ func (m Model) groupsLines(w, bodyH int) []string {
 	if len(groups) > visible {
 		lines = append(lines, scrollCue(sel, top, visible, len(groups)))
 	}
-	for len(lines) < bodyH-paneH {
+	for len(lines) < bodyH-groupPaneH {
 		lines = append(lines, "")
 	}
 
 	g, _ := m.selectedGroup()
+	lines = append(lines, m.groupPaneLines(g, w, groupPaneH)...)
+	return lines
+}
+
+// groupPaneBody is the full (unscrolled) lower-pane content for a group: a rule,
+// then the members and allowed-by lists wrapped across as many lines as they
+// need. groupPaneLines windows it into the fixed pane; move clamps
+// m.groupPaneScroll against its length.
+func (m Model) groupPaneBody(g groupRow, w int) []string {
 	rule := "── group: " + g.Name + " "
 	if pad := w - lipgloss.Width(rule); pad > 0 {
 		rule += strings.Repeat("─", pad)
 	}
-	lines = append(lines,
-		truncLine(dimStyle.Render(rule), w),
-		truncLine(labelStyle.Render(fmt.Sprintf("members (%d):", len(g.Members)))+" "+joinOrDash(g.Members), w),
-		truncLine(labelStyle.Render(fmt.Sprintf("allowed inbound by (%d):", len(g.AllowedBy)))+" "+joinOrDash(g.AllowedBy), w),
-		"",
-	)
-	return lines
+	out := []string{truncLine(dimStyle.Render(rule), w)}
+	list := func(label string, items []string) {
+		styledHead := labelStyle.Render(label) + " "
+		headW := lipgloss.Width(label) + 1
+		bodyW := w - headW
+		if bodyW < 1 {
+			bodyW = 1
+		}
+		wrapped := wrapPlain(joinOrDash(items), bodyW)
+		indent := strings.Repeat(" ", headW)
+		for i, line := range wrapped {
+			if i == 0 {
+				out = append(out, truncLine(styledHead+line, w))
+			} else {
+				out = append(out, truncLine(indent+line, w))
+			}
+		}
+	}
+	list(fmt.Sprintf("members (%d):", len(g.Members)), g.Members)
+	list(fmt.Sprintf("allowed inbound by (%d):", len(g.AllowedBy)), g.AllowedBy)
+	return out
 }
 
-func (m Model) peerDetailLines(w, bodyH int) []string {
+func (m Model) groupPaneLines(g groupRow, w, paneH int) []string {
+	body := m.groupPaneBody(g, w)
+	if len(body) <= paneH {
+		out := append([]string(nil), body...)
+		for len(out) < paneH {
+			out = append(out, "")
+		}
+		return out
+	}
+	visible := paneH - 1
+	if visible < 1 {
+		visible = 1
+	}
+	top := clamp(m.groupPaneScroll, 0, len(body)-1)
+	if top > len(body)-visible {
+		top = len(body) - visible
+	}
+	if top < 0 {
+		top = 0
+	}
+	out := append([]string(nil), body[top:min(top+visible, len(body))]...)
+	out = append(out, scrollCue(top, top, visible, len(body)))
+	for len(out) < paneH {
+		out = append(out, "")
+	}
+	return out
+}
+
+// detailBody builds the full (unscrolled) set of peer-detail lines. peerDetailLines
+// windows it; move clamps m.detailScroll against its length so scrolling stays in
+// bounds without the renderer needing to feed a height back into the model.
+func (m Model) detailBody(w int) ([]string, bool) {
 	p, ok := m.detailPeer()
 	if !ok {
-		return []string{dimStyle.Render("peer no longer present — esc to go back")}
+		return nil, false
 	}
-
 	status := "active"
 	if p.Revoked {
 		status = errStyle.Render("REVOKED")
@@ -307,7 +362,7 @@ func (m Model) peerDetailLines(w, bodyH int) []string {
 	field := func(label, value string) string {
 		return truncLine(labelStyle.Render(fmt.Sprintf("%-13s", label))+value, w)
 	}
-	lines := []string{
+	return []string{
 		truncLine(titleStyle.Render("peer: "+p.Name), w),
 		"",
 		field("status", status),
@@ -322,13 +377,36 @@ func (m Model) peerDetailLines(w, bodyH int) []string {
 		field("inbound", yn(p.Inbound)),
 		field("delivery", peerDelivery(p)),
 		field("pull token", token),
+	}, true
+}
+
+func (m Model) peerDetailLines(w, bodyH int) []string {
+	lines, ok := m.detailBody(w)
+	if !ok {
+		return []string{dimStyle.Render("peer no longer present — esc to go back")}
 	}
-	if len(lines) > bodyH && bodyH >= 2 {
-		hidden := len(lines) - (bodyH - 1)
-		lines = append(lines[:bodyH-1:bodyH-1],
-			dimStyle.Render(fmt.Sprintf("… %d more — enlarge the terminal", hidden)))
+	if len(lines) <= bodyH || bodyH < 2 {
+		return lines
 	}
-	return lines
+
+	visible := bodyH - 1
+	top := clamp(m.detailScroll, 0, len(lines)-1)
+	if top > len(lines)-visible {
+		top = len(lines) - visible
+	}
+	if top < 0 {
+		top = 0
+	}
+	out := append([]string(nil), lines[top:min(top+visible, len(lines))]...)
+	out = append(out, scrollCue(top, top, visible, len(lines)))
+	return out
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // peerDelivery / peerDeliveryShort describe how the manager delivers updates to

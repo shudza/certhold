@@ -508,18 +508,40 @@ func TestScrollCue(t *testing.T) {
 	}
 }
 
-func TestDetailClippedShowsMore(t *testing.T) {
+// TestDetailScrollsToReachAllLines asserts the peer detail pane scrolls instead
+// of permanently truncating: on a short terminal the top shows a "▼" cue, the
+// bottom fields (pull token) are not visible initially, and scrolling down
+// reveals them with an "▲" cue — every line is reachable.
+func TestDetailScrollsToReachAllLines(t *testing.T) {
 	m := press(t, newTestModel(nil), "enter")
 	nm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 10})
 	m = nm.(Model)
+
 	v := m.View()
-	if !strings.Contains(v, "more — enlarge the terminal") {
-		t.Fatalf("clipped detail missing 'more' indicator:\n%s", v)
+	if !strings.Contains(v, "▼") {
+		t.Fatalf("clipped detail missing the down scroll cue:\n%s", v)
+	}
+	if strings.Contains(v, "pull token") {
+		t.Fatalf("bottom field should be off-screen before scrolling:\n%s", v)
 	}
 	for _, want := range []string{"status", "cert"} {
 		if !strings.Contains(v, want) {
-			t.Errorf("clipped detail must keep %q visible:\n%s", want, v)
+			t.Errorf("top of detail must keep %q visible:\n%s", want, v)
 		}
+	}
+
+	for i := 0; i < 20; i++ {
+		m = press(t, m, "j")
+	}
+	v = m.View()
+	if !strings.Contains(v, "pull token") {
+		t.Fatalf("scrolling did not bring the last detail line into view:\n%s", v)
+	}
+	if !strings.Contains(v, "▲") {
+		t.Fatalf("scrolled-down detail missing the up scroll cue:\n%s", v)
+	}
+	if strings.Contains(v, "more — enlarge the terminal") {
+		t.Fatalf("detail still uses the permanent-truncation message:\n%s", v)
 	}
 }
 
