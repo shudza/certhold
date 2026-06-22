@@ -619,6 +619,41 @@ func TestDialEncryptedKeyNilPassphraseFn(t *testing.T) {
 	}
 }
 
+func TestEffectiveConnectTimeout(t *testing.T) {
+	if got := effectiveConnectTimeout(Options{}); got != defaultConnectTimeout {
+		t.Errorf("zero ConnectTimeout: got %v, want %v", got, defaultConnectTimeout)
+	}
+	if got := effectiveConnectTimeout(Options{ConnectTimeout: 3 * time.Second}); got != 3*time.Second {
+		t.Errorf("explicit ConnectTimeout: got %v, want %v", got, 3*time.Second)
+	}
+}
+
+// TestDialFailsFastUnreachable verifies that with a deadline-less context and a
+// small ConnectTimeout, Dial against a black-hole address (TEST-NET-1, packets
+// dropped) returns an error well before the multi-minute OS TCP timeout.
+func TestDialFailsFastUnreachable(t *testing.T) {
+	env := setupTestEnv(t)
+	if err := os.WriteFile(env.knownHostsPath, []byte{}, 0644); err != nil {
+		t.Fatalf("write empty known_hosts: %v", err)
+	}
+	start := time.Now()
+	_, err := Dial(context.Background(), "192.0.2.1:22", Options{
+		CertPath:       env.certPath,
+		KeyPath:        env.keyPath,
+		KnownHostsPath: env.knownHostsPath,
+		User:           "root",
+		ConnectTimeout: 1 * time.Second,
+	})
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("Dial to black-hole address: want error, got nil")
+	}
+	if elapsed >= 5*time.Second {
+		t.Fatalf("Dial took %v, want fail-fast under 5s (OS default not bounded)", elapsed)
+	}
+	t.Logf("fail-fast: Dial returned %v after %v", err, elapsed)
+}
+
 var _ Pusher = (*Client)(nil)
 
 func dialExecLocalClient(t *testing.T) *Client {
