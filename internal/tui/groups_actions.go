@@ -17,6 +17,7 @@ type textKind int
 const (
 	textCreateGroup textKind = iota
 	textRenameGroup
+	textEditAddress
 )
 
 // textModal is a single-line free-text prompt (group name entry). Unlike
@@ -190,6 +191,12 @@ func (m Model) submitText(t textModal) (tea.Model, tea.Cmd) {
 			return ops.GroupRename(ctx, deps, old, name, hostname)
 		}
 		return m.startAction("rename "+old+" → "+name, run)
+	case textEditAddress:
+		peer := t.subject
+		run := func(ctx context.Context, deps ops.Deps) error {
+			return ops.SetPeerAddress(ctx, deps, peer, name)
+		}
+		return m.startAction("address "+peer, run)
 	}
 	return m, nil
 }

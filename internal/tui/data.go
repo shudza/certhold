@@ -13,6 +13,7 @@ import (
 
 type peerRow struct {
 	Name          string
+	Address       string
 	DialHost      string
 	TargetUser    string
 	Fingerprint   string
@@ -134,6 +135,7 @@ func load(ctx context.Context, d *db.DB, dbPath string) (fleetData, error) {
 		}
 		fd.Peers = append(fd.Peers, peerRow{
 			Name:          p.Name,
+			Address:       p.Address,
 			DialHost:      p.DialHost(),
 			TargetUser:    p.TargetUser,
 			Fingerprint:   p.Fingerprint,

@@ -45,6 +45,8 @@ type confirmKind int
 const (
 	confirmRevoke confirmKind = iota
 	confirmGroupDelete
+	confirmRemove
+	confirmMakeClient
 )
 
 // confirmModal is a yes/no gate. submit carries the intent the Model turns into

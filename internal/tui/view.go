@@ -148,7 +148,7 @@ func (m Model) footerLines(w int) []string {
 	case m.view == viewGroups:
 		hints = "tab/1/2/3/4 views · j/k move · J scroll detail · / filter · r reload · q quit"
 	case m.mutationsEnabled():
-		hints = "tab/1/2/3/4 views · j/k move · space mark · enter detail · u groups · i allowed · x revoke · e enroll · K rekey · ctrl+l forget pass · / filter · q quit"
+		hints = "tab/1/2/3/4 views · j/k move · space mark · enter detail · u groups · i allowed · a address · x revoke · X remove · C →client · e enroll · K rekey · ctrl+l forget pass · / filter · q quit"
 	default:
 		hints = "tab/1/2/3/4 views · j/k move · enter detail · / filter · r reload · q quit"
 	}
