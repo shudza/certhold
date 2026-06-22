@@ -97,13 +97,16 @@ push prompts **at most once per key**, never once per peer.
 | `enroll` | unlock (sign cert) | — |
 | `update` | unlock (re-sign) | unlock (push) |
 | `group allow` / `disallow` | — | unlock (push) |
-| `revoke` | unlock old + set new (it is a partial CA rekey) | unlock (push) |
+| `revoke` (default) | — | unlock (clear the peer over SSH) |
+| `revoke --rekey` | unlock old + set new (partial CA rekey) | unlock (push) |
 | `rekey` | unlock old + set new | unlock (push) |
 | `serve`, `list` | never | never |
 
 `init`'s cells say *set* because the keys are being created (passphrase
-established), not decrypted. `revoke` is a partial CA rekey, so its key usage
-matches `rekey`. `rekey` reuses the old CA passphrase for the new key by default;
+established), not decrypted. The default `revoke` never touches the CA — it only
+dials the peer to strip certhold before deleting the row. `revoke --rekey` is a
+partial CA rekey, so its key usage matches `rekey`. `rekey` reuses the old CA
+passphrase for the new key by default;
 `--rotate-passphrase` prompts for a fresh one (CA key only) — see
 [rekey](maintenance-and-operations.md#passphrase-across-rotation).
 

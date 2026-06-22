@@ -54,13 +54,15 @@ func TestFleetRevBumpsExactlyOncePerMutatingCommand(t *testing.T) {
 			},
 		},
 		{
-			name: "revoke",
+			// Only `revoke --rekey` rotates the CA and bumps fleet_rev; the default
+			// clear+delete path is a single-peer SSH op that does not bump.
+			name: "revoke --rekey",
 			setup: func(t *testing.T) (string, func()) {
 				dataDir, dbPath, hostname, _, cleanup := setupRekeyEnv(t, nil)
 				t.Cleanup(cleanup)
 				return dbPath, func() {
-					if _, stderr, err := runRevokeCmd(t, dataDir, dbPath, "alpha", "--hostname", hostname); err != nil {
-						t.Fatalf("revoke: err=%v stderr=%s", err, stderr)
+					if _, stderr, err := runRevokeCmd(t, dataDir, dbPath, "--rekey", "alpha", "--hostname", hostname); err != nil {
+						t.Fatalf("revoke --rekey: err=%v stderr=%s", err, stderr)
 					}
 				}
 			},

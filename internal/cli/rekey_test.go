@@ -16,6 +16,7 @@ import (
 
 	"github.com/shudza/certhold/internal/ca"
 	"github.com/shudza/certhold/internal/db"
+	"github.com/shudza/certhold/internal/peerfiles"
 	"github.com/shudza/certhold/internal/sshpush"
 )
 
@@ -76,6 +77,16 @@ func (m *rekeyMockPusher) SpliceConfigBlock(ctx context.Context, p, instanceKey,
 		return err
 	}
 	m.rec.calls = append(m.rec.calls, rekeyMockCall{host: m.host, op: "splice", path: p, content: []byte(block)})
+	return nil
+}
+
+func (m *rekeyMockPusher) ClearPeer(ctx context.Context, paths peerfiles.RemotePaths, instanceKey string, caPubKey ssh.PublicKey) error {
+	m.rec.mu.Lock()
+	defer m.rec.mu.Unlock()
+	if err, ok := m.rec.failOn["clear:"+m.host]; ok {
+		return err
+	}
+	m.rec.calls = append(m.rec.calls, rekeyMockCall{host: m.host, op: "clear", path: paths.ConfigTarget})
 	return nil
 }
 

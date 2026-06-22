@@ -142,9 +142,9 @@ func TestBatchRevokeMiddleFailsContinues(t *testing.T) {
 }
 
 // TestBatchRevokeRealOpsSingleTarget drives the real x → confirm → batch path
-// end to end with a one-peer marked set so ops.RevokePeer (CA rekey included)
-// runs for real through the batch wrapper: the summary is 1 ok / 0 failed, the
-// mark clears, and the db row is revoked.
+// end to end with a one-peer marked set so the default ops.RevokePeer
+// (clear+delete) runs for real through the batch wrapper: the summary is
+// 1 ok / 0 failed, the mark clears, and the db row is deleted.
 func TestBatchRevokeRealOpsSingleTarget(t *testing.T) {
 	dataDir, d, pass := seedThreePeers(t)
 	m := batchModel(t, dataDir, d)
@@ -172,11 +172,11 @@ func TestBatchRevokeRealOpsSingleTarget(t *testing.T) {
 	if len(m.marks) != 0 {
 		t.Fatalf("fully-succeeded batch must clear all marks, got %v", m.marks)
 	}
-	if p, _ := d.GetPeer(context.Background(), "mid"); !p.Revoked {
-		t.Fatal("db: mid not revoked by the real-ops batch")
+	if _, err := d.GetPeer(context.Background(), "mid"); !errors.Is(err, db.ErrPeerNotFound) {
+		t.Fatalf("db: mid row should be deleted by the real-ops batch, got err=%v", err)
 	}
-	if p, _ := d.GetPeer(context.Background(), "alpha"); p.Revoked {
-		t.Fatal("db: unmarked alpha was revoked by the batch")
+	if _, err := d.GetPeer(context.Background(), "alpha"); err != nil {
+		t.Fatalf("db: unmarked alpha was affected by the batch: %v", err)
 	}
 }
 
@@ -356,11 +356,11 @@ func TestSinglePeerUnchangedWhenNoMarks(t *testing.T) {
 	if pg, ok := topAny(m).(progressModal); !ok || !pg.done || pg.err != nil {
 		t.Fatalf("single-peer revoke not done-ok: %+v", topAny(m))
 	}
-	if p, _ := d.GetPeer(context.Background(), "alpha"); !p.Revoked {
-		t.Fatal("db: alpha not revoked by single-peer path")
+	if _, err := d.GetPeer(context.Background(), "alpha"); !errors.Is(err, db.ErrPeerNotFound) {
+		t.Fatalf("db: alpha row should be deleted by the single-peer path, got err=%v", err)
 	}
-	if p, _ := d.GetPeer(context.Background(), "beta"); p.Revoked {
-		t.Fatal("db: beta revoked though only alpha was selected")
+	if _, err := d.GetPeer(context.Background(), "beta"); err != nil {
+		t.Fatalf("db: beta affected though only alpha was selected: %v", err)
 	}
 }
 

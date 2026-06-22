@@ -16,6 +16,7 @@ import (
 
 	"github.com/shudza/certhold/internal/ca"
 	"github.com/shudza/certhold/internal/db"
+	"github.com/shudza/certhold/internal/peerfiles"
 	"github.com/shudza/certhold/internal/sshpush"
 )
 
@@ -30,6 +31,7 @@ type fakeDialer struct {
 	mu          sync.Mutex
 	calls       []fakeCall
 	failDial    map[string]error
+	clearErr    map[string]error
 	readData    map[string][]byte
 	dialedHosts []string
 	captureSeen bool
@@ -85,6 +87,14 @@ func (p *fakePusher) ReadFile(ctx context.Context, remotePath string) ([]byte, e
 func (p *fakePusher) SpliceConfigBlock(ctx context.Context, configPath, instanceKey, block string) error {
 	p.record("splice", configPath, []byte(block))
 	return nil
+}
+
+func (p *fakePusher) ClearPeer(ctx context.Context, paths peerfiles.RemotePaths, instanceKey string, caPubKey ssh.PublicKey) error {
+	p.d.mu.Lock()
+	clearErr := p.d.clearErr[p.host]
+	p.d.mu.Unlock()
+	p.record("clear", paths.ConfigTarget, nil)
+	return clearErr
 }
 
 func (p *fakePusher) ReloadSSHD(ctx context.Context) error {
@@ -413,41 +423,186 @@ func TestRekeyAbortEmitsWarnAndReturnsCause(t *testing.T) {
 	}
 }
 
-func TestRevokePeerExcludesPeerAndEmitsInfo(t *testing.T) {
+// TestRevokeDefaultClearsAndDeletes covers the default (rekey=false) path: a
+// reachable inbound peer is dialed, ClearPeer is invoked, and its row is then
+// deleted.
+func TestRevokeDefaultClearsAndDeletes(t *testing.T) {
 	dataDir, d := setupOpsEnv(t, "alpha", "beta", "mgr")
 	ctx := context.Background()
 	dialer := &fakeDialer{}
 	var events []Event
 	deps := collectingDeps(dataDir, d, dialer, &events)
 
-	if err := RevokePeer(ctx, deps, "alpha", "mgr"); err != nil {
+	if err := RevokePeer(ctx, deps, "alpha", "mgr", false); err != nil {
 		t.Fatalf("RevokePeer: %v", err)
 	}
 
-	a, err := d.GetPeer(ctx, "alpha")
-	if err != nil {
-		t.Fatalf("GetPeer alpha: %v", err)
+	if _, err := d.GetPeer(ctx, "alpha"); !errors.Is(err, db.ErrPeerNotFound) {
+		t.Errorf("alpha row should be deleted, got err=%v", err)
 	}
-	if !a.Revoked {
-		t.Error("alpha not marked revoked")
+	// beta must be untouched: a clean clear+delete is single-peer, no rotation.
+	if _, err := d.GetPeer(ctx, "beta"); err != nil {
+		t.Errorf("beta should be untouched: %v", err)
 	}
 
-	sawBeta := false
+	sawClear := false
+	for _, c := range dialer.snapshot() {
+		if c.host != "alpha" {
+			t.Errorf("only alpha should be dialed, got %+v", c)
+		}
+		if c.op == "clear" {
+			sawClear = true
+		}
+	}
+	if !sawClear {
+		t.Error("ClearPeer was not called on alpha")
+	}
+	if got := dialer.dialedHosts; len(got) != 1 || got[0] != "alpha" {
+		t.Errorf("dialedHosts = %v, want [alpha]", got)
+	}
+}
+
+// TestRevokeDefaultClientPeerErrorsWithoutDial: a no-inbound/client peer is
+// rejected before any dial and its row is preserved.
+func TestRevokeDefaultClientPeerErrorsWithoutDial(t *testing.T) {
+	dataDir, d := setupOpsEnv(t, "mgr")
+	ctx := context.Background()
+	_, pubAuth, sshPub, err := ca.GeneratePeerKey()
+	if err != nil {
+		t.Fatalf("GeneratePeerKey: %v", err)
+	}
+	if err := d.InsertPeer(ctx, "laptop", 1, ssh.FingerprintSHA256(sshPub), pubAuth, "alice", false, "tok"); err != nil {
+		t.Fatalf("InsertPeer: %v", err)
+	}
+	dialer := &fakeDialer{}
+	var events []Event
+	deps := collectingDeps(dataDir, d, dialer, &events)
+
+	err = RevokePeer(ctx, deps, "laptop", "mgr", false)
+	if err == nil {
+		t.Fatal("expected error for client peer default revoke")
+	}
+	if !strings.Contains(err.Error(), "remove") || !strings.Contains(err.Error(), "--rekey") {
+		t.Errorf("err should guide to remove/--rekey, got %q", err)
+	}
+	if len(dialer.dialedHosts) != 0 {
+		t.Errorf("client peer must not be dialed, got %v", dialer.dialedHosts)
+	}
+	if _, err := d.GetPeer(ctx, "laptop"); err != nil {
+		t.Errorf("client peer row must be preserved: %v", err)
+	}
+}
+
+// TestRevokeDefaultDialFailurePreservesRow: a failed dial returns an error and
+// does NOT delete the row.
+func TestRevokeDefaultDialFailurePreservesRow(t *testing.T) {
+	dataDir, d := setupOpsEnv(t, "alpha", "mgr")
+	ctx := context.Background()
+	dialer := &fakeDialer{failDial: map[string]error{"alpha": errors.New("connection refused")}}
+	var events []Event
+	deps := collectingDeps(dataDir, d, dialer, &events)
+
+	err := RevokePeer(ctx, deps, "alpha", "mgr", false)
+	if err == nil {
+		t.Fatal("expected dial error")
+	}
+	if !strings.Contains(err.Error(), "NOT deleted") {
+		t.Errorf("err should say row not deleted, got %q", err)
+	}
+	if _, err := d.GetPeer(ctx, "alpha"); err != nil {
+		t.Errorf("alpha row must be preserved on dial failure: %v", err)
+	}
+}
+
+// TestRevokeDefaultClearFailurePreservesRow: a dial that succeeds but ClearPeer
+// fails returns an error and does NOT delete the row.
+func TestRevokeDefaultClearFailurePreservesRow(t *testing.T) {
+	dataDir, d := setupOpsEnv(t, "alpha", "mgr")
+	ctx := context.Background()
+	dialer := &fakeDialer{clearErr: map[string]error{"alpha": errors.New("permission denied")}}
+	var events []Event
+	deps := collectingDeps(dataDir, d, dialer, &events)
+
+	err := RevokePeer(ctx, deps, "alpha", "mgr", false)
+	if err == nil {
+		t.Fatal("expected clear error")
+	}
+	if !strings.Contains(err.Error(), "NOT deleted") {
+		t.Errorf("err should say row not deleted, got %q", err)
+	}
+	if _, err := d.GetPeer(ctx, "alpha"); err != nil {
+		t.Errorf("alpha row must be preserved on clear failure: %v", err)
+	}
+}
+
+// TestRevokeRekeyRotatesAndDeletes covers the --rekey path: the revoked peer is
+// deleted, the remaining peers are re-signed, and the manager + remaining peers
+// can still authenticate against the rotated CA (no trust-root lockout).
+func TestRevokeRekeyRotatesAndDeletes(t *testing.T) {
+	dataDir, d := setupOpsEnv(t, "alpha", "beta", "mgr")
+	ctx := context.Background()
+
+	oldCAPub, err := os.ReadFile(filepath.Join(dataDir, "ca", "ca.pub"))
+	if err != nil {
+		t.Fatalf("read old ca.pub: %v", err)
+	}
+
+	dialer := &fakeDialer{}
+	var events []Event
+	deps := collectingDeps(dataDir, d, dialer, &events)
+
+	if err := RevokePeer(ctx, deps, "alpha", "mgr", true); err != nil {
+		t.Fatalf("RevokePeer --rekey: %v", err)
+	}
+
+	if _, err := d.GetPeer(ctx, "alpha"); !errors.Is(err, db.ErrPeerNotFound) {
+		t.Errorf("alpha row should be deleted, got err=%v", err)
+	}
 	for _, c := range dialer.snapshot() {
 		if c.host == "alpha" {
-			t.Errorf("revoked alpha must not be pushed to: %+v", c)
+			t.Errorf("revoked alpha must never be contacted: %+v", c)
 		}
-		if c.host == "beta" {
-			sawBeta = true
-		}
-	}
-	if !sawBeta {
-		t.Error("beta should be rotated during revoke")
 	}
 
-	last := events[len(events)-1]
-	if last.Type != EventInfo || last.Peer != "alpha" || last.Msg != "Revoked alpha via CA rekey." {
-		t.Errorf("final event = %+v, want Revoked info line", last)
+	// The CA was rotated: ca.pub changed.
+	newCAPub, err := os.ReadFile(filepath.Join(dataDir, "ca", "ca.pub"))
+	if err != nil {
+		t.Fatalf("read new ca.pub: %v", err)
+	}
+	if bytes.Equal(newCAPub, oldCAPub) {
+		t.Fatal("CA public key did not change after --rekey revoke")
+	}
+
+	newCAKey, _, _, _, err := ssh.ParseAuthorizedKey(newCAPub)
+	if err != nil {
+		t.Fatalf("parse new ca.pub: %v", err)
+	}
+	checker := &ssh.CertChecker{
+		IsUserAuthority: func(auth ssh.PublicKey) bool {
+			return bytes.Equal(auth.Marshal(), newCAKey.Marshal())
+		},
+	}
+	// No trust-root lockout: every remaining peer (mgr included, beta) holds a
+	// cert that validates against the NEW CA on its declared principals.
+	for _, name := range []string{"beta", "mgr"} {
+		p, err := d.GetPeer(ctx, name)
+		if err != nil {
+			t.Fatalf("GetPeer %s: %v", name, err)
+		}
+		if len(p.Cert) == 0 {
+			t.Fatalf("%s has no stored cert after rotation", name)
+		}
+		pk, _, _, _, err := ssh.ParseAuthorizedKey(p.Cert)
+		if err != nil {
+			t.Fatalf("parse %s cert: %v", name, err)
+		}
+		cert, ok := pk.(*ssh.Certificate)
+		if !ok {
+			t.Fatalf("%s stored material is not a certificate", name)
+		}
+		if err := checker.CheckCert(name, cert); err != nil {
+			t.Errorf("%s cert does not validate against the rotated CA: %v", name, err)
+		}
 	}
 }
 
@@ -457,7 +612,7 @@ func TestRevokePeerUnknownPeer(t *testing.T) {
 	var events []Event
 	deps := collectingDeps(dataDir, d, dialer, &events)
 
-	err := RevokePeer(context.Background(), deps, "ghost", "mgr")
+	err := RevokePeer(context.Background(), deps, "ghost", "mgr", false)
 	if err == nil {
 		t.Fatal("expected error for unknown peer")
 	}

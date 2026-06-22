@@ -13,13 +13,22 @@ import (
 func newRevokeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "revoke <name>",
-		Short: "Revoke a peer via a partial CA rekey that excludes it",
-		Args:  cobra.ExactArgs(1),
+		Short: "Decommission a peer: by default clear certhold off it and delete its row; --rekey rotates the CA instead",
+		Long: "Revoke a peer.\n\n" +
+			"Default: SSH into the (reachable, inbound) peer, strip certhold's config\n" +
+			"block, identity files, and cert-authority trust line, then delete its DB\n" +
+			"row. A no-inbound/client or unreachable peer is rejected without deleting;\n" +
+			"use `certhold remove` (DB-only) or `--rekey` for those.\n\n" +
+			"--rekey: rotate the CA, re-signing and pushing to every remaining peer,\n" +
+			"then delete the revoked row. The revoked host is never contacted — use this\n" +
+			"for a compromised or unreachable peer.",
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runRevoke(cmd, args[0])
 		},
 	}
-	cmd.Flags().String("hostname", "", "certhold's own peer name for the rekey-revoke (default: os.Hostname())")
+	cmd.Flags().Bool("rekey", false, "rotate the CA around the peer instead of clearing it (for a compromised or unreachable peer)")
+	cmd.Flags().String("hostname", "", "certhold's own peer name for the --rekey path (default: os.Hostname())")
 	return cmd
 }
 
@@ -55,7 +64,11 @@ func runRevoke(cmd *cobra.Command, name string) error {
 	if err != nil {
 		return fmt.Errorf("get hostname: %w", err)
 	}
+	rekey, err := cmd.Flags().GetBool("rekey")
+	if err != nil {
+		return fmt.Errorf("get rekey: %w", err)
+	}
 
 	deps := opsDeps(cmd, d, dataDir, caUnlock, peerUnlock, rekeyDial)
-	return ops.RevokePeer(ctx, deps, name, hostname)
+	return ops.RevokePeer(ctx, deps, name, hostname, rekey)
 }

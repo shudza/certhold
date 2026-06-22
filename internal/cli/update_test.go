@@ -13,6 +13,7 @@ import (
 
 	"github.com/shudza/certhold/internal/ca"
 	"github.com/shudza/certhold/internal/db"
+	"github.com/shudza/certhold/internal/peerfiles"
 	"github.com/shudza/certhold/internal/sshpush"
 )
 
@@ -58,6 +59,13 @@ func (m *mockPusher) ReloadSSHD(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.calls = append(m.calls, mockCall{op: "reload"})
+	return nil
+}
+
+func (m *mockPusher) ClearPeer(ctx context.Context, paths peerfiles.RemotePaths, instanceKey string, caPubKey ssh.PublicKey) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls = append(m.calls, mockCall{op: "clear", path: paths.ConfigTarget})
 	return nil
 }
 
