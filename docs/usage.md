@@ -564,6 +564,24 @@ are in [revocation](maintenance-and-operations.md#revocation).
 
 Unlocks the CA key and the manager peer key.
 
+### `remove`
+
+```
+certhold remove <name>
+```
+
+Forgets a peer: deletes it and its references (group membership, allowed-inbound,
+enrollment tokens) from manager state. Makes **no** peer contact — no SSH dial,
+no CA rekey, no passphrase unlock — so it works even when the peer is offline,
+dead, or already wiped. The peer's host is left untouched: its installed cert and
+config stay in place until the operator clears them, and its old-CA cert keeps
+working until the next `rekey`.
+
+Use `remove` to forget a peer you control or have already torn down. Use
+[`revoke`](#revoke) instead when you need to cut a peer off the fleet: revoke
+cleans the host's trust by rotating the CA so the peer's old cert stops being
+accepted, whereas remove only edits the database.
+
 ### `rekey`
 
 ```
