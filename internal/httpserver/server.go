@@ -199,7 +199,7 @@ func writeV2Body(sb *strings.Builder, curl, keyFile, block, instanceKey string) 
 
 	fmt.Fprintf(sb, "rm -rf \"$STAGE\"\n")
 
-	fmt.Fprintf(sb, "PEER_HOST=\"$(hostname -f 2>/dev/null || hostname || echo \"<your-host>\")\"\n")
+	fmt.Fprintf(sb, "PEER_HOST=\"$(hostname -f 2>/dev/null || hostname 2>/dev/null || uname -n 2>/dev/null || cat /proc/sys/kernel/hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || echo \"<your-host>\")\"\n")
 	fmt.Fprintf(sb, "[ -n \"$PEER_HOST\" ] || PEER_HOST=\"<your-host>\"\n")
 	fmt.Fprintf(sb, "echo \"\"\n")
 	fmt.Fprintf(sb, "echo \"Success. Try:  ssh $TARGET_USER@$PEER_HOST\"\n")

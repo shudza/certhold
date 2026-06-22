@@ -863,6 +863,24 @@ func TestEnrollV2Script_BashSyntax(t *testing.T) {
 	}
 }
 
+// TestEnrollV2Script_PortableHostname asserts the success-message host is
+// resolved via a portable best-effort chain that does not depend solely on the
+// `hostname` binary (minimal Alpine/busybox/embedded peers may lack it).
+func TestEnrollV2Script_PortableHostname(t *testing.T) {
+	script := v2Script("https://demo.example", "TOKEN123", testInstanceKey)
+	for _, want := range []string{
+		"uname -n 2>/dev/null",
+		"cat /proc/sys/kernel/hostname 2>/dev/null",
+		"cat /etc/hostname 2>/dev/null",
+		"<your-host>",
+		"Success. Try:  ssh $TARGET_USER@$PEER_HOST",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("v2 script must contain %q\nfull:\n%s", want, script)
+		}
+	}
+}
+
 // TestEnrollV2Script_ExecutionSmoke runs the install script against a HOME
 // tempdir, substituting a pre-built tarball for the curl/tar pipe. It asserts
 // status lines + the Success line appear on stdout, and that the
