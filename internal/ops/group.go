@@ -337,7 +337,7 @@ func SetPeerAllowedGroups(ctx context.Context, deps Deps, peerName string, group
 	pushOpts := SelfPushOptions(deps.DataDir, SelfIdentFor(ctx, deps.DB, hostname), deps.PeerPass)
 	pushOpts.User = pushUser(peer)
 	deps.emit(Event{Type: EventPeerStart, Peer: peerName})
-	pusher, err := deps.Dial(ctx, host, pushOpts)
+	pusher, err := dialPush(ctx, deps, host, pushOpts)
 	if err != nil {
 		err = fmt.Errorf("ssh dial %s: %w", host, err)
 		deps.emit(Event{Type: EventPeerFailed, Peer: peerName, Err: err})
@@ -451,7 +451,7 @@ func pushGroupCascade(ctx context.Context, deps Deps, self SelfIdent, peer *db.P
 	pushOpts := SelfPushOptions(deps.DataDir, self, deps.PeerPass)
 	pushOpts.User = pushUser(peer)
 	host := peer.DialHost()
-	pusher, err := deps.Dial(ctx, host, pushOpts)
+	pusher, err := dialPush(ctx, deps, host, pushOpts)
 	if err != nil {
 		return fmt.Errorf("ssh dial %s: %w", host, err)
 	}

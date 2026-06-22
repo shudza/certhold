@@ -85,7 +85,7 @@ func UpdatePeer(ctx context.Context, deps Deps, name string, groups []string, ho
 
 	pushOpts := SelfPushOptions(deps.DataDir, resolveSelfIdent(ctx, deps.DB), deps.PeerPass)
 	pushOpts.User = pushUser(peer)
-	pusher, err := deps.Dial(ctx, host, pushOpts)
+	pusher, err := dialPush(ctx, deps, host, pushOpts)
 	if err != nil {
 		err = fmt.Errorf("ssh dial %s: %w", host, err)
 		deps.emit(Event{Type: EventPeerFailed, Peer: name, Err: err})

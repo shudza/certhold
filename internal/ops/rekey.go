@@ -139,7 +139,7 @@ func Rekey(ctx context.Context, deps Deps, opts RekeyOptions) error {
 		}
 		configBlock := v2ConfigBlockForHosts(instanceKey, hosts)
 		deps.emit(Event{Type: EventPeerStart, Peer: p.Name})
-		if err := pushPeerRekey(ctx, deps.Dial, &peerForPush, oldCAPub, newCAPub, instanceKey, certBytes, allowed, configBlock, pushOpts); err != nil {
+		if err := pushPeerRekey(ctx, deps, &peerForPush, oldCAPub, newCAPub, instanceKey, certBytes, allowed, configBlock, pushOpts); err != nil {
 			failed = append(failed, straggler{name: p.Name, err: err})
 			deps.emit(Event{Type: EventPeerFailed, Peer: p.Name, Err: err})
 			continue
@@ -316,11 +316,11 @@ func CAKeyEncrypted(caDir string) (bool, error) {
 // instance's cert-authority line in <home>/.ssh/authorized_keys (preserving any
 // other instance's lines), pushes the namespaced cert, and splices the keyed
 // client-config block; no reload.
-func pushPeerRekey(ctx context.Context, dial DialFn, p *db.Peer, oldCAPub ssh.PublicKey, newCAPub []byte, instanceKey string, certBytes []byte, allowed []string, configBlock string, opts sshpush.Options) error {
+func pushPeerRekey(ctx context.Context, deps Deps, p *db.Peer, oldCAPub ssh.PublicKey, newCAPub []byte, instanceKey string, certBytes []byte, allowed []string, configBlock string, opts sshpush.Options) error {
 	if p.Name == "" {
 		return errors.New("empty host")
 	}
-	cl, err := dial(ctx, p.DialHost(), opts)
+	cl, err := dialPush(ctx, deps, p.DialHost(), opts)
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}
