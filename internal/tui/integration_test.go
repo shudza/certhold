@@ -264,7 +264,7 @@ func TestIntegrationFullSurface(t *testing.T) {
 	key(" ")       // mark gamma
 	waitFrame("2 marked")
 	key("x")
-	waitFrame("Revoke 2 peers")
+	waitFrame("Clear certhold off 2 peers")
 	key("y")
 	// Each revoke clears the peer over the fake dial, reusing the cached manager
 	// peer-key passphrase (no second prompt).

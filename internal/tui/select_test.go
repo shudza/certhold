@@ -70,6 +70,50 @@ func batchModel(t *testing.T, dataDir string, d *db.DB) Model {
 	return nm.(Model)
 }
 
+// TestRevokeConfirmCopyClearDeleteSemantics is a regression guard for the T142
+// redesign: the default revoke path SSHes in, strips certhold, and hard-deletes
+// the row — it rotates nothing. The confirm modals must say so. Asserts both the
+// single- and batch-revoke confirm bodies use clear+delete wording and never
+// mention "rekey"/"rotate", so the operator-facing copy can't silently drift
+// back to the old CA-rekey description.
+func TestRevokeConfirmCopyClearDeleteSemantics(t *testing.T) {
+	dataDir, d, _ := seedThreePeers(t)
+
+	// Single-peer path: alpha selected, no marks.
+	single := batchModel(t, dataDir, d)
+	single = press(t, single, "x")
+	cm, ok := topAny(single).(confirmModal)
+	if !ok {
+		t.Fatalf("single: x did not open confirm; top=%T", topAny(single))
+	}
+	body := strings.Join(cm.body, "\n")
+	if !strings.Contains(body, "Clear certhold off alpha over SSH and delete its row?") {
+		t.Fatalf("single confirm missing clear+delete wording:\n%s", body)
+	}
+	if !strings.Contains(body, "This does not rotate the CA.") {
+		t.Fatalf("single confirm missing no-rotation line:\n%s", body)
+	}
+	if strings.Contains(body, "rekey") || strings.Contains(body, "rotates the CA") {
+		t.Fatalf("single confirm still mentions CA rekey/rotation:\n%s", body)
+	}
+
+	// Batch path: mark one live peer.
+	batch := batchModel(t, dataDir, d)
+	batch = markPeer(t, batch, "mid")
+	batch = press(t, batch, "x")
+	bcm, ok := topAny(batch).(confirmModal)
+	if !ok || batch.batchKind != batchRevoke {
+		t.Fatalf("batch: x with a mark did not open batch confirm; top=%T kind=%v", topAny(batch), batch.batchKind)
+	}
+	bbody := strings.Join(bcm.body, "\n")
+	if !strings.Contains(bbody, "Clear certhold off 1 peers over SSH and delete each? (Does not rotate the CA.)") {
+		t.Fatalf("batch confirm missing clear+delete wording:\n%s", bbody)
+	}
+	if strings.Contains(bbody, "rekey") {
+		t.Fatalf("batch confirm still mentions CA rekey:\n%s", bbody)
+	}
+}
+
 // TestBatchRevokeMiddleFailsContinues is the headline AC: three marked peers, the
 // middle injected to fail, the batch continues, the summary reads 2 ok / 1
 // failed, the failed peer keeps its mark while the others are cleared, and the
@@ -348,7 +392,7 @@ func TestSinglePeerUnchangedWhenNoMarks(t *testing.T) {
 	if cm.subject != "alpha" || m.batchKind != batchNone {
 		t.Fatalf("no-mark x should target the single selected peer alpha; subject=%q kind=%v", cm.subject, m.batchKind)
 	}
-	if !strings.Contains(strings.Join(cm.body, "\n"), "Revoke peer alpha") {
+	if !strings.Contains(strings.Join(cm.body, "\n"), "Clear certhold off alpha") {
 		t.Fatalf("single-peer confirm body wrong:\n%s", strings.Join(cm.body, "\n"))
 	}
 	nm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
