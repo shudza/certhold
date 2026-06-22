@@ -404,14 +404,17 @@ func TestRekeyAbortEmitsWarnAndReturnsCause(t *testing.T) {
 			warns = append(warns, e)
 		}
 	}
-	if len(warns) != 2 {
-		t.Fatalf("warn events = %+v, want abort + already-rotated lines", warns)
+	if len(warns) != 3 {
+		t.Fatalf("warn events = %+v, want abort + already-rotated + staging-dir recovery lines", warns)
 	}
 	if want := fmt.Sprintf("rekey aborted: %v", err); warns[0].Msg != want {
 		t.Errorf("warn[0].Msg = %q, want %q", warns[0].Msg, want)
 	}
 	if want := "peers already rotated to new CA (recovery may be required): [alpha beta]"; warns[1].Msg != want {
 		t.Errorf("warn[1].Msg = %q, want %q", warns[1].Msg, want)
+	}
+	if !strings.Contains(warns[2].Msg, filepath.Join(dataDir, "ca.next")) || !strings.Contains(warns[2].Msg, "Manual recovery is required") {
+		t.Errorf("warn[2].Msg should name the staged ca.next and require manual recovery: %q", warns[2].Msg)
 	}
 
 	caPubAfter, err := os.ReadFile(filepath.Join(dataDir, "ca", "ca.pub"))

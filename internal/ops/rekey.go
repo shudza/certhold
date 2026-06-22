@@ -90,6 +90,18 @@ func Rekey(ctx context.Context, deps Deps, opts RekeyOptions) error {
 	}
 	newCAPub := newCA.PublicKeyAuthorizedKey()
 
+	var committed, rotatedAny bool
+	defer func() {
+		if committed {
+			return
+		}
+		if rotatedAny {
+			deps.warn("", fmt.Sprintf("rekey not committed but at least one peer was already rotated on disk to the NEW CA; the new CA is staged at %s and MUST be preserved. Some peers now trust ONLY the new CA. Manual recovery is required before retrying: finish or unwind the rotation, then remove %s.", nextCADir, nextCADir))
+			return
+		}
+		_ = os.RemoveAll(nextCADir)
+	}()
+
 	pushOpts := SelfPushOptions(deps.DataDir, SelfIdent{
 		TargetUser:  selfHomeUser(self),
 		InstanceKey: instanceKey,
@@ -144,6 +156,7 @@ func Rekey(ctx context.Context, deps Deps, opts RekeyOptions) error {
 			deps.emit(Event{Type: EventPeerFailed, Peer: p.Name, Err: err})
 			continue
 		}
+		rotatedAny = true
 		if err := deps.DB.SetPeerCert(ctx, p.Name, certBytes, serial); err != nil {
 			return deps.abortRekey(fmt.Errorf("set peer cert %s: %w", p.Name, err), updated)
 		}
@@ -177,6 +190,7 @@ func Rekey(ctx context.Context, deps Deps, opts RekeyOptions) error {
 	if err := writeSelfRekey(deps.DataDir, self, oldCAPub, newCAPub, instanceKey, selfCertBytes); err != nil {
 		return deps.abortRekey(fmt.Errorf("update self files: %w", err), updated)
 	}
+	rotatedAny = true
 	if err := deps.DB.SetPeerCert(ctx, opts.Hostname, selfCertBytes, selfSerial); err != nil {
 		return deps.abortRekey(fmt.Errorf("set self peer cert: %w", err), updated)
 	}
@@ -203,6 +217,7 @@ func Rekey(ctx context.Context, deps Deps, opts RekeyOptions) error {
 		_ = os.Rename(oldCADir, caDir)
 		return fmt.Errorf("rename new ca: %w", err)
 	}
+	committed = true
 
 	curVer, err := deps.DB.ActiveCAVersion(ctx)
 	if err != nil && !errors.Is(err, db.ErrNoActiveCA) {
