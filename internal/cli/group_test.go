@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
 
 	"github.com/shudza/certhold/internal/ca"
@@ -18,6 +19,42 @@ import (
 	"github.com/shudza/certhold/internal/peerfiles"
 	"github.com/shudza/certhold/internal/sshpush"
 )
+
+// TestGroupOpsDeps_HostKeyConfirmWired guards the review blocker that group push
+// commands shared a deps builder which left ops.Deps.HostKeyConfirm nil, so
+// every group push dialed strictly and silently ignored --trust-new-host-keys.
+func TestGroupOpsDeps_HostKeyConfirmWired(t *testing.T) {
+	caUnlock := newCAUnlocker()
+	defer caUnlock.Zero()
+	peerUnlock := newPeerUnlocker()
+	defer peerUnlock.Zero()
+
+	t.Run("hook present and prompts when not trusted", func(t *testing.T) {
+		cmd := &cobra.Command{}
+		cmd.Flags().Bool(flagTrustNewHostKeys, false, "")
+		deps := groupOpsDeps(cmd, nil, "", caUnlock, peerUnlock)
+		if deps.HostKeyConfirm == nil {
+			t.Fatal("HostKeyConfirm is nil; group push commands would dial strictly")
+		}
+	})
+
+	t.Run("flag drives auto-accept through the hook", func(t *testing.T) {
+		t.Setenv(envTrustNewHostKeys, "")
+		cmd := &cobra.Command{}
+		cmd.Flags().Bool(flagTrustNewHostKeys, false, "")
+		if err := cmd.Flags().Set(flagTrustNewHostKeys, "true"); err != nil {
+			t.Fatalf("set flag: %v", err)
+		}
+		deps := groupOpsDeps(cmd, nil, "", caUnlock, peerUnlock)
+		if deps.HostKeyConfirm == nil {
+			t.Fatal("HostKeyConfirm is nil with --trust-new-host-keys set")
+		}
+		ok, err := deps.HostKeyConfirm("host01", "SHA256:x", "ED25519")
+		if err != nil || !ok {
+			t.Fatalf("--trust-new-host-keys must auto-accept: ok=%v err=%v", ok, err)
+		}
+	})
+}
 
 type fakePushCall struct {
 	op      string

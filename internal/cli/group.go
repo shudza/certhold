@@ -29,13 +29,15 @@ func newGroupCmd() *cobra.Command {
 }
 
 func groupOpsDeps(cmd *cobra.Command, d *db.DB, dataDir string, caUnlock, peerUnlock *memoUnlocker) ops.Deps {
+	trustFlag, _ := cmd.Flags().GetBool(flagTrustNewHostKeys)
 	return ops.Deps{
-		DB:       d,
-		DataDir:  dataDir,
-		CAUnlock: caUnlock.get,
-		PeerPass: peerUnlock.get,
-		Dial:     ops.DialFn(groupDial),
-		OnEvent:  opsEventPrinter(cmd.OutOrStdout(), cmd.ErrOrStderr()),
+		DB:             d,
+		DataDir:        dataDir,
+		CAUnlock:       caUnlock.get,
+		PeerPass:       peerUnlock.get,
+		Dial:           ops.DialFn(groupDial),
+		HostKeyConfirm: newHostKeyConfirm(trustNewHostKeys(trustFlag)),
+		OnEvent:        opsEventPrinter(cmd.OutOrStdout(), cmd.ErrOrStderr()),
 	}
 }
 
