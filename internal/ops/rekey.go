@@ -19,6 +19,10 @@ import (
 	"github.com/shudza/certhold/internal/sshpush"
 )
 
+// generateCA stages the new CA key pair. It is a package var only so tests can
+// simulate a generate-time failure that leaves a partial ca.next behind.
+var generateCA = ca.GenerateWithPassphrase
+
 type RekeyOptions struct {
 	// Hostname is certhold's own peer name; its row anchors the self files.
 	Hostname string
@@ -84,12 +88,12 @@ func Rekey(ctx context.Context, deps Deps, opts RekeyOptions) error {
 		return err
 	}
 	defer passphrase.Zero(newCAPass)
-	newCA, err := ca.GenerateWithPassphrase(nextCADir, newCAPass)
-	if err != nil {
-		return fmt.Errorf("generate new ca: %w", err)
-	}
-	newCAPub := newCA.PublicKeyAuthorizedKey()
 
+	// Register the staging-dir cleanup BEFORE generating the new CA: a failed
+	// GenerateWithPassphrase can leave a partial ca.next behind (its MkdirAll
+	// runs before any error), and a leaked ca.next would trip the start guard
+	// above and block all future rekeys. RemoveAll on a never-created path is a
+	// harmless no-op, so registering early is safe.
 	var committed, rotatedAny bool
 	defer func() {
 		if committed {
@@ -101,6 +105,12 @@ func Rekey(ctx context.Context, deps Deps, opts RekeyOptions) error {
 		}
 		_ = os.RemoveAll(nextCADir)
 	}()
+
+	newCA, err := generateCA(nextCADir, newCAPass)
+	if err != nil {
+		return fmt.Errorf("generate new ca: %w", err)
+	}
+	newCAPub := newCA.PublicKeyAuthorizedKey()
 
 	pushOpts := SelfPushOptions(deps.DataDir, SelfIdent{
 		TargetUser:  selfHomeUser(self),

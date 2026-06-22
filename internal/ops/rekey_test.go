@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/shudza/certhold/internal/ca"
 )
 
 func nextCADirExists(t *testing.T, dataDir string) bool {
@@ -128,6 +130,58 @@ func TestRekeyAbortAfterRotationPreservesStagingDir(t *testing.T) {
 	err = Rekey(ctx, deps2, RekeyOptions{Hostname: "mgr"})
 	if err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("retry should hit the start guard, got %v", err)
+	}
+}
+
+// TestRekeyGenerateFailureCleansPartialStagingDir: if CA generation fails AFTER
+// creating the ca.next dir (its MkdirAll runs before any error), the cleanup
+// defer must still remove the partial ca.next. Otherwise the leaked dir would
+// trip the start guard and block ALL future rekeys — the exact regression this
+// guards. We simulate the generate-time failure by overriding generateCA so it
+// creates the dir and then returns an error, mirroring GenerateWithPassphrase's
+// own MkdirAll-then-fail ordering.
+func TestRekeyGenerateFailureCleansPartialStagingDir(t *testing.T) {
+	dataDir, d := setupOpsEnv(t, "alpha", "mgr")
+	ctx := context.Background()
+
+	orig := generateCA
+	t.Cleanup(func() { generateCA = orig })
+	generateCA = func(dir string, pass []byte) (*ca.CA, error) {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatalf("simulated generate MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "ca"), []byte("partial"), 0600); err != nil {
+			t.Fatalf("simulated generate partial write: %v", err)
+		}
+		return nil, errors.New("simulated generate failure")
+	}
+
+	dialer := &fakeDialer{}
+	var events []Event
+	deps := collectingDeps(dataDir, d, dialer, &events)
+
+	err := Rekey(ctx, deps, RekeyOptions{Hostname: "mgr"})
+	if err == nil || !strings.Contains(err.Error(), "generate new ca") {
+		t.Fatalf("err = %v, want a generate-new-ca failure", err)
+	}
+
+	if nextCADirExists(t, dataDir) {
+		t.Fatal("partial ca.next must be removed after a generate-phase failure")
+	}
+	for _, e := range events {
+		if e.Type == EventWarn && strings.Contains(e.Msg, "staged at") {
+			t.Errorf("no recovery warning expected when nothing was rotated: %q", e.Msg)
+		}
+	}
+
+	// Restore real generation and confirm a retry on the same datadir is NOT
+	// blocked by the start guard (the leaked-dir regression).
+	generateCA = orig
+	dialer2 := &fakeDialer{}
+	var events2 []Event
+	deps2 := collectingDeps(dataDir, d, dialer2, &events2)
+	if err := Rekey(ctx, deps2, RekeyOptions{Hostname: "mgr"}); err != nil {
+		t.Fatalf("retry must proceed past the start guard, got %v", err)
 	}
 }
 
