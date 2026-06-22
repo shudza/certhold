@@ -54,7 +54,7 @@ func (t textModal) handle(msg tea.KeyMsg) (modal, modalResult) {
 	return t, modalKeep
 }
 
-func (t textModal) view(int) []string {
+func (t textModal) view(int, int) []string {
 	return []string{
 		t.input.View(),
 		"",

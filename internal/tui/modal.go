@@ -28,7 +28,7 @@ const (
 // the ops/passphrase wiring in one place.
 type modal interface {
 	handle(msg tea.KeyMsg) (modal, modalResult)
-	view(w int) []string
+	view(w, h int) []string
 	title() string
 }
 
@@ -68,7 +68,7 @@ func (c confirmModal) handle(msg tea.KeyMsg) (modal, modalResult) {
 	return c, modalKeep
 }
 
-func (c confirmModal) view(int) []string {
+func (c confirmModal) view(int, int) []string {
 	lines := append([]string(nil), c.body...)
 	lines = append(lines, "", modalHintStyle.Render("y/enter confirm · n/esc cancel"))
 	return lines
@@ -111,7 +111,7 @@ func (p passphraseModal) handle(msg tea.KeyMsg) (modal, modalResult) {
 	return p, modalKeep
 }
 
-func (p passphraseModal) view(int) []string {
+func (p passphraseModal) view(int, int) []string {
 	lines := []string{p.input.View()}
 	if p.errMsg != "" {
 		lines = append(lines, "", errStyle.Render("✗ "+p.errMsg))
@@ -148,7 +148,7 @@ func (h hostKeyModal) handle(msg tea.KeyMsg) (modal, modalResult) {
 	return h, modalKeep
 }
 
-func (h hostKeyModal) view(int) []string {
+func (h hostKeyModal) view(int, int) []string {
 	keyType := h.keyType
 	if keyType == "" {
 		keyType = "key"
@@ -240,7 +240,7 @@ func (p pickModal) selected() []string {
 
 func (p pickModal) title() string { return p.heading }
 
-func (p pickModal) view(w int) []string {
+func (p pickModal) view(w, h int) []string {
 	if len(p.options) == 0 {
 		return []string{
 			modalHintStyle.Render("no groups exist — create one with 'certhold group create'"),
@@ -248,8 +248,26 @@ func (p pickModal) view(w int) []string {
 			modalHintStyle.Render("enter apply · esc cancel"),
 		}
 	}
-	lines := make([]string, 0, len(p.options)+2)
-	for i, o := range p.options {
+	hint := modalHintStyle.Render("j/k move · space toggle · enter apply · esc cancel")
+
+	// The body budget h already excludes the box's top/bottom border; reserve a
+	// blank + the hint line for the option rows. The cue (when overflowing) takes
+	// one more row, mirroring peersTableLines' visible-shrink.
+	visible := h - 2
+	if visible < 1 {
+		visible = 1
+	}
+	if len(p.options) > visible && visible > 1 {
+		visible--
+	}
+	top := 0
+	if p.cursor >= visible {
+		top = p.cursor - visible + 1
+	}
+
+	lines := make([]string, 0, visible+3)
+	for i := top; i < len(p.options) && i < top+visible; i++ {
+		o := p.options[i]
 		marker := noMarker
 		if i == p.cursor {
 			marker = selMarker
@@ -266,8 +284,10 @@ func (p pickModal) view(w int) []string {
 		}
 		lines = append(lines, row)
 	}
-	lines = append(lines, "",
-		modalHintStyle.Render("j/k move · space toggle · enter apply · esc cancel"))
+	if len(p.options) > visible {
+		lines = append(lines, scrollCue(p.cursor, top, visible, len(p.options)))
+	}
+	lines = append(lines, "", hint)
 	return lines
 }
 
@@ -282,7 +302,14 @@ func modalFrame(base []string, top modal, w, h int) []string {
 		out = append(out, "")
 	}
 
-	body := top.view(w)
+	bodyH := h - 2
+	if bodyH < 1 {
+		bodyH = 1
+	}
+	body := top.view(w, bodyH)
+	if len(body) > bodyH {
+		body = body[:bodyH]
+	}
 	title := modalTitleStyle.Render(top.title())
 
 	inner := lipgloss.Width(title)

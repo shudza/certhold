@@ -210,7 +210,7 @@ func (e enrollFormModal) selected(set map[string]bool, opts []string) []string {
 	return out
 }
 
-func (e enrollFormModal) view(w int) []string {
+func (e enrollFormModal) view(w, _ int) []string {
 	label := func(i int, s string) string {
 		if e.field == i {
 			return selStyle.Render("> " + s)

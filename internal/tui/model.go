@@ -39,12 +39,14 @@ type Model struct {
 	data    fleetData
 	loadErr error
 
-	view       view
-	detail     bool
-	detailName string
-	peerIdx    int
-	groupIdx   int
-	netIdx     int
+	view            view
+	detail          bool
+	detailName      string
+	detailScroll    int
+	groupPaneScroll int
+	peerIdx         int
+	groupIdx        int
+	netIdx          int
 
 	health    *http.Client
 	serve     *healthMsg
@@ -310,11 +312,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "k", "up":
 		m.move(-1)
 		return m, nil
+	case "J":
+		m.scrollGroupPane()
+		return m, nil
+	case "K":
+		return m.startRekey()
 	case "enter":
 		if m.view == viewPeers {
 			if p, ok := m.selectedPeer(); ok {
 				m.detail = true
 				m.detailName = p.Name
+				m.detailScroll = 0
 			}
 		}
 		return m, nil
@@ -371,14 +379,21 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.startGroupMembership()
 	case "e":
 		return m.startEnroll()
-	case "K":
-		return m.startRekey()
 	}
 	return m, nil
 }
 
 func (m *Model) move(delta int) {
 	if m.detail {
+		w := m.width
+		if w <= 0 {
+			w = 80
+		}
+		maxScroll := 0
+		if body, ok := m.detailBody(w); ok {
+			maxScroll = len(body) - 1
+		}
+		m.detailScroll = clamp(m.detailScroll+delta, 0, clampNonNeg(maxScroll))
 		return
 	}
 	switch m.view {
@@ -390,6 +405,7 @@ func (m *Model) move(delta int) {
 		}
 		m.peerIdx = clamp(m.peerIdx+delta, 0, n-1)
 	case viewGroups:
+		m.groupPaneScroll = 0
 		n := len(m.filteredGroups())
 		if n == 0 {
 			m.groupIdx = 0
@@ -406,6 +422,39 @@ func (m *Model) move(delta int) {
 	}
 }
 
+// scrollGroupPane advances the groups lower pane by one window step, wrapping
+// back to the top once the last line is shown. One key keeps the compact pane
+// simple; the cue shows the position. A no-op unless the groups view is up and
+// its pane overflows.
+func (m *Model) scrollGroupPane() {
+	if m.view != viewGroups {
+		return
+	}
+	g, ok := m.selectedGroup()
+	if !ok {
+		return
+	}
+	w := m.width
+	if w <= 0 {
+		w = 80
+	}
+	body := m.groupPaneBody(g, w)
+	visible := groupPaneH - 1
+	if visible < 1 {
+		visible = 1
+	}
+	if len(body) <= groupPaneH {
+		m.groupPaneScroll = 0
+		return
+	}
+	maxTop := len(body) - visible
+	if m.groupPaneScroll >= maxTop {
+		m.groupPaneScroll = 0
+		return
+	}
+	m.groupPaneScroll = clamp(m.groupPaneScroll+visible, 0, maxTop)
+}
+
 // closeDetail leaves the detail pane and re-points the table selection at the
 // pinned peer, which may have moved (or vanished) since the pane opened.
 func (m *Model) closeDetail() {
@@ -419,6 +468,8 @@ func (m *Model) closeDetail() {
 	}
 	m.detail = false
 	m.detailName = ""
+	m.detailScroll = 0
+	m.groupPaneScroll = 0
 }
 
 func (m *Model) clampSelection() {

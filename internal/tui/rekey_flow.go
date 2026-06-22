@@ -69,7 +69,7 @@ func (r rekeyModal) handle(msg tea.KeyMsg) (modal, modalResult) {
 	return r, modalKeep
 }
 
-func (r rekeyModal) view(int) []string {
+func (r rekeyModal) view(int, int) []string {
 	rotate := "[ ]"
 	if r.rotate {
 		rotate = "[x]"

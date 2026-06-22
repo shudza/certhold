@@ -214,7 +214,7 @@ func TestHostKeyModalRendersFingerprint(t *testing.T) {
 	key := testHostKey(t)
 	fp := ssh.FingerprintSHA256(key)
 	hm := newHostKeyModal("alpha", fp, key.Type())
-	v := strings.Join(hm.view(80), "\n")
+	v := strings.Join(hm.view(80, 24), "\n")
 	if !strings.Contains(v, fp) {
 		t.Fatalf("modal omits SHA256 fingerprint:\n%s", v)
 	}
