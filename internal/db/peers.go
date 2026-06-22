@@ -148,6 +148,41 @@ func (db *DB) SetPeerRevoked(ctx context.Context, name string) error {
 	return nil
 }
 
+// DeletePeer hard-removes a peer and every row that references it — its
+// group-membership rows (peer_groups), allowed-inbound rows
+// (peer_allowed_groups), and any enrollment tokens (tokens.peer_name) — in a
+// single transaction so no partial delete can occur. Returns ErrPeerNotFound if
+// no peer with that name exists, mirroring GetPeer's not-found contract.
+func (db *DB) DeletePeer(ctx context.Context, name string) error {
+	return db.WithTx(ctx, func(tx *Tx) error {
+		return deletePeerTx(ctx, tx.tx, name)
+	})
+}
+
+func deletePeerTx(ctx context.Context, q txCtx, name string) error {
+	if _, err := q.ExecContext(ctx, `DELETE FROM peer_groups WHERE peer_name = ?`, name); err != nil {
+		return fmt.Errorf("delete peer groups: %w", err)
+	}
+	if _, err := q.ExecContext(ctx, `DELETE FROM peer_allowed_groups WHERE peer_name = ?`, name); err != nil {
+		return fmt.Errorf("delete peer allowed groups: %w", err)
+	}
+	if _, err := q.ExecContext(ctx, `DELETE FROM tokens WHERE peer_name = ?`, name); err != nil {
+		return fmt.Errorf("delete peer tokens: %w", err)
+	}
+	res, err := q.ExecContext(ctx, `DELETE FROM peers WHERE name = ?`, name)
+	if err != nil {
+		return fmt.Errorf("delete peer: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("delete peer rows: %w", err)
+	}
+	if n == 0 {
+		return ErrPeerNotFound
+	}
+	return nil
+}
+
 func (db *DB) UpdatePeerCertSerial(ctx context.Context, name string, serial uint64) error {
 	res, err := db.sql.ExecContext(ctx, `UPDATE peers SET cert_serial = ? WHERE name = ?`, int64(serial), name)
 	if err != nil {
