@@ -155,6 +155,20 @@ func (m Model) launchBatchRevoke() (tea.Model, tea.Cmd) {
 	return m.startBatch("revoke", live, op)
 }
 
+// launchBatchRemove fans the DB-only RemovePeer over every marked peer. Unlike
+// revoke this contacts no host; a missing row is recorded as a per-peer failure
+// and the loop continues. An empty marked set is a no-op.
+func (m Model) launchBatchRemove() (tea.Model, tea.Cmd) {
+	names := m.markedNames()
+	if len(names) == 0 {
+		return m, nil
+	}
+	op := func(ctx context.Context, deps ops.Deps, name string) error {
+		return ops.RemovePeer(ctx, deps, name)
+	}
+	return m.startBatch("remove", names, op)
+}
+
 // launchBatchEditGroups assigns the chosen group SET to every marked peer
 // (absolute UpdatePeer), skipping revoked peers. An empty marked set is a no-op.
 func (m Model) launchBatchEditGroups(groups []string) (tea.Model, tea.Cmd) {

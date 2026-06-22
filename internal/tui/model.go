@@ -104,6 +104,7 @@ const (
 	batchRevoke
 	batchEditGroups
 	batchMembers
+	batchRemove
 )
 
 func NewModel(ctx context.Context, data fleetData, reload reloader) Model {
@@ -367,6 +368,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.startEditGroups()
 	case "x":
 		return m.startRevoke()
+	case "X":
+		return m.startRemove()
+	case "a":
+		return m.startEditAddress()
+	case "C":
+		return m.startMakeClient()
 	case "i":
 		return m.startEditAllowed()
 	case "n":

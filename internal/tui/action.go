@@ -419,6 +419,84 @@ func (m Model) startRevoke() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// startRemove opens the DB-only delete confirm. Its copy deliberately contrasts
+// revoke: no peer is contacted, the row is just dropped (the peer keeps any
+// certhold files it already has until they expire). Supports the marked-set
+// batch, mirroring startRevoke.
+func (m Model) startRemove() (tea.Model, tea.Cmd) {
+	if !m.mutationsEnabled() || m.view != viewPeers || m.detail {
+		return m, nil
+	}
+	if names := m.markedNames(); len(names) > 0 {
+		m.batchKind = batchRemove
+		m.pushModal(confirmModal{
+			heading: fmt.Sprintf("remove %d marked", len(names)),
+			subject: "",
+			kind:    confirmRemove,
+			body: batchConfirmBody(
+				fmt.Sprintf("Delete %d peer rows from the manager DB only? No peer is contacted (use revoke to clear certhold off the host).", len(names)), names),
+		})
+		return m, nil
+	}
+	p, ok := m.selectedPeer()
+	if !ok {
+		return m, nil
+	}
+	m.batchKind = batchNone
+	m.pushModal(confirmModal{
+		heading: "remove " + p.Name,
+		subject: p.Name,
+		kind:    confirmRemove,
+		body: []string{
+			"Delete the row for " + p.Name + " from the manager DB only.",
+			"No peer is contacted — its certhold files are left in place.",
+			"(Use revoke to clear certhold off the host over SSH instead.)",
+		},
+	})
+	return m, nil
+}
+
+// startEditAddress opens a free-text prompt pre-filled with the peer's current
+// address; an empty submit clears it (the manager then dials by name). DB-only.
+func (m Model) startEditAddress() (tea.Model, tea.Cmd) {
+	if !m.mutationsEnabled() || m.view != viewPeers || m.detail {
+		return m, nil
+	}
+	p, ok := m.selectedPeer()
+	if !ok || p.Revoked {
+		return m, nil
+	}
+	m.pushModal(newTextModal("address "+p.Name, "address: ", p.Address, textEditAddress, p.Name))
+	return m, nil
+}
+
+// startMakeClient opens the inbound->client convert confirm, offered only for
+// inbound peers. For an already-client (or revoked) peer it is a no-op (no modal
+// opens). MakeClient dials the peer to strip its inbound trust, so the host-key
+// and passphrase prompts flow through the existing bridge.
+func (m Model) startMakeClient() (tea.Model, tea.Cmd) {
+	if !m.mutationsEnabled() || m.view != viewPeers || m.detail {
+		return m, nil
+	}
+	p, ok := m.selectedPeer()
+	if !ok || p.Revoked || !p.Inbound {
+		return m, nil
+	}
+	m.batchKind = batchNone
+	m.pushModal(confirmModal{
+		heading: "convert " + p.Name + " to client",
+		subject: p.Name,
+		kind:    confirmMakeClient,
+		body: []string{
+			"Convert " + p.Name + " from inbound to client-style?",
+			"This dials the peer to strip its inbound trust, so it stops",
+			"accepting fleet inbound SSH and the manager stops dialing it.",
+			"Its own outbound identity is left intact.",
+		},
+	})
+	return m, nil
+}
+
 // handleModalKey routes a key to the top modal and acts on its result. A
 // submit on the pick/confirm modal launches the corresponding ops action;
 // passphrase/progress submits are handled by their own paths.
@@ -454,8 +532,16 @@ func (m Model) submitModal(top modal) (tea.Model, tea.Cmd) {
 	switch mo := top.(type) {
 	case confirmModal:
 		m.popModal()
-		if mo.kind == confirmGroupDelete {
+		switch mo.kind {
+		case confirmGroupDelete:
 			return m.launchGroupDelete(mo.subject)
+		case confirmRemove:
+			if m.batchKind == batchRemove {
+				return m.launchBatchRemove()
+			}
+			return m.launchRemove(mo.subject)
+		case confirmMakeClient:
+			return m.launchMakeClient(mo.subject)
 		}
 		if m.batchKind == batchRevoke {
 			return m.launchBatchRevoke()
@@ -513,6 +599,25 @@ func (m Model) launchRevoke(name string) (tea.Model, tea.Cmd) {
 		return ops.RevokePeer(ctx, deps, name, hostname, false)
 	}
 	return m.startAction("revoke "+name, run)
+}
+
+// launchRemove runs the DB-only delete (no peer contact), contrasting
+// launchRevoke which clears certhold off the host first.
+func (m Model) launchRemove(name string) (tea.Model, tea.Cmd) {
+	run := func(ctx context.Context, deps ops.Deps) error {
+		return ops.RemovePeer(ctx, deps, name)
+	}
+	return m.startAction("remove "+name, run)
+}
+
+// launchMakeClient converts an inbound peer to client-style; the dial may raise
+// host-key/passphrase prompts, handled by the existing bridge.
+func (m Model) launchMakeClient(name string) (tea.Model, tea.Cmd) {
+	hostname := m.action.Hostname
+	run := func(ctx context.Context, deps ops.Deps) error {
+		return ops.MakeClient(ctx, deps, name, hostname)
+	}
+	return m.startAction("convert "+name, run)
 }
 
 // startAction records the action so a wrong-passphrase retry can re-run it,
