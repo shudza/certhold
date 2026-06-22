@@ -121,14 +121,15 @@ func TestIntegrationFullSurface(t *testing.T) {
 
 	action := ActionDeps{
 		Hostname: "alpha",
-		BuildDeps: func(onEvent func(ops.Event), caUnlock, peerPass func() ([]byte, error)) ops.Deps {
+		BuildDeps: func(onEvent func(ops.Event), caUnlock, peerPass func() ([]byte, error), hostKeyConfirm func(host, fingerprint, keyType string) (bool, error)) ops.Deps {
 			return ops.Deps{
-				DB:       d,
-				DataDir:  dataDir,
-				CAUnlock: caUnlock,
-				PeerPass: peerPass,
-				Dial:     fakeDial,
-				OnEvent:  onEvent,
+				DB:             d,
+				DataDir:        dataDir,
+				CAUnlock:       caUnlock,
+				PeerPass:       peerPass,
+				Dial:           fakeDial,
+				OnEvent:        onEvent,
+				HostKeyConfirm: hostKeyConfirm,
 			}
 		},
 	}

@@ -92,14 +92,15 @@ func recModel(t *testing.T, dataDir string, d *db.DB, rec *recDial) Model {
 	m := NewModel(context.Background(), data, reload)
 	m = m.withAction(ActionDeps{
 		Hostname: "alpha",
-		BuildDeps: func(onEvent func(ops.Event), caUnlock, peerPass func() ([]byte, error)) ops.Deps {
+		BuildDeps: func(onEvent func(ops.Event), caUnlock, peerPass func() ([]byte, error), hostKeyConfirm func(host, fingerprint, keyType string) (bool, error)) ops.Deps {
 			return ops.Deps{
-				DB:       d,
-				DataDir:  dataDir,
-				CAUnlock: caUnlock,
-				PeerPass: peerPass,
-				Dial:     rec.dial,
-				OnEvent:  onEvent,
+				DB:             d,
+				DataDir:        dataDir,
+				CAUnlock:       caUnlock,
+				PeerPass:       peerPass,
+				Dial:           rec.dial,
+				OnEvent:        onEvent,
+				HostKeyConfirm: hostKeyConfirm,
 			}
 		},
 	})

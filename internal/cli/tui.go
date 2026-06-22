@@ -57,18 +57,20 @@ func newTuiCmd() *cobra.Command {
 			hostname, _ := osHostname()
 
 			// BuildDeps wires ops.Deps from the TUI-owned passphrase closures
-			// (which bridge to the masked modal) and event sink. revoke rekeys,
-			// so it dials over rekeyDial like the CLI revoke command does.
+			// (which bridge to the masked modal), the host-key confirm closure
+			// (which bridges to the host-key modal), and the event sink. revoke
+			// rekeys, so it dials over rekeyDial like the CLI revoke command does.
 			action := tui.ActionDeps{
 				Hostname: hostname,
-				BuildDeps: func(onEvent func(ops.Event), caUnlock, peerPass func() ([]byte, error)) ops.Deps {
+				BuildDeps: func(onEvent func(ops.Event), caUnlock, peerPass func() ([]byte, error), hostKeyConfirm func(host, fingerprint, keyType string) (bool, error)) ops.Deps {
 					return ops.Deps{
-						DB:       d,
-						DataDir:  dataDir,
-						CAUnlock: caUnlock,
-						PeerPass: peerPass,
-						Dial:     ops.DialFn(rekeyDial),
-						OnEvent:  onEvent,
+						DB:             d,
+						DataDir:        dataDir,
+						CAUnlock:       caUnlock,
+						PeerPass:       peerPass,
+						Dial:           ops.DialFn(rekeyDial),
+						OnEvent:        onEvent,
+						HostKeyConfirm: hostKeyConfirm,
 					}
 				},
 			}

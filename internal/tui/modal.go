@@ -120,6 +120,47 @@ func (p passphraseModal) view(int) []string {
 	return lines
 }
 
+// hostKeyModal is the SSH-style unknown-host-key verification gate. It shows the
+// host and its <keyType> SHA256:… fingerprint and collects a yes/no. submit
+// (y/enter) accepts and learns the key; close (n/esc) rejects — a plain reject,
+// not a whole-action retry like the passphrase wrong-answer path. reply answers
+// the ops dial goroutine that raised this prompt.
+type hostKeyModal struct {
+	host        string
+	fingerprint string
+	keyType     string
+	reply       chan hostKeyReply
+}
+
+func newHostKeyModal(host, fingerprint, keyType string) hostKeyModal {
+	return hostKeyModal{host: host, fingerprint: fingerprint, keyType: keyType}
+}
+
+func (h hostKeyModal) title() string { return "Verify host key" }
+
+func (h hostKeyModal) handle(msg tea.KeyMsg) (modal, modalResult) {
+	switch msg.String() {
+	case "y", "Y", "enter":
+		return h, modalSubmit
+	case "n", "N", "esc":
+		return h, modalClose
+	}
+	return h, modalKeep
+}
+
+func (h hostKeyModal) view(int) []string {
+	keyType := h.keyType
+	if keyType == "" {
+		keyType = "key"
+	}
+	return []string{
+		"The authenticity of host " + h.host + " can't be established.",
+		keyType + " " + h.fingerprint,
+		"",
+		modalHintStyle.Render("y/enter accept · n/esc reject"),
+	}
+}
+
 // pickKind tags which action a pickModal's submit launches, so the one generic
 // multi-select serves all three pickers (peer→groups, group→members,
 // peer→allowed-inbound) without forking the modal.
