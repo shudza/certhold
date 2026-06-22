@@ -24,6 +24,29 @@ func insertTestPeer(t *testing.T, d *DB, ctx context.Context, name, token string
 	}
 }
 
+func TestSetPeerInbound(t *testing.T) {
+	ctx := t.Context()
+	d := newTestDB(t)
+	if err := d.InsertPeer(ctx, "alpha", 1, "fp-a", []byte("ka"), "", true, ""); err != nil {
+		t.Fatalf("InsertPeer: %v", err)
+	}
+
+	if err := d.SetPeerInbound(ctx, "alpha", false); err != nil {
+		t.Fatalf("SetPeerInbound: %v", err)
+	}
+	p, err := d.GetPeer(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if p.Inbound {
+		t.Error("inbound must be false after SetPeerInbound(false)")
+	}
+
+	if err := d.SetPeerInbound(ctx, "ghost", false); !errors.Is(err, ErrPeerNotFound) {
+		t.Errorf("SetPeerInbound on missing peer: got %v, want ErrPeerNotFound", err)
+	}
+}
+
 func TestDeletePeerRemovesAllAssociations(t *testing.T) {
 	ctx := t.Context()
 	d := newTestDB(t)
