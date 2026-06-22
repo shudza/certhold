@@ -19,6 +19,10 @@ import (
 	"github.com/shudza/certhold/internal/sshpush"
 )
 
+// generateCA stages the new CA key pair. It is a package var only so tests can
+// simulate a generate-time failure that leaves a partial ca.next behind.
+var generateCA = ca.GenerateWithPassphrase
+
 type RekeyOptions struct {
 	// Hostname is certhold's own peer name; its row anchors the self files.
 	Hostname string
@@ -84,7 +88,25 @@ func Rekey(ctx context.Context, deps Deps, opts RekeyOptions) error {
 		return err
 	}
 	defer passphrase.Zero(newCAPass)
-	newCA, err := ca.GenerateWithPassphrase(nextCADir, newCAPass)
+
+	// Register the staging-dir cleanup BEFORE generating the new CA: a failed
+	// GenerateWithPassphrase can leave a partial ca.next behind (its MkdirAll
+	// runs before any error), and a leaked ca.next would trip the start guard
+	// above and block all future rekeys. RemoveAll on a never-created path is a
+	// harmless no-op, so registering early is safe.
+	var committed, rotatedAny bool
+	defer func() {
+		if committed {
+			return
+		}
+		if rotatedAny {
+			deps.warn("", fmt.Sprintf("rekey not committed but at least one peer was already rotated on disk to the NEW CA; the new CA is staged at %s and MUST be preserved. Some peers now trust ONLY the new CA. Manual recovery is required before retrying: finish or unwind the rotation, then remove %s.", nextCADir, nextCADir))
+			return
+		}
+		_ = os.RemoveAll(nextCADir)
+	}()
+
+	newCA, err := generateCA(nextCADir, newCAPass)
 	if err != nil {
 		return fmt.Errorf("generate new ca: %w", err)
 	}
@@ -144,6 +166,7 @@ func Rekey(ctx context.Context, deps Deps, opts RekeyOptions) error {
 			deps.emit(Event{Type: EventPeerFailed, Peer: p.Name, Err: err})
 			continue
 		}
+		rotatedAny = true
 		if err := deps.DB.SetPeerCert(ctx, p.Name, certBytes, serial); err != nil {
 			return deps.abortRekey(fmt.Errorf("set peer cert %s: %w", p.Name, err), updated)
 		}
@@ -177,6 +200,7 @@ func Rekey(ctx context.Context, deps Deps, opts RekeyOptions) error {
 	if err := writeSelfRekey(deps.DataDir, self, oldCAPub, newCAPub, instanceKey, selfCertBytes); err != nil {
 		return deps.abortRekey(fmt.Errorf("update self files: %w", err), updated)
 	}
+	rotatedAny = true
 	if err := deps.DB.SetPeerCert(ctx, opts.Hostname, selfCertBytes, selfSerial); err != nil {
 		return deps.abortRekey(fmt.Errorf("set self peer cert: %w", err), updated)
 	}
@@ -203,6 +227,7 @@ func Rekey(ctx context.Context, deps Deps, opts RekeyOptions) error {
 		_ = os.Rename(oldCADir, caDir)
 		return fmt.Errorf("rename new ca: %w", err)
 	}
+	committed = true
 
 	curVer, err := deps.DB.ActiveCAVersion(ctx)
 	if err != nil && !errors.Is(err, db.ErrNoActiveCA) {
