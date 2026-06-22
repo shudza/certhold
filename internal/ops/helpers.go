@@ -8,10 +8,41 @@ import (
 	"path/filepath"
 	"strings"
 
+	"golang.org/x/crypto/ssh"
+
 	"github.com/shudza/certhold/internal/db"
 	"github.com/shudza/certhold/internal/peerfiles"
 	"github.com/shudza/certhold/internal/sshpush"
 )
+
+// dialPush dials a push target through deps.Dial, wiring confirm-on-unknown-host
+// when deps.HostKeyConfirm is set. With it nil the dial is unchanged (an unknown
+// host fails strictly, as before). When set, an unknown host key is offered to
+// the operator via deps.HostKeyConfirm(host, sha256-fingerprint, key-type); on
+// accept the key is learned (recorded by sshpush) and an operator notice is
+// emitted, on reject the strict unknown-host error surfaces, and a mismatch
+// always fails without consulting the operator.
+func dialPush(ctx context.Context, deps Deps, host string, opts sshpush.Options) (sshpush.Pusher, error) {
+	if deps.HostKeyConfirm == nil {
+		return deps.Dial(ctx, host, opts)
+	}
+	var learned bool
+	opts.HostKeyConfirmFn = func(h string, key ssh.PublicKey) (bool, error) {
+		ok, err := deps.HostKeyConfirm(h, ssh.FingerprintSHA256(key), key.Type())
+		if err != nil {
+			return false, err
+		}
+		if ok {
+			learned = true
+		}
+		return ok, nil
+	}
+	pusher, err := deps.Dial(ctx, host, opts)
+	if err == nil && learned {
+		deps.info(host, LearnedHostKeyMsg(host))
+	}
+	return pusher, err
+}
 
 // SelfIdent describes the manager's own outbound SSH identity as recorded in
 // the DB: the target user owning <home>/.ssh/ and the per-instance key

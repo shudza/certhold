@@ -45,6 +45,13 @@ type Options struct {
 	// entry still fails strictly. Leave false for ordinary pushes, which must
 	// stay strict and never learn a new key.
 	CaptureHostKey bool
+	// HostKeyConfirmFn, when set, is consulted only when a presented host key is
+	// *unknown* (no known_hosts entry yet): return true to accept and record it
+	// (TOFU), false to reject. It is NEVER invoked on a *mismatch* against an
+	// existing entry — that always fails strictly. Leave nil for the historical
+	// behavior (unknown host fails). When set, it supersedes CaptureHostKey's
+	// auto-accept for unknown hosts.
+	HostKeyConfirmFn func(host string, key ssh.PublicKey) (bool, error)
 	// ConnectTimeout bounds TCP connect + SSH handshake for a single dial. Zero means use the package default.
 	ConnectTimeout time.Duration
 }
@@ -108,13 +115,14 @@ func Dial(ctx context.Context, host string, opts Options) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("new cert signer: %w", err)
 	}
-	hkCallback, err := loadHostKeyCallback(opts.KnownHostsPath, opts.CaptureHostKey)
+	capture := opts.CaptureHostKey || opts.HostKeyConfirmFn != nil
+	hkCallback, err := loadHostKeyCallback(opts.KnownHostsPath, capture)
 	if err != nil {
 		return nil, fmt.Errorf("load known_hosts %s: %w", opts.KnownHostsPath, err)
 	}
 	var capturer *capturingCallback
-	if opts.CaptureHostKey {
-		capturer = &capturingCallback{strict: hkCallback}
+	if capture {
+		capturer = &capturingCallback{strict: hkCallback, confirm: opts.HostKeyConfirmFn, host: host}
 		hkCallback = capturer.callback
 	}
 	user := opts.User

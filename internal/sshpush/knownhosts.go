@@ -72,10 +72,17 @@ func knownHostMatches(path, normalizedHost string, key ssh.PublicKey) bool {
 // capture path: the first contact with a peer learns its key (TOFU-once),
 // later pushes stay strict. Host-key CHANGES (mismatch) are deliberately not
 // auto-accepted — that is the out-of-scope reinstall/relearn case.
+//
+// An optional confirm fn gates the unknown-host accept: when set it is consulted
+// on an unknown host (true -> accept+record, false -> reject with the original
+// strict error, error -> abort the dial with that error). It is never consulted
+// on a mismatch. When confirm is nil the unknown host is auto-accepted (enroll).
 type capturingCallback struct {
-	strict ssh.HostKeyCallback
-	mu     sync.Mutex
-	key    ssh.PublicKey
+	strict  ssh.HostKeyCallback
+	confirm func(host string, key ssh.PublicKey) (bool, error)
+	host    string
+	mu      sync.Mutex
+	key     ssh.PublicKey
 }
 
 func (c *capturingCallback) callback(hostname string, remote net.Addr, key ssh.PublicKey) error {
@@ -85,7 +92,17 @@ func (c *capturingCallback) callback(hostname string, remote net.Addr, key ssh.P
 	}
 	var keyErr *knownhosts.KeyError
 	if errors.As(err, &keyErr) && len(keyErr.Want) == 0 {
-		// Host is unknown (no entry). Accept and record for capture.
+		// Host is unknown (no entry).
+		if c.confirm != nil {
+			ok, cerr := c.confirm(c.host, key)
+			if cerr != nil {
+				return cerr
+			}
+			if !ok {
+				return err
+			}
+		}
+		// Accept and record for capture.
 		c.mu.Lock()
 		c.key = key
 		c.mu.Unlock()

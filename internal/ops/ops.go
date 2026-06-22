@@ -20,7 +20,14 @@ type Deps struct {
 	CAUnlock func() ([]byte, error)
 	PeerPass func() ([]byte, error)
 	Dial     DialFn
-	OnEvent  func(Event) // nil = silent
+	// HostKeyConfirm, when set, is consulted on an UNKNOWN peer host key during a
+	// push dial: it is handed the host plus the presented key's SHA256
+	// fingerprint and type, and returns true to accept+learn the key (TOFU),
+	// false to reject. It is never consulted on a mismatch (which always fails
+	// strictly). Front-end-agnostic — the CLI/TUI supply a prompt; nil means no
+	// confirm is available, so an unknown host fails as before (no regression).
+	HostKeyConfirm func(host string, fingerprint string, keyType string) (bool, error)
+	OnEvent        func(Event) // nil = silent
 }
 
 type EventType int
@@ -65,4 +72,10 @@ func (d Deps) warn(peer, msg string) {
 // peer was not dialed: its DB-side changes land on its next pull.
 func ClientPeerNoticeMsg(name string) string {
 	return fmt.Sprintf("client peer %s: changes pending until 'certhold-cli refresh' runs on it", name)
+}
+
+// LearnedHostKeyMsg is the operator notice emitted when a push dial accepts and
+// records a previously-unknown host key (after operator confirmation).
+func LearnedHostKeyMsg(host string) string {
+	return fmt.Sprintf("learned host key for %s", host)
 }

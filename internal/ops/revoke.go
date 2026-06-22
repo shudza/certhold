@@ -71,7 +71,7 @@ func revokeClear(ctx context.Context, deps Deps, peer *db.Peer) error {
 
 	deps.emit(Event{Type: EventPeerStart, Peer: name})
 	host := peer.DialHost()
-	pusher, err := deps.Dial(ctx, host, pushOpts)
+	pusher, err := dialPush(ctx, deps, host, pushOpts)
 	if err != nil {
 		err = fmt.Errorf("ssh dial %s: %w; peer not cleared and NOT deleted — use `certhold remove %s` or `certhold revoke --rekey %s`", host, err, name, name)
 		deps.emit(Event{Type: EventPeerFailed, Peer: name, Err: err})
