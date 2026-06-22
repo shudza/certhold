@@ -658,13 +658,21 @@ var _ Pusher = (*Client)(nil)
 
 func dialExecLocalClient(t *testing.T) *Client {
 	t.Helper()
+	cl, _ := dialExecLocalClientEnv(t)
+	return cl
+}
+
+// dialExecLocalClientEnv is dialExecLocalClient but also returns the test env so
+// callers that need the CA public key (e.g. ClearPeer) can reach it.
+func dialExecLocalClientEnv(t *testing.T) (*Client, *testEnv) {
+	t.Helper()
 	env := setupTestEnv(t)
 	srv := newFakeServer(t, env.caPubKey)
 	srv.execLocal = true
 	t.Cleanup(srv.Close)
 	cl := dialClient(t, env, srv)
 	t.Cleanup(func() { _ = cl.Close() })
-	return cl
+	return cl, env
 }
 
 func TestSpliceConfigBlock_FreshFile(t *testing.T) {
@@ -745,5 +753,107 @@ func TestSpliceConfigBlock_Idempotent(t *testing.T) {
 	}
 	if n := strings.Count(string(got), "# BEGIN certhold k1"); n != 1 {
 		t.Errorf("begin sentinel appears %d times, want 1", n)
+	}
+}
+
+// clearPaths builds RemotePaths rooted at a temp .ssh dir and writes the
+// identity files, config, and authorized_keys an install would leave behind.
+func clearPaths(t *testing.T, env *testEnv, key string) peerfiles.RemotePaths {
+	t.Helper()
+	sshDir := filepath.Join(t.TempDir(), ".ssh")
+	if err := os.MkdirAll(sshDir, 0700); err != nil {
+		t.Fatalf("mkdir .ssh: %v", err)
+	}
+	paths := peerfiles.RemotePaths{
+		Cert:           filepath.Join(sshDir, peerfiles.V2CertFileName(key)),
+		AuthorizedKeys: filepath.Join(sshDir, "authorized_keys"),
+		ConfigTarget:   filepath.Join(sshDir, "config"),
+	}
+	keyPath := filepath.Join(sshDir, peerfiles.V2KeyFileName(key))
+	if err := os.WriteFile(keyPath, []byte("PRIVATE"), 0600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+	if err := os.WriteFile(paths.Cert, []byte("CERT"), 0644); err != nil {
+		t.Fatalf("write cert: %v", err)
+	}
+	return paths
+}
+
+func TestClearPeer_RemovesEverything(t *testing.T) {
+	cl, env := dialExecLocalClientEnv(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	const key = "k1"
+	paths := clearPaths(t, env, key)
+	userCfg := "Host personal\n    HostName example.com\n"
+	foreign := peerfiles.V2SshClientBlock("otherkey")
+	if err := os.WriteFile(paths.ConfigTarget, []byte(userCfg+peerfiles.V2SshClientBlock(key)+foreign), 0600); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	caTrim := strings.TrimRight(string(ssh.MarshalAuthorizedKey(env.caPubKey)), "\n")
+	ak := "ssh-ed25519 AAAAuser u@h\ncert-authority,principals=\"manager,web\" " + caTrim + "\n"
+	if err := os.WriteFile(paths.AuthorizedKeys, []byte(ak), 0600); err != nil {
+		t.Fatalf("seed authorized_keys: %v", err)
+	}
+
+	if err := cl.ClearPeer(ctx, paths, key, env.caPubKey); err != nil {
+		t.Fatalf("ClearPeer: %v", err)
+	}
+
+	gotCfg, err := os.ReadFile(paths.ConfigTarget)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if strings.Contains(string(gotCfg), peerfiles.BeginSentinel(key)) {
+		t.Errorf("own config block survived:\n%s", gotCfg)
+	}
+	if !strings.Contains(string(gotCfg), peerfiles.BeginSentinel("otherkey")) {
+		t.Errorf("foreign config block was removed:\n%s", gotCfg)
+	}
+	if !strings.Contains(string(gotCfg), "Host personal") {
+		t.Errorf("user config dropped:\n%s", gotCfg)
+	}
+
+	gotAK, err := os.ReadFile(paths.AuthorizedKeys)
+	if err != nil {
+		t.Fatalf("read authorized_keys: %v", err)
+	}
+	if strings.Contains(string(gotAK), caTrim) {
+		t.Errorf("cert-authority line survived:\n%s", gotAK)
+	}
+	if !strings.Contains(string(gotAK), "ssh-ed25519 AAAAuser u@h") {
+		t.Errorf("user authorized_keys line dropped:\n%s", gotAK)
+	}
+
+	if _, err := os.Stat(paths.Cert); !os.IsNotExist(err) {
+		t.Errorf("cert file not removed: %v", err)
+	}
+	keyPath := filepath.Join(filepath.Dir(paths.ConfigTarget), peerfiles.V2KeyFileName(key))
+	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
+		t.Errorf("private key not removed: %v", err)
+	}
+}
+
+func TestClearPeer_IdempotentAndMissingFilesOK(t *testing.T) {
+	cl, env := dialExecLocalClientEnv(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	const key = "k1"
+	sshDir := filepath.Join(t.TempDir(), ".ssh")
+	if err := os.MkdirAll(sshDir, 0700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	paths := peerfiles.RemotePaths{
+		Cert:           filepath.Join(sshDir, peerfiles.V2CertFileName(key)),
+		AuthorizedKeys: filepath.Join(sshDir, "authorized_keys"),
+		ConfigTarget:   filepath.Join(sshDir, "config"),
+	}
+
+	for i := 0; i < 2; i++ {
+		if err := cl.ClearPeer(ctx, paths, key, env.caPubKey); err != nil {
+			t.Fatalf("ClearPeer on missing files #%d returned error: %v", i+1, err)
+		}
 	}
 }

@@ -25,6 +25,7 @@ import (
 	"golang.org/x/crypto/ssh/knownhosts"
 
 	"github.com/shudza/certhold/internal/passphrase"
+	"github.com/shudza/certhold/internal/peerfiles"
 )
 
 const defaultConnectTimeout = 15 * time.Second
@@ -256,6 +257,87 @@ func (c *Client) SpliceConfigBlock(ctx context.Context, configPath string, insta
 		return fmt.Errorf("append config block %s: %w", configPath, err)
 	}
 	return nil
+}
+
+// ClearPeer is the inverse of install for a single reachable peer: it strips
+// this instance's keyed config block from ~/.ssh/config, removes the matching
+// cert-authority line from ~/.ssh/authorized_keys, and deletes the instance's
+// identity files (private key + cert). Every step is best-effort and idempotent:
+// a missing file is not an error, so re-running on an already-cleared peer is a
+// no-op. Host-key verification and auth are unchanged from any other push.
+//
+// The signature is a cross-task contract consumed by the redesigned revoke flow.
+func (c *Client) ClearPeer(ctx context.Context, paths peerfiles.RemotePaths, instanceKey string, caPubKey ssh.PublicKey) error {
+	c.mu.Lock()
+	cl := c.client
+	c.mu.Unlock()
+	if cl == nil {
+		return errors.New("sshpush: client is closed")
+	}
+
+	cfg, present, err := c.readIfPresent(ctx, paths.ConfigTarget)
+	if err != nil {
+		return fmt.Errorf("read config %s: %w", paths.ConfigTarget, err)
+	}
+	if present {
+		stripped := peerfiles.StripBlock(cfg, instanceKey)
+		if !bytes.Equal(stripped, cfg) {
+			if err := c.WriteFileAtomic(ctx, paths.ConfigTarget, stripped, 0o600); err != nil {
+				return fmt.Errorf("rewrite config %s: %w", paths.ConfigTarget, err)
+			}
+		}
+	}
+
+	ak, present, err := c.readIfPresent(ctx, paths.AuthorizedKeys)
+	if err != nil {
+		return fmt.Errorf("read authorized_keys %s: %w", paths.AuthorizedKeys, err)
+	}
+	if present {
+		stripped := peerfiles.StripCALine(ak, caPubKey)
+		if !bytes.Equal(stripped, ak) {
+			if err := c.WriteFileAtomic(ctx, paths.AuthorizedKeys, stripped, 0o600); err != nil {
+				return fmt.Errorf("rewrite authorized_keys %s: %w", paths.AuthorizedKeys, err)
+			}
+		}
+	}
+
+	keyPath := path.Join(path.Dir(paths.ConfigTarget), peerfiles.V2KeyFileName(instanceKey))
+	for _, p := range []string{keyPath, paths.Cert} {
+		if err := bestEffortRemove(cl, p); err != nil {
+			return fmt.Errorf("remove %s: %w", p, err)
+		}
+	}
+	return nil
+}
+
+// readIfPresent reads a remote file, reporting present=false (no error) when the
+// file does not exist so callers can treat a missing file as a no-op. Any other
+// failure (permission, transport) surfaces as an error.
+func (c *Client) readIfPresent(ctx context.Context, remotePath string) ([]byte, bool, error) {
+	c.mu.Lock()
+	cl := c.client
+	c.mu.Unlock()
+	if cl == nil {
+		return nil, false, errors.New("sshpush: client is closed")
+	}
+	q := shellQuote(remotePath)
+	out, err := runCapture(ctx, cl, fmt.Sprintf("if [ -e %s ]; then cat %s; else exit 3; fi", q, q))
+	if err != nil {
+		if isExitStatus(err, 3) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	return out, true, nil
+}
+
+// isExitStatus reports whether err is a remote command exit with the given code.
+func isExitStatus(err error, code int) bool {
+	var ee *ssh.ExitError
+	if errors.As(err, &ee) {
+		return ee.ExitStatus() == code
+	}
+	return false
 }
 
 func (c *Client) ReloadSSHD(ctx context.Context) error {
