@@ -211,16 +211,17 @@ func TestEditAddressEmptyClears(t *testing.T) {
 	}
 }
 
-// TestMakeClientOfferedForInbound drives C → y on an inbound peer: the confirm
+// TestMakeClientOfferedForInbound drives C → y on an inbound peer (beta —
+// alpha is the model's self peer and make-client refuses it): the confirm
 // explains the inbound-strip, and ops.MakeClient flips the peer to client.
 func TestMakeClientOfferedForInbound(t *testing.T) {
 	dataDir, d, _ := seedActionEnv(t)
 	m := batchModel(t, dataDir, d)
-	m = selectPeer(t, m, "alpha")
+	m = selectPeer(t, m, "beta")
 
 	m = press(t, m, "C")
 	cm, ok := topAny(m).(confirmModal)
-	if !ok || cm.kind != confirmMakeClient || cm.subject != "alpha" {
+	if !ok || cm.kind != confirmMakeClient || cm.subject != "beta" {
 		t.Fatalf("C did not open make-client confirm; top=%T", topAny(m))
 	}
 	body := strings.Join(cm.body, "\n")
@@ -233,12 +234,12 @@ func TestMakeClientOfferedForInbound(t *testing.T) {
 	if pg, ok := topAny(m).(progressModal); !ok || !pg.done || pg.err != nil {
 		t.Fatalf("make-client not done-ok: %+v", topAny(m))
 	}
-	p, err := d.GetPeer(context.Background(), "alpha")
+	p, err := d.GetPeer(context.Background(), "beta")
 	if err != nil {
-		t.Fatalf("GetPeer alpha: %v", err)
+		t.Fatalf("GetPeer beta: %v", err)
 	}
 	if p.Inbound {
-		t.Fatal("alpha still inbound after make-client")
+		t.Fatal("beta still inbound after make-client")
 	}
 }
 

@@ -238,6 +238,7 @@ func TestHostKeyModalLiveFingerprint(t *testing.T) {
 	dataDir, d, pass := seedActionEnv(t)
 	key := testHostKey(t)
 	m := confirmActionModel(t, dataDir, d, key)
+	m = selectPeer(t, m, "beta")
 
 	m = press(t, m, "x")
 	nm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
@@ -254,8 +255,8 @@ func TestHostKeyModalLiveFingerprint(t *testing.T) {
 	if got.fingerprint != ssh.FingerprintSHA256(key) {
 		t.Fatalf("live fingerprint %q != %q", got.fingerprint, ssh.FingerprintSHA256(key))
 	}
-	if got.host != "alpha" {
-		t.Fatalf("live host %q, want alpha", got.host)
+	if got.host != "beta" {
+		t.Fatalf("live host %q, want beta", got.host)
 	}
 }
 
@@ -265,6 +266,7 @@ func TestHostKeyAcceptProceeds(t *testing.T) {
 	dataDir, d, pass := seedActionEnv(t)
 	key := testHostKey(t)
 	m := confirmActionModel(t, dataDir, d, key)
+	m = selectPeer(t, m, "beta")
 
 	m = press(t, m, "x")
 	nm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
@@ -277,8 +279,8 @@ func TestHostKeyAcceptProceeds(t *testing.T) {
 	if !pg.done || pg.err != nil {
 		t.Fatalf("accept did not complete cleanly: done=%v err=%v", pg.done, pg.err)
 	}
-	if _, err := d.GetPeer(context.Background(), "alpha"); err == nil {
-		t.Fatal("alpha row should be gone after a completed revoke")
+	if _, err := d.GetPeer(context.Background(), "beta"); err == nil {
+		t.Fatal("beta row should be gone after a completed revoke")
 	}
 }
 
@@ -289,6 +291,7 @@ func TestHostKeyRejectFailsCleanly(t *testing.T) {
 	dataDir, d, pass := seedActionEnv(t)
 	key := testHostKey(t)
 	m := confirmActionModel(t, dataDir, d, key)
+	m = selectPeer(t, m, "beta")
 
 	m = press(t, m, "x")
 	nm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
@@ -311,6 +314,7 @@ func TestHostKeyRejectViaEsc(t *testing.T) {
 	dataDir, d, pass := seedActionEnv(t)
 	key := testHostKey(t)
 	m := confirmActionModel(t, dataDir, d, key)
+	m = selectPeer(t, m, "beta")
 
 	m = press(t, m, "x")
 	nm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
@@ -329,6 +333,7 @@ func TestCombinedPassphraseThenHostKey(t *testing.T) {
 	dataDir, d, pass := seedActionEnv(t)
 	key := testHostKey(t)
 	m := confirmActionModel(t, dataDir, d, key)
+	m = selectPeer(t, m, "beta")
 
 	m = press(t, m, "x")
 	nm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})

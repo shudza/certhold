@@ -48,6 +48,9 @@ func SetPeerAddress(ctx context.Context, deps Deps, name, address string) error 
 // that). An already-client peer is a clear no-op. hostname anchors the manager's
 // self-push identity (its own peer name).
 func MakeClient(ctx context.Context, deps Deps, name, hostname string) error {
+	if err := guardNotSelfPeer("convert to client", name, hostname); err != nil {
+		return err
+	}
 	peer, err := deps.DB.GetPeer(ctx, name)
 	if err != nil {
 		if errors.Is(err, db.ErrPeerNotFound) {
