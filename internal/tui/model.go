@@ -392,15 +392,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m *Model) move(delta int) {
 	if m.detail {
-		w := m.width
-		if w <= 0 {
-			w = 80
-		}
+		w, _ := m.frameSize()
 		maxScroll := 0
 		if body, ok := m.detailBody(w); ok {
-			maxScroll = len(body) - 1
+			_, maxScroll = detailViewport(len(body), m.bodyHeight())
 		}
-		m.detailScroll = clamp(m.detailScroll+delta, 0, clampNonNeg(maxScroll))
+		m.detailScroll = clamp(m.detailScroll+delta, 0, maxScroll)
 		return
 	}
 	switch m.view {

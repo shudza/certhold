@@ -305,10 +305,7 @@ func modalFrame(base []string, top modal, w, h int) []string {
 		out = append(out, "")
 	}
 
-	bodyH := h - 2
-	if bodyH < 1 {
-		bodyH = 1
-	}
+	bodyH := modalBodyHeight(h)
 	body := top.view(w, bodyH)
 	if len(body) > bodyH {
 		body = body[:bodyH]
@@ -356,6 +353,18 @@ func modalFrame(base []string, top modal, w, h int) []string {
 		out[row] = truncLine(pad+bl, w)
 	}
 	return out
+}
+
+// modalBodyHeight is the row budget modalFrame gives a modal's body inside an
+// h-row frame (the box's top/bottom border take two). The Model routes the
+// progress modal's scroll keys through the same math so its window clamp
+// always equals what the frame renders.
+func modalBodyHeight(h int) int {
+	bodyH := h - 2
+	if bodyH < 1 {
+		bodyH = 1
+	}
+	return bodyH
 }
 
 func boxRow(content string, inner int) string {
