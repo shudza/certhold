@@ -95,6 +95,14 @@ func Rekey(ctx context.Context, deps Deps, opts RekeyOptions) error {
 	// above and block all future rekeys. RemoveAll on a never-created path is a
 	// harmless no-op, so registering early is safe.
 	var committed, rotatedAny bool
+	type dbOnlyCert struct {
+		name   string
+		cert   []byte
+		serial uint64
+	}
+	// dbOnlyPrior remembers the pre-rekey (cert, serial) of every peer updated
+	// DB-only via the skip-notice branch, so a clean abort can restore them.
+	var dbOnlyPrior []dbOnlyCert
 	defer func() {
 		if committed {
 			return
@@ -102,6 +110,17 @@ func Rekey(ctx context.Context, deps Deps, opts RekeyOptions) error {
 		if rotatedAny {
 			deps.warn("", fmt.Sprintf("rekey not committed but at least one peer was already rotated on disk to the NEW CA; the new CA is staged at %s and MUST be preserved. Some peers now trust ONLY the new CA. Manual recovery is required before retrying: finish or unwind the rotation, then remove %s.", nextCADir, nextCADir))
 			return
+		}
+		// ca.next is being discarded, so any cert stored DB-only through the
+		// skip-notice branch is now signed by a CA that no longer exists —
+		// /pull/{token} would hand out an orphan cert that breaks the client
+		// once installed. Best-effort restore the prior values. The abort may
+		// stem from ctx cancellation, so the restore runs on a detached ctx.
+		restoreCtx := context.WithoutCancel(ctx)
+		for _, pc := range dbOnlyPrior {
+			if err := deps.DB.SetPeerCert(restoreCtx, pc.name, pc.cert, pc.serial); err != nil {
+				deps.warn(pc.name, fmt.Sprintf("rekey abort: failed to restore prior cert for %s: %v; /pull may serve a cert from the discarded staged CA until the next successful rekey", pc.name, err))
+			}
 		}
 		_ = os.RemoveAll(nextCADir)
 	}()
@@ -141,6 +160,7 @@ func Rekey(ctx context.Context, deps Deps, opts RekeyOptions) error {
 		}
 
 		if skip, notice := skipPushNotice(&p); skip {
+			dbOnlyPrior = append(dbOnlyPrior, dbOnlyCert{name: p.Name, cert: p.Cert, serial: p.Serial})
 			if err := deps.DB.SetPeerCert(ctx, p.Name, certBytes, serial); err != nil {
 				return deps.abortRekey(fmt.Errorf("set peer cert %s: %w", p.Name, err), updated)
 			}
@@ -161,7 +181,13 @@ func Rekey(ctx context.Context, deps Deps, opts RekeyOptions) error {
 		}
 		configBlock := v2ConfigBlockForHosts(instanceKey, hosts)
 		deps.emit(Event{Type: EventPeerStart, Peer: p.Name})
-		if err := pushPeerRekey(ctx, deps, &peerForPush, oldCAPub, newCAPub, instanceKey, certBytes, allowed, configBlock, pushOpts); err != nil {
+		rotated, err := pushPeerRekey(ctx, deps, &peerForPush, oldCAPub, newCAPub, instanceKey, certBytes, allowed, configBlock, pushOpts)
+		if err != nil {
+			if rotated {
+				// The straggler's authorized_keys write was issued: it may now
+				// trust ONLY the new CA, so an abort must preserve ca.next.
+				rotatedAny = true
+			}
 			failed = append(failed, straggler{name: p.Name, err: err})
 			deps.emit(Event{Type: EventPeerFailed, Peer: p.Name, Err: err})
 			continue
@@ -340,14 +366,17 @@ func CAKeyEncrypted(caDir string) (bool, error) {
 // pushPeerRekey delivers the new CA + cert to a single peer. It swaps this
 // instance's cert-authority line in <home>/.ssh/authorized_keys (preserving any
 // other instance's lines), pushes the namespaced cert, and splices the keyed
-// client-config block; no reload.
-func pushPeerRekey(ctx context.Context, deps Deps, p *db.Peer, oldCAPub ssh.PublicKey, newCAPub []byte, instanceKey string, certBytes []byte, allowed []string, configBlock string, opts sshpush.Options) error {
+// client-config block; no reload. rotated reports whether the peer's trust
+// root was (possibly) changed: true once the authorized_keys write has been
+// issued — an ambiguous write error is conservatively treated as rotated,
+// because the peer may already trust ONLY the new CA.
+func pushPeerRekey(ctx context.Context, deps Deps, p *db.Peer, oldCAPub ssh.PublicKey, newCAPub []byte, instanceKey string, certBytes []byte, allowed []string, configBlock string, opts sshpush.Options) (rotated bool, err error) {
 	if p.Name == "" {
-		return errors.New("empty host")
+		return false, errors.New("empty host")
 	}
 	cl, err := dialPush(ctx, deps, p.DialHost(), opts)
 	if err != nil {
-		return fmt.Errorf("dial: %w", err)
+		return false, fmt.Errorf("dial: %w", err)
 	}
 	defer cl.Close()
 
@@ -355,22 +384,22 @@ func pushPeerRekey(ctx context.Context, deps Deps, p *db.Peer, oldCAPub ssh.Publ
 	newLine := userAuthorizedKeysLine(newCAPub, allowed)
 	existing, err := cl.ReadFile(ctx, akPath)
 	if err != nil {
-		return fmt.Errorf("read authorized_keys: %w", err)
+		return false, fmt.Errorf("read authorized_keys: %w", err)
 	}
 	akContent := peerfiles.ReplaceCALine(existing, oldCAPub, newLine)
 	if err := cl.WriteFileAtomic(ctx, akPath, akContent, fs.FileMode(0644)); err != nil {
-		return fmt.Errorf("write authorized_keys: %w", err)
+		return true, fmt.Errorf("write authorized_keys: %w", err)
 	}
 	if err := cl.WriteFileAtomic(ctx, PeerCertRemotePath(p, instanceKey), certBytes, fs.FileMode(0644)); err != nil {
-		return fmt.Errorf("write peer cert: %w", err)
+		return true, fmt.Errorf("write peer cert: %w", err)
 	}
 	if err := cl.SpliceConfigBlock(ctx, peerfiles.PathsFor(p.TargetUser, instanceKey).ConfigTarget, instanceKey, configBlock); err != nil {
-		return fmt.Errorf("splice ssh config: %w", err)
+		return true, fmt.Errorf("splice ssh config: %w", err)
 	}
 	if err := cl.VerifyHealth(ctx); err != nil {
-		return fmt.Errorf("verify health: %w", err)
+		return true, fmt.Errorf("verify health: %w", err)
 	}
-	return nil
+	return true, nil
 }
 
 // userAuthorizedKeysLine reconstructs a single cert-authority line from
