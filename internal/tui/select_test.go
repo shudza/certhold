@@ -380,20 +380,22 @@ func TestEscPrecedenceModalFilterMarks(t *testing.T) {
 }
 
 // TestSinglePeerUnchangedWhenNoMarks checks x/u with zero marks still drive the
-// single selected peer (the v1 path), not a batch.
+// single selected peer (the v1 path), not a batch. Targets beta: alpha is the
+// model's self peer and revoke refuses it.
 func TestSinglePeerUnchangedWhenNoMarks(t *testing.T) {
 	dataDir, d, pass := seedThreePeers(t)
-	m := batchModel(t, dataDir, d) // alpha selected, no marks
+	m := batchModel(t, dataDir, d) // no marks
+	m = selectPeer(t, m, "beta")
 
 	m = press(t, m, "x")
 	cm, ok := topAny(m).(confirmModal)
 	if !ok {
 		t.Fatalf("x did not open confirm; top=%T", topAny(m))
 	}
-	if cm.subject != "alpha" || m.batchKind != batchNone {
-		t.Fatalf("no-mark x should target the single selected peer alpha; subject=%q kind=%v", cm.subject, m.batchKind)
+	if cm.subject != "beta" || m.batchKind != batchNone {
+		t.Fatalf("no-mark x should target the single selected peer beta; subject=%q kind=%v", cm.subject, m.batchKind)
 	}
-	if !strings.Contains(strings.Join(cm.body, "\n"), "Clear certhold off alpha") {
+	if !strings.Contains(strings.Join(cm.body, "\n"), "Clear certhold off beta") {
 		t.Fatalf("single-peer confirm body wrong:\n%s", strings.Join(cm.body, "\n"))
 	}
 	nm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
@@ -401,11 +403,11 @@ func TestSinglePeerUnchangedWhenNoMarks(t *testing.T) {
 	if pg, ok := topAny(m).(progressModal); !ok || !pg.done || pg.err != nil {
 		t.Fatalf("single-peer revoke not done-ok: %+v", topAny(m))
 	}
-	if _, err := d.GetPeer(context.Background(), "alpha"); !errors.Is(err, db.ErrPeerNotFound) {
-		t.Fatalf("db: alpha row should be deleted by the single-peer path, got err=%v", err)
+	if _, err := d.GetPeer(context.Background(), "beta"); !errors.Is(err, db.ErrPeerNotFound) {
+		t.Fatalf("db: beta row should be deleted by the single-peer path, got err=%v", err)
 	}
-	if _, err := d.GetPeer(context.Background(), "beta"); err != nil {
-		t.Fatalf("db: beta affected though only alpha was selected: %v", err)
+	if _, err := d.GetPeer(context.Background(), "alpha"); err != nil {
+		t.Fatalf("db: alpha affected though only beta was selected: %v", err)
 	}
 }
 
@@ -419,15 +421,15 @@ func TestBatchSkipsRevokedMarkedPeer(t *testing.T) {
 	m := batchModel(t, dataDir, d)
 	m = drainReload(t, m) // reload so beta shows revoked
 
-	m = markPeer(t, m, "beta")  // revoked
-	m = markPeer(t, m, "alpha") // live
+	m = markPeer(t, m, "beta") // revoked
+	m = markPeer(t, m, "mid")  // live
 
 	m = press(t, m, "x")
 	cm, ok := topAny(m).(confirmModal)
 	if !ok {
 		t.Fatalf("x with marks did not open batch confirm; top=%T", topAny(m))
 	}
-	// confirm lists only the live target alpha.
+	// confirm lists only the live target mid.
 	if strings.Contains(strings.Join(cm.body, "\n"), "beta") {
 		t.Fatalf("batch confirm should omit the revoked beta:\n%s", strings.Join(cm.body, "\n"))
 	}

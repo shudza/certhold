@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 
 	"golang.org/x/crypto/ssh"
@@ -29,6 +28,9 @@ import (
 // contacted, so this is the path for a compromised or unreachable peer. hostname
 // is certhold's own peer name; empty means os.Hostname().
 func RevokePeer(ctx context.Context, deps Deps, name, hostname string, rekey bool) error {
+	if err := guardNotSelfPeer("revoke", name, hostname); err != nil {
+		return err
+	}
 	peer, err := deps.DB.GetPeer(ctx, name)
 	if err != nil {
 		if errors.Is(err, db.ErrPeerNotFound) {
@@ -102,7 +104,7 @@ func revokeClear(ctx context.Context, deps Deps, peer *db.Peer) error {
 // it, so the manager can still authenticate to the fleet afterwards.
 func revokeRekey(ctx context.Context, deps Deps, name, hostname string) error {
 	if hostname == "" {
-		h, herr := os.Hostname()
+		h, herr := osHostname()
 		if herr != nil {
 			return fmt.Errorf("hostname: %w", herr)
 		}

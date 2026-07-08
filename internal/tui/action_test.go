@@ -220,10 +220,11 @@ func peerGroups(t *testing.T, d *db.DB, name string) []string {
 
 // TestRevokeFlow drives confirm → progress on the default (clear+delete) revoke
 // path and asserts the db row is deleted and the reloaded table no longer lists
-// the peer.
+// the peer. Targets beta: alpha is the model's self peer and revoke refuses it.
 func TestRevokeFlow(t *testing.T) {
 	dataDir, d, pass := seedActionEnv(t)
 	m := actionModel(t, dataDir, d)
+	m = selectPeer(t, m, "beta")
 
 	m = press(t, m, "x")
 	if _, ok := topAny(m).(confirmModal); !ok {
@@ -240,11 +241,11 @@ func TestRevokeFlow(t *testing.T) {
 		t.Fatalf("progress not done-ok: done=%v err=%v lines=%v", pg.done, pg.err, pg.lines)
 	}
 
-	if _, err := d.GetPeer(context.Background(), "alpha"); !errors.Is(err, db.ErrPeerNotFound) {
-		t.Fatalf("db: alpha row should be deleted after default revoke, got err=%v", err)
+	if _, err := d.GetPeer(context.Background(), "beta"); !errors.Is(err, db.ErrPeerNotFound) {
+		t.Fatalf("db: beta row should be deleted after default revoke, got err=%v", err)
 	}
-	if _, ok := m.peerByName("alpha"); ok {
-		t.Fatal("reloaded table still lists alpha after a clear+delete revoke")
+	if _, ok := m.peerByName("beta"); ok {
+		t.Fatal("reloaded table still lists beta after a clear+delete revoke")
 	}
 }
 

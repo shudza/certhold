@@ -13,6 +13,9 @@ import (
 // passphrase unlock. The peer's host is left untouched; use RevokePeer when the
 // host must be cleaned and the CA rotated so the old cert stops being accepted.
 func RemovePeer(ctx context.Context, deps Deps, name string) error {
+	if err := guardNotSelfPeer("remove", name, ""); err != nil {
+		return err
+	}
 	if _, err := deps.DB.GetPeer(ctx, name); err != nil {
 		if errors.Is(err, db.ErrPeerNotFound) {
 			return fmt.Errorf("remove peer %q: %w", name, err)
