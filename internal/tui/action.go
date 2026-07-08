@@ -517,6 +517,15 @@ func (m Model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if !ok {
 		return m, nil
 	}
+	// The progress transcript's scroll keys are routed here rather than through
+	// handle: the window clamp needs the frame height only the Model knows.
+	if pg, isProgress := top.(progressModal); isProgress {
+		_, h := m.frameSize()
+		if next, isScroll := pg.scrollKey(msg.String(), modalBodyHeight(h)); isScroll {
+			m.replaceTop(next)
+			return m, nil
+		}
+	}
 	next, res := top.handle(msg)
 	switch res {
 	case modalKeep:

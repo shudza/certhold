@@ -380,7 +380,10 @@ window, a `sel/total` scroll cue with `▲`/`▼` shows the position.
 cancels at any step, and a passphrase-protected CA / manager key is prompted
 through a masked modal (see *Passphrase session* below). The action runs in a
 progress modal that streams its `ops` events and reports done/failed; `esc`
-dismisses it.
+dismisses it. A transcript longer than the modal follows its tail as events
+arrive; `j`/`k` (arrows, `pgup`/`pgdn`) scroll back through it — scrolling up
+stops the tail-follow, scrolling back to the bottom resumes it — and the
+running/failed/done status and `esc` hint stay pinned below the transcript.
 
 | Key | View | Action |
 |---|---|---|

@@ -545,6 +545,30 @@ func TestDetailScrollsToReachAllLines(t *testing.T) {
 	}
 }
 
+// TestDetailScrollNoDeadZone reproduces the overshoot dead zone: extra 'j'
+// presses at the bottom used to bank invisible scroll past the render maximum
+// (model clamp len-1 vs render clamp len-visible), so the first 'k' presses
+// back up changed nothing. One 'k' at the bottom must move the window
+// immediately, no matter how many 'j' presses preceded it.
+func TestDetailScrollNoDeadZone(t *testing.T) {
+	m := press(t, newTestModel(nil), "enter")
+	nm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 10})
+	m = nm.(Model)
+
+	for i := 0; i < 25; i++ {
+		m = press(t, m, "j")
+	}
+	bottom := m.View()
+	if !strings.Contains(bottom, "pull token") {
+		t.Fatalf("spamming j should land on the bottom of the detail body:\n%s", bottom)
+	}
+
+	up := press(t, m, "k")
+	if v := up.View(); v == bottom {
+		t.Fatalf("one 'k' at the bottom changed nothing (overshoot dead zone):\n%s", v)
+	}
+}
+
 func TestFooterHintsPerState(t *testing.T) {
 	m := newTestModel(nil)
 	if !strings.Contains(m.View(), "enter detail") {

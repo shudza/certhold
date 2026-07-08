@@ -43,20 +43,10 @@ const (
 )
 
 func (m Model) View() string {
-	w, h := m.width, m.height
-	if w <= 0 {
-		w = 80
-	}
-	if h <= 0 {
-		h = 24
-	}
-
+	w, h := m.frameSize()
 	header := m.headerLines(w)
 	footer := m.footerLines(w)
-	bodyH := h - len(header) - len(footer)
-	if bodyH < 1 {
-		bodyH = 1
-	}
+	bodyH := m.bodyHeight()
 
 	var body []string
 	switch {
@@ -78,6 +68,32 @@ func (m Model) View() string {
 		lines = modalFrame(lines, top, w, h)
 	}
 	return strings.Join(lines, "\n")
+}
+
+// frameSize is the effective terminal geometry: the last WindowSizeMsg, with
+// the pre-first-resize fallback the renderer has always used.
+func (m Model) frameSize() (w, h int) {
+	w, h = m.width, m.height
+	if w <= 0 {
+		w = 80
+	}
+	if h <= 0 {
+		h = 24
+	}
+	return w, h
+}
+
+// bodyHeight is the rows left for the body between the fixed header and
+// footer — the bodyH View hands each pane renderer. move's detail clamp
+// derives from the same number so the model scroll bound and the rendered
+// window can never drift apart.
+func (m Model) bodyHeight() int {
+	w, h := m.frameSize()
+	bodyH := h - len(m.headerLines(w)) - len(m.footerLines(w))
+	if bodyH < 1 {
+		bodyH = 1
+	}
+	return bodyH
 }
 
 func (m Model) headerLines(w int) []string {
@@ -343,9 +359,10 @@ func (m Model) groupPaneLines(g groupRow, w, paneH int) []string {
 	return out
 }
 
-// detailBody builds the full (unscrolled) set of peer-detail lines. peerDetailLines
-// windows it; move clamps m.detailScroll against its length so scrolling stays in
-// bounds without the renderer needing to feed a height back into the model.
+// detailBody builds the full (unscrolled) set of peer-detail lines.
+// peerDetailLines windows it; move clamps m.detailScroll with the same
+// detailViewport math so scrolling stays in bounds without the renderer
+// needing to feed a height back into the model.
 func (m Model) detailBody(w int) ([]string, bool) {
 	p, ok := m.detailPeer()
 	if !ok {
@@ -380,23 +397,30 @@ func (m Model) detailBody(w int) ([]string, bool) {
 	}, true
 }
 
+// detailViewport is the single source of the peer-detail scroll math: the rows
+// visible in the pane and the maximum window top for a body of bodyLen lines.
+// move clamps m.detailScroll to maxTop and peerDetailLines windows with the
+// same numbers, so extra presses at the bottom can never bank invisible
+// overshoot (dead 'k' presses). maxTop is 0 when the body fits (or the pane is
+// too short to window), in which case visible covers the whole body.
+func detailViewport(bodyLen, bodyH int) (visible, maxTop int) {
+	if bodyLen <= bodyH || bodyH < 2 {
+		return bodyLen, 0
+	}
+	visible = bodyH - 1
+	return visible, bodyLen - visible
+}
+
 func (m Model) peerDetailLines(w, bodyH int) []string {
 	lines, ok := m.detailBody(w)
 	if !ok {
 		return []string{dimStyle.Render("peer no longer present — esc to go back")}
 	}
-	if len(lines) <= bodyH || bodyH < 2 {
+	visible, maxTop := detailViewport(len(lines), bodyH)
+	if maxTop == 0 {
 		return lines
 	}
-
-	visible := bodyH - 1
-	top := clamp(m.detailScroll, 0, len(lines)-1)
-	if top > len(lines)-visible {
-		top = len(lines) - visible
-	}
-	if top < 0 {
-		top = 0
-	}
+	top := clamp(m.detailScroll, 0, maxTop)
 	out := append([]string(nil), lines[top:min(top+visible, len(lines))]...)
 	out = append(out, scrollCue(top, top, visible, len(lines)))
 	return out
