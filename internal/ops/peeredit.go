@@ -16,6 +16,9 @@ import (
 // their Host-alias entries on their next pull — a full fleet re-push is not
 // required.
 func SetPeerAddress(ctx context.Context, deps Deps, name, address string) error {
+	if err := peerfiles.ValidateDialAddress(address); err != nil {
+		return err
+	}
 	if _, err := deps.DB.GetPeer(ctx, name); err != nil {
 		if errors.Is(err, db.ErrPeerNotFound) {
 			return fmt.Errorf("peer %q not found", name)

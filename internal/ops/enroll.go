@@ -44,6 +44,10 @@ type EnrollResult struct {
 // allowed groups + token + fleet-rev bump in a single transaction (a failure
 // rolls back all of them). It returns data and prints nothing.
 func MintEnroll(ctx context.Context, deps Deps, spec EnrollSpec) (EnrollResult, error) {
+	if err := peerfiles.ValidateDialAddress(spec.Address); err != nil {
+		return EnrollResult{}, err
+	}
+
 	instanceKey, err := EnsureInstanceKey(ctx, deps.DB)
 	if err != nil {
 		return EnrollResult{}, fmt.Errorf("ensure instance key: %w", err)
