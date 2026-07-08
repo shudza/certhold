@@ -106,6 +106,92 @@ func TestHostKeyConfirmErrorAbortsDial(t *testing.T) {
 	}
 }
 
+// TestHostKeyConfirmPausesConnectTimeout proves an operator taking ~3s to
+// verify a fingerprint does not lose a dial whose ConnectTimeout is 1s (with a
+// deadline-less caller ctx): the connect timer is paused while the confirm fn
+// runs, so the dial succeeds and the accepted key is recorded.
+func TestHostKeyConfirmPausesConnectTimeout(t *testing.T) {
+	env := setupTestEnv(t)
+	srv := newFakeServer(t, env.caPubKey)
+	defer srv.Close()
+	if err := os.WriteFile(env.knownHostsPath, []byte{}, 0644); err != nil {
+		t.Fatalf("write empty known_hosts: %v", err)
+	}
+
+	cl, err := Dial(context.Background(), srv.addr, Options{
+		CertPath:       env.certPath,
+		KeyPath:        env.keyPath,
+		KnownHostsPath: env.knownHostsPath,
+		User:           "root",
+		ConnectTimeout: 1 * time.Second,
+		HostKeyConfirmFn: func(host string, key ssh.PublicKey) (bool, error) {
+			time.Sleep(3 * time.Second) // well past the 1s connect budget
+			return true, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Dial with a slow confirm must not race the connect timeout: %v", err)
+	}
+	defer cl.Close()
+
+	got, rerr := os.ReadFile(env.knownHostsPath)
+	if rerr != nil {
+		t.Fatalf("read known_hosts: %v", rerr)
+	}
+	if strings.TrimSpace(string(got)) == "" {
+		t.Fatal("accepted key was not recorded in known_hosts")
+	}
+}
+
+// TestAbandonedDialClosesLateClient: the caller cancels its ctx while the
+// confirm fn is still pending; Dial fails immediately, and when the operator's
+// late "yes" completes the abandoned handshake, the resulting authenticated
+// ssh.Client must be closed rather than leaked — observed as the fake server's
+// live connection count dropping back to zero.
+func TestAbandonedDialClosesLateClient(t *testing.T) {
+	env := setupTestEnv(t)
+	srv := newFakeServer(t, env.caPubKey)
+	defer srv.Close()
+	if err := os.WriteFile(env.knownHostsPath, []byte{}, 0644); err != nil {
+		t.Fatalf("write empty known_hosts: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	dialErr := make(chan error, 1)
+	go func() {
+		_, err := Dial(ctx, srv.addr, Options{
+			CertPath:       env.certPath,
+			KeyPath:        env.keyPath,
+			KnownHostsPath: env.knownHostsPath,
+			User:           "root",
+			HostKeyConfirmFn: func(host string, key ssh.PublicKey) (bool, error) {
+				close(entered)
+				<-release
+				return true, nil
+			},
+		})
+		dialErr <- err
+	}()
+
+	<-entered // the handshake goroutine is parked in the confirm fn
+	cancel()  // the caller abandons the dial mid-confirm
+	if err := <-dialErr; err == nil {
+		t.Fatal("abandoned Dial: want error, got nil")
+	}
+
+	close(release) // late "yes": the abandoned handshake now completes
+	deadline := time.Now().Add(10 * time.Second)
+	for srv.active() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("late-completing client was never closed: %d live server connections", srv.active())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 func TestHostKeyConfirmNeverCalledOnMismatch(t *testing.T) {
 	env := setupTestEnv(t)
 	srv := newFakeServer(t, env.caPubKey)

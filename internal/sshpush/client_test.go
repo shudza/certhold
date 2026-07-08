@@ -45,6 +45,7 @@ type fakeServer struct {
 	stopErr     error
 	wg          sync.WaitGroup
 	execLocal   bool
+	activeConns int
 }
 
 // runLocalShell executes the session command via the local shell so splice
@@ -137,9 +138,25 @@ func (s *fakeServer) acceptLoop() {
 	}
 }
 
+// active reports how many accepted connections are currently being served, so a
+// test can observe a client-side Close arriving at the server (no-leak proof).
+func (s *fakeServer) active() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.activeConns
+}
+
 func (s *fakeServer) handleConn(nConn net.Conn) {
 	defer s.wg.Done()
 	defer nConn.Close()
+	s.mu.Lock()
+	s.activeConns++
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.activeConns--
+		s.mu.Unlock()
+	}()
 	checker := &ssh.CertChecker{
 		IsUserAuthority: func(auth ssh.PublicKey) bool {
 			return bytes.Equal(auth.Marshal(), s.caPubKey.Marshal())
@@ -652,6 +669,65 @@ func TestDialFailsFastUnreachable(t *testing.T) {
 		t.Fatalf("Dial took %v, want fail-fast under 5s (OS default not bounded)", elapsed)
 	}
 	t.Logf("fail-fast: Dial returned %v after %v", err, elapsed)
+}
+
+// TestDialTimesOutOnStalledHandshake proves the pausable connect timer still
+// fully bounds TCP connect + handshake when no host-key confirmation is
+// pending: a server that accepts and then stalls (never speaks SSH) fails the
+// dial at ~ConnectTimeout with a deadline error, not the OS-level default.
+func TestDialTimesOutOnStalledHandshake(t *testing.T) {
+	env := setupTestEnv(t)
+	if err := os.WriteFile(env.knownHostsPath, []byte{}, 0644); err != nil {
+		t.Fatalf("write empty known_hosts: %v", err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	var mu sync.Mutex
+	var conns []net.Conn
+	go func() {
+		for {
+			c, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			mu.Lock()
+			conns = append(conns, c)
+			mu.Unlock()
+		}
+	}()
+	// Closing the stalled conns at cleanup unblocks the abandoned handshake
+	// goroutine (and its drain) so the test process exits promptly.
+	t.Cleanup(func() {
+		_ = ln.Close()
+		mu.Lock()
+		for _, c := range conns {
+			_ = c.Close()
+		}
+		mu.Unlock()
+	})
+
+	start := time.Now()
+	_, err = Dial(context.Background(), ln.Addr().String(), Options{
+		CertPath:       env.certPath,
+		KeyPath:        env.keyPath,
+		KnownHostsPath: env.knownHostsPath,
+		User:           "root",
+		ConnectTimeout: 1 * time.Second,
+	})
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("Dial against a stalled server: want error, got nil")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Dial error = %v, want context.DeadlineExceeded", err)
+	}
+	// Generous upper bound for slow CI; the point is ~1s, not minutes.
+	if elapsed >= 10*time.Second {
+		t.Fatalf("Dial took %v, want ~1s fail-fast", elapsed)
+	}
+	t.Logf("stalled handshake: Dial returned %v after %v", err, elapsed)
 }
 
 var _ Pusher = (*Client)(nil)

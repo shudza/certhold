@@ -173,11 +173,20 @@ func (s *passSession) close() {
 // observes the closed channel (!ok) and returns nil, so the orphaned reader
 // wakes and exits instead of blocking forever. The prior action's worker has
 // already returned (it sent its terminal error before the next action could
-// arm), so nothing is left to send on the closed channel.
+// arm), so nothing is left to send on the closed channel — except a host-key
+// confirm: it runs on the SSH handshake goroutine inside the dial, which
+// OUTLIVES the worker when the dial is abandoned (timeout/cancel), so a parked
+// hkInflight must be rejected here or that goroutine leaks for the session.
 func (s *passSession) arm() chan passReq {
 	ch := make(chan passReq, 1)
 	hk := make(chan hostKeyReq, 1)
 	s.mu.Lock()
+	if rp := s.hkInflight.Swap(nil); rp != nil {
+		select {
+		case *rp <- hostKeyReply{err: errHostKeyRejected}:
+		default:
+		}
+	}
 	old := s.reqs.Swap(&ch)
 	oldHK := s.hkReqs.Swap(&hk)
 	s.mu.Unlock()
@@ -737,10 +746,12 @@ func (m Model) handleActionDone(msg actionDoneMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil && isPassphraseError(msg.err) && !errors.Is(msg.err, errPassphraseCanceled) {
 		m.pass.unlocker.Forget()
 		m.peerPass.Forget()
+		answerDiscardedHostKeys(m.modals[idx:])
 		m.modals = m.modals[:idx]
 		m.passErr = msg.err.Error()
 		return m.startAction(m.lastHeading, m.lastRun)
 	}
+	answerDiscardedHostKeys(m.modals[idx+1:])
 	m.modals = m.modals[:idx+1] // discard any modal stranded above the progress
 	// A successful mint swaps the progress modal for the result screen showing
 	// the one-liner full-width; the enroll worker stashed the result in the
@@ -782,6 +793,25 @@ func (m Model) handleActionDone(msg actionDoneMsg) (tea.Model, tea.Cmd) {
 	pm.err = msg.err
 	m.modals[idx] = pm
 	return m, m.reloadCmd()
+}
+
+// answerDiscardedHostKeys rejects the reply channel of every host-key modal in
+// a slice of modals about to be discarded. The confirm that raised such a modal
+// runs on the SSH handshake goroutine, which outlives the action's worker when
+// the dial is abandoned — so the done message can arrive with the modal still
+// open, and dropping it unanswered would park that goroutine forever. The send
+// is non-blocking: the channel is buffered (cap 1) and answered at most once.
+func answerDiscardedHostKeys(discarded []modal) {
+	for _, mo := range discarded {
+		hm, ok := mo.(hostKeyModal)
+		if !ok || hm.reply == nil {
+			continue
+		}
+		select {
+		case hm.reply <- hostKeyReply{err: errHostKeyRejected}:
+		default:
+		}
+	}
 }
 
 func (m Model) progressIndex() int {
