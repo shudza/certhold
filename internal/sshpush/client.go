@@ -50,9 +50,15 @@ type Options struct {
 	// (TOFU), false to reject. It is NEVER invoked on a *mismatch* against an
 	// existing entry — that always fails strictly. Leave nil for the historical
 	// behavior (unknown host fails). When set, it supersedes CaptureHostKey's
-	// auto-accept for unknown hosts.
+	// auto-accept for unknown hosts. While it runs, Dial's own ConnectTimeout is
+	// paused so an operator verifying a fingerprint out-of-band cannot lose the
+	// dial to the connect budget; a deadline on the caller's ctx is never paused —
+	// it stays the caller's to manage.
 	HostKeyConfirmFn func(host string, key ssh.PublicKey) (bool, error)
-	// ConnectTimeout bounds TCP connect + SSH handshake for a single dial. Zero means use the package default.
+	// ConnectTimeout bounds TCP connect + SSH handshake for a single dial when the
+	// caller's ctx carries no deadline. Zero means use the package default. It is
+	// suspended for the duration of a pending HostKeyConfirmFn (see above) and
+	// restarts with its full budget when the confirmation returns.
 	ConnectTimeout time.Duration
 }
 
@@ -142,9 +148,21 @@ func Dial(ctx context.Context, host string, opts Options) (*Client, error) {
 	}
 	dctx := ctx
 	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		dctx, cancel = context.WithTimeout(ctx, to)
-		defer cancel()
+		// A stoppable timer instead of context.WithTimeout: the capturing callback
+		// pauses it while HostKeyConfirmFn waits on a human, so an interactive
+		// host-key confirmation can never lose to the connect budget. The cancel
+		// cause carries DeadlineExceeded so an expiry still reads as a timeout.
+		var cancel context.CancelCauseFunc
+		dctx, cancel = context.WithCancelCause(ctx)
+		defer cancel(nil)
+		timer := time.AfterFunc(to, func() { cancel(context.DeadlineExceeded) })
+		defer timer.Stop()
+		if capturer != nil {
+			capturer.pauseTimeout = func() { timer.Stop() }
+			// Restarting with the full budget is fine: the timer bounds unattended
+			// network waits, not total wall time.
+			capturer.resumeTimeout = func() { timer.Reset(to) }
+		}
 	}
 	dialer := &dialFn{ctx: dctx, addr: addr, cfg: cfg}
 	sshClient, err := dialer.dial()
@@ -199,7 +217,15 @@ func (d *dialFn) dial() (*ssh.Client, error) {
 	}()
 	select {
 	case <-d.ctx.Done():
-		return nil, d.ctx.Err()
+		// The abandoned handshake goroutine may still be parked (e.g. in a
+		// host-key confirmation the operator answers late). If it ever completes,
+		// its live authenticated client must not leak — drain and close it.
+		go func() {
+			if r := <-ch; r.c != nil {
+				_ = r.c.Close()
+			}
+		}()
+		return nil, context.Cause(d.ctx)
 	case r := <-ch:
 		return r.c, r.err
 	}

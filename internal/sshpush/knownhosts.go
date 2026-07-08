@@ -81,8 +81,13 @@ type capturingCallback struct {
 	strict  ssh.HostKeyCallback
 	confirm func(host string, key ssh.PublicKey) (bool, error)
 	host    string
-	mu      sync.Mutex
-	key     ssh.PublicKey
+	// pauseTimeout/resumeTimeout, when set, bracket the confirm fn so the dial's
+	// connect timer cannot fire while a human is deciding (Dial wires them only
+	// when it owns the timeout, i.e. the caller's ctx had no deadline).
+	pauseTimeout  func()
+	resumeTimeout func()
+	mu            sync.Mutex
+	key           ssh.PublicKey
 }
 
 func (c *capturingCallback) callback(hostname string, remote net.Addr, key ssh.PublicKey) error {
@@ -94,7 +99,13 @@ func (c *capturingCallback) callback(hostname string, remote net.Addr, key ssh.P
 	if errors.As(err, &keyErr) && len(keyErr.Want) == 0 {
 		// Host is unknown (no entry).
 		if c.confirm != nil {
+			if c.pauseTimeout != nil {
+				c.pauseTimeout()
+			}
 			ok, cerr := c.confirm(c.host, key)
+			if c.resumeTimeout != nil {
+				c.resumeTimeout()
+			}
 			if cerr != nil {
 				return cerr
 			}

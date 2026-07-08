@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -224,8 +225,11 @@ func TestHostKeyModalRendersFingerprint(t *testing.T) {
 	if !strings.Contains(v, key.Type()) {
 		t.Fatalf("modal omits key type %q:\n%s", key.Type(), v)
 	}
-	if !strings.Contains(v, "y/enter") || !strings.Contains(v, "n/esc") {
-		t.Fatalf("modal omits yes/no affordance:\n%s", v)
+	if !strings.Contains(v, "y accept") || !strings.Contains(v, "n/esc reject") {
+		t.Fatalf("modal omits yes/no affordance (enter must NOT be offered as accept):\n%s", v)
+	}
+	if strings.Contains(v, "enter") {
+		t.Fatalf("hint must not suggest enter accepts:\n%s", v)
 	}
 	if hm.title() != "Verify host key" {
 		t.Fatalf("unexpected title %q", hm.title())
@@ -350,6 +354,140 @@ func TestCombinedPassphraseThenHostKey(t *testing.T) {
 	if !ok || !pg.done || pg.err != nil {
 		t.Fatalf("combined prompt action did not complete cleanly: %T done=%v err=%v", topAny(m), pg.done, pg.err)
 	}
+}
+
+// TestHostKeyModalKeyDiscipline pins the accept/reject key mapping: plain enter
+// is a deliberate no-op (a habitual/queued Enter must never silently accept an
+// unverified key — OpenSSH requires typing "yes" for the same reason); only y/Y
+// accept; n/N/esc reject.
+func TestHostKeyModalKeyDiscipline(t *testing.T) {
+	hm := newHostKeyModal("alpha", "SHA256:fp", "ssh-ed25519")
+	if _, res := hm.handle(tea.KeyMsg{Type: tea.KeyEnter}); res != modalKeep {
+		t.Fatalf("enter must be a no-op (modalKeep), got %v", res)
+	}
+	for _, k := range []string{"y", "Y"} {
+		if _, res := hm.handle(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)}); res != modalSubmit {
+			t.Fatalf("%q must accept (modalSubmit), got %v", k, res)
+		}
+	}
+	for _, k := range []string{"n", "N"} {
+		if _, res := hm.handle(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)}); res != modalClose {
+			t.Fatalf("%q must reject (modalClose), got %v", k, res)
+		}
+	}
+	if _, res := hm.handle(tea.KeyMsg{Type: tea.KeyEsc}); res != modalClose {
+		t.Fatalf("esc must reject (modalClose), got %v", res)
+	}
+}
+
+// TestHostKeyModalEnterKeepsModalOpen drives enter through the full Update path
+// with a live host-key modal on top: the modal stays open and the reply channel
+// is not answered — nothing was accepted.
+func TestHostKeyModalEnterKeepsModalOpen(t *testing.T) {
+	m := NewModel(context.Background(), testData(), nil)
+	m.actionGen = 1
+	reply := make(chan hostKeyReply, 1)
+	nm, _ := m.handleHostKeyPrompt(hostKeyPromptMsg{req: hostKeyReq{
+		gen: 1, host: "alpha", fingerprint: "SHA256:fp", keyType: "ssh-ed25519", reply: reply,
+	}})
+	m = nm.(Model)
+	if _, ok := topHostKey(m); !ok {
+		t.Fatalf("host-key modal did not open, top=%T", topAny(m))
+	}
+
+	nm, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = nm.(Model)
+	if _, ok := topHostKey(m); !ok {
+		t.Fatalf("enter dismissed the host-key modal, top=%T", topAny(m))
+	}
+	select {
+	case r := <-reply:
+		t.Fatalf("enter answered the reply channel: %+v", r)
+	default:
+	}
+	// A y after the ignored enter still accepts, unblocking the waiter.
+	nm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	m = nm.(Model)
+	select {
+	case r := <-reply:
+		if !r.ok || r.err != nil {
+			t.Fatalf("y should accept, got %+v", r)
+		}
+	default:
+		t.Fatal("y did not answer the reply channel")
+	}
+	m.pass.close()
+}
+
+// TestActionDoneAnswersStrandedHostKeyModal: an actionDoneMsg arriving while the
+// host-key modal is still open (the dial was abandoned; its handshake goroutine
+// is parked on the modal's reply and OUTLIVES the action worker) must answer the
+// reply channel with a reject so that goroutine exits, then discard the modal.
+func TestActionDoneAnswersStrandedHostKeyModal(t *testing.T) {
+	m := NewModel(context.Background(), testData(), nil)
+	m.actionGen = 1
+	m.pushModal(newProgressModal("revoke alpha"))
+	reply := make(chan hostKeyReply, 1)
+	hm := newHostKeyModal("alpha", "SHA256:fp", "ssh-ed25519")
+	hm.reply = reply
+	m.pushModal(hm)
+
+	// A real parked waiter proves the answer actually unblocks the goroutine.
+	waited := make(chan hostKeyReply, 1)
+	go func() { waited <- <-reply }()
+
+	nm, _ := m.handleActionDone(actionDoneMsg{gen: 1, err: errors.New("ssh dial alpha:22: context deadline exceeded")})
+	m = nm.(Model)
+
+	select {
+	case r := <-waited:
+		if r.ok {
+			t.Fatal("stranded host-key modal must be rejected, got an accept")
+		}
+		if r.err == nil {
+			t.Fatal("stranded host-key modal must carry a rejection error")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stranded host-key modal's waiter never unblocked — goroutine leak")
+	}
+	pg, ok := topAny(m).(progressModal)
+	if !ok {
+		t.Fatalf("stranded modal not discarded, top=%T", topAny(m))
+	}
+	if !pg.done || pg.err == nil {
+		t.Fatalf("progress modal not finalized: done=%v err=%v", pg.done, pg.err)
+	}
+	m.pass.close()
+}
+
+// TestArmCancelsParkedHostKeyConfirm: rotating to a new action must reject a
+// host-key confirm still parked on its reply from the previous action's
+// abandoned dial (the handshake goroutine outlives the worker), so it cannot
+// leak for the rest of the session.
+func TestArmCancelsParkedHostKeyConfirm(t *testing.T) {
+	s := newPassSession()
+	s.arm()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.confirmHostKey("alpha", "SHA256:fp", "ssh-ed25519")
+		done <- err
+	}()
+	// confirmHostKey publishes hkInflight before sending the request (both under
+	// mu), so receiving the request proves the confirm is parked on its reply.
+	hkCh := *s.hkReqs.Load()
+	<-hkCh
+
+	s.arm() // next action rotates in — must cancel the parked confirm
+	select {
+	case err := <-done:
+		if !errors.Is(err, errHostKeyRejected) {
+			t.Fatalf("parked confirm err = %v, want errHostKeyRejected", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("arm() left the host-key confirm parked — session-long goroutine leak")
+	}
+	s.close()
 }
 
 // TestStaleHostKeyPromptRejected proves a host-key prompt stamped with a
