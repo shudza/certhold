@@ -108,6 +108,41 @@ func TestStripCALine_RemovesOnlyMatching(t *testing.T) {
 	_ = otherPub
 }
 
+// TestStripCALine_MultipleKeysPreservesForeign models a straggler revoke: the
+// peer carries lines for this instance's active AND archived old CA plus a
+// foreign instance's line; one pass with both of our keys removes ours only.
+func TestStripCALine_MultipleKeysPreservesForeign(t *testing.T) {
+	activePub, activeAK := newTestCAKey(t)
+	archivedPub, archivedAK := newTestCAKey(t)
+	_, foreignAK := newTestCAKey(t)
+	activeTrim := strings.TrimRight(string(activeAK), "\n")
+	archivedTrim := strings.TrimRight(string(archivedAK), "\n")
+	foreignTrim := strings.TrimRight(string(foreignAK), "\n")
+
+	existing := []byte("# header\n" +
+		"cert-authority,principals=\"manager,web\" " + activeTrim + "\n" +
+		"cert-authority,principals=\"manager,web\" " + archivedTrim + "\n" +
+		"cert-authority,principals=\"manager\" " + foreignTrim + "\n" +
+		"ssh-ed25519 AAAAplainuserkey user@host\n")
+
+	out := StripCALine(existing, activePub, archivedPub)
+	s := string(out)
+	if strings.Contains(s, activeTrim) {
+		t.Fatalf("active-CA line not removed:\n%s", s)
+	}
+	if strings.Contains(s, archivedTrim) {
+		t.Fatalf("archived-old-CA line not removed:\n%s", s)
+	}
+	if !strings.Contains(s, foreignTrim) {
+		t.Fatalf("foreign instance's line was dropped:\n%s", s)
+	}
+	for _, must := range []string{"# header", "ssh-ed25519 AAAAplainuserkey user@host"} {
+		if !strings.Contains(s, must) {
+			t.Errorf("preserved line %q dropped:\n%s", must, s)
+		}
+	}
+}
+
 func TestStripCALine_NoOpWhenAbsent(t *testing.T) {
 	caPub, _ := newTestCAKey(t)
 	otherPub, otherAK := newTestCAKey(t)

@@ -102,7 +102,7 @@ func (f *fakePusher) SpliceConfigBlock(ctx context.Context, configPath, instance
 	return f.record(fakePushCall{op: "splice", path: configPath, content: []byte(block)})
 }
 
-func (f *fakePusher) ClearPeer(ctx context.Context, paths peerfiles.RemotePaths, instanceKey string, caPubKey ssh.PublicKey) error {
+func (f *fakePusher) ClearPeer(ctx context.Context, paths peerfiles.RemotePaths, instanceKey string, caPubKeys []ssh.PublicKey) error {
 	return f.record(fakePushCall{op: "clear", path: paths.ConfigTarget})
 }
 

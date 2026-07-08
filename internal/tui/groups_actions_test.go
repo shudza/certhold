@@ -43,7 +43,7 @@ func (p recPusher) ReadFile(context.Context, string) ([]byte, error) {
 	return []byte(`cert-authority,principals="manager,infra" ` + p.rec.caLine + "\n"), nil
 }
 func (p recPusher) SpliceConfigBlock(context.Context, string, string, string) error { return nil }
-func (p recPusher) ClearPeer(context.Context, peerfiles.RemotePaths, string, ssh.PublicKey) error {
+func (p recPusher) ClearPeer(context.Context, peerfiles.RemotePaths, string, []ssh.PublicKey) error {
 	return nil
 }
 func (p recPusher) ReloadSSHD(context.Context) error   { return nil }

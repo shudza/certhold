@@ -150,7 +150,8 @@ offers two ways to take a peer out of the fleet.
 **Default — `certhold revoke <name>` (clean decommission).** The manager SSHes
 into the (reachable) peer and strips certhold from it: this instance's keyed
 config block, its identity files (private key + cert), and its `cert-authority`
-trust line in `authorized_keys` — leaving other instances' lines untouched. Once
+trust lines in `authorized_keys` — the active CA's line and any stale line left
+by an archived pre-rekey CA — leaving other instances' lines untouched. Once
 the peer is clean, its row is **hard-deleted** from the manager. Nothing else in
 the fleet is touched, and the CA is not rotated. This is the everyday "retire a
 machine" path. It requires the peer to be reachable and to accept inbound SSH:
@@ -162,12 +163,16 @@ machine" path. It requires the peer to be reachable and to accept inbound SSH:
   manager's view stays accurate); use `remove` or `--rekey`.
 
 **`certhold revoke --rekey <name>` (compromised or unreachable peer).** This never
-contacts the revoked host. It rotates the entire CA and reissues a fresh cert to
-**every other** peer, then deletes the revoked row. The revoked peer never
-receives a new cert, and its old cert was signed by the now-retired CA, so it
-stops being accepted as the new CA propagates across the fleet. Its standing pull
-token is refused once the row is gone (`GET /pull/<token>` and `…/rev` answer
-`410`), so a client-style peer cannot pull its way back in either.
+contacts the revoked host. It flags the row revoked, rotates the entire CA and
+reissues a fresh cert to **every other** peer, then deletes the revoked row. The
+revoked peer never receives a new cert, and its old cert was signed by the
+now-retired CA, so it stops being accepted as the new CA propagates across the
+fleet. Its standing pull token is refused once the row is gone
+(`GET /pull/<token>` and `…/rev` answer `404`), so a client-style peer cannot
+pull its way back in either. If the rotation fails before doing anything (e.g.
+a wrong CA passphrase), the row is kept and stays flagged revoked: the peer
+remains visible in `list`, its old cert is **still valid** until a rekey
+succeeds, and re-running the same command retries.
 
 `--rekey` reuses the [rekey](#rekey) engine, so it is **resilient to unreachable
 peers** (see below): an offline remaining peer becomes a reported straggler
@@ -280,8 +285,8 @@ the new-CA cert from `serve` and restores its access; no archived-CA recovery
 dance is needed, because a client-style peer trusts no CA inbound — only its own
 cert changes. After a `revoke --rekey`, run `certhold-cli refresh` on each
 remaining client-style peer for the same reason. The revoked peer itself gets
-`410` from the pull endpoints and stays cut off. (The default `revoke` rotates
-nothing, so it triggers no client-peer refresh.)
+`404` from the pull endpoints once its row is deleted and stays cut off. (The
+default `revoke` rotates nothing, so it triggers no client-peer refresh.)
 
 ### Passphrase across rotation
 

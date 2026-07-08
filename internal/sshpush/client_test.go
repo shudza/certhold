@@ -867,13 +867,29 @@ func TestClearPeer_RemovesEverything(t *testing.T) {
 	if err := os.WriteFile(paths.ConfigTarget, []byte(userCfg+peerfiles.V2SshClientBlock(key)+foreign), 0600); err != nil {
 		t.Fatalf("seed config: %v", err)
 	}
+	// A straggler peer that missed a past rekey still carries a line for this
+	// instance's ARCHIVED old CA next to the active one; a foreign instance's
+	// line must survive the clear untouched.
+	_, _, archivedPub, err := ca.GeneratePeerKey()
+	if err != nil {
+		t.Fatalf("generate archived ca key: %v", err)
+	}
+	_, _, foreignPub, err := ca.GeneratePeerKey()
+	if err != nil {
+		t.Fatalf("generate foreign ca key: %v", err)
+	}
 	caTrim := strings.TrimRight(string(ssh.MarshalAuthorizedKey(env.caPubKey)), "\n")
-	ak := "ssh-ed25519 AAAAuser u@h\ncert-authority,principals=\"manager,web\" " + caTrim + "\n"
+	archivedTrim := strings.TrimRight(string(ssh.MarshalAuthorizedKey(archivedPub)), "\n")
+	foreignTrim := strings.TrimRight(string(ssh.MarshalAuthorizedKey(foreignPub)), "\n")
+	ak := "ssh-ed25519 AAAAuser u@h\n" +
+		"cert-authority,principals=\"manager,web\" " + caTrim + "\n" +
+		"cert-authority,principals=\"manager,web\" " + archivedTrim + "\n" +
+		"cert-authority,principals=\"manager\" " + foreignTrim + "\n"
 	if err := os.WriteFile(paths.AuthorizedKeys, []byte(ak), 0600); err != nil {
 		t.Fatalf("seed authorized_keys: %v", err)
 	}
 
-	if err := cl.ClearPeer(ctx, paths, key, env.caPubKey); err != nil {
+	if err := cl.ClearPeer(ctx, paths, key, []ssh.PublicKey{env.caPubKey, archivedPub}); err != nil {
 		t.Fatalf("ClearPeer: %v", err)
 	}
 
@@ -896,7 +912,13 @@ func TestClearPeer_RemovesEverything(t *testing.T) {
 		t.Fatalf("read authorized_keys: %v", err)
 	}
 	if strings.Contains(string(gotAK), caTrim) {
-		t.Errorf("cert-authority line survived:\n%s", gotAK)
+		t.Errorf("active-CA cert-authority line survived:\n%s", gotAK)
+	}
+	if strings.Contains(string(gotAK), archivedTrim) {
+		t.Errorf("archived-old-CA cert-authority line survived:\n%s", gotAK)
+	}
+	if !strings.Contains(string(gotAK), foreignTrim) {
+		t.Errorf("foreign instance's cert-authority line was removed:\n%s", gotAK)
 	}
 	if !strings.Contains(string(gotAK), "ssh-ed25519 AAAAuser u@h") {
 		t.Errorf("user authorized_keys line dropped:\n%s", gotAK)
@@ -928,7 +950,7 @@ func TestClearPeer_IdempotentAndMissingFilesOK(t *testing.T) {
 	}
 
 	for i := 0; i < 2; i++ {
-		if err := cl.ClearPeer(ctx, paths, key, env.caPubKey); err != nil {
+		if err := cl.ClearPeer(ctx, paths, key, []ssh.PublicKey{env.caPubKey}); err != nil {
 			t.Fatalf("ClearPeer on missing files #%d returned error: %v", i+1, err)
 		}
 	}

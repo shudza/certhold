@@ -89,11 +89,15 @@ func (p *fakePusher) SpliceConfigBlock(ctx context.Context, configPath, instance
 	return nil
 }
 
-func (p *fakePusher) ClearPeer(ctx context.Context, paths peerfiles.RemotePaths, instanceKey string, caPubKey ssh.PublicKey) error {
+func (p *fakePusher) ClearPeer(ctx context.Context, paths peerfiles.RemotePaths, instanceKey string, caPubKeys []ssh.PublicKey) error {
 	p.d.mu.Lock()
 	clearErr := p.d.clearErr[p.host]
 	p.d.mu.Unlock()
-	p.record("clear", paths.ConfigTarget, nil)
+	var keys []byte
+	for _, k := range caPubKeys {
+		keys = append(keys, ssh.MarshalAuthorizedKey(k)...)
+	}
+	p.record("clear", paths.ConfigTarget, keys)
 	return clearErr
 }
 
@@ -561,10 +565,27 @@ func TestRevokeRekeyRotatesAndDeletes(t *testing.T) {
 	if _, err := d.GetPeer(ctx, "alpha"); !errors.Is(err, db.ErrPeerNotFound) {
 		t.Errorf("alpha row should be deleted, got err=%v", err)
 	}
+	sawBetaSplice := false
 	for _, c := range dialer.snapshot() {
 		if c.host == "alpha" {
 			t.Errorf("revoked alpha must never be contacted: %+v", c)
 		}
+		// Configs pushed during the rotation must exclude the revoked peer but
+		// still carry the surviving hosts.
+		if c.op == "splice" {
+			if strings.Contains(string(c.content), "alpha") {
+				t.Errorf("config pushed to %s during rotation includes revoked alpha:\n%s", c.host, c.content)
+			}
+			if c.host == "beta" {
+				sawBetaSplice = true
+				if !strings.Contains(string(c.content), "Host mgr") {
+					t.Errorf("config pushed to beta lost surviving host mgr:\n%s", c.content)
+				}
+			}
+		}
+	}
+	if !sawBetaSplice {
+		t.Error("no config block was pushed to beta during the rotation")
 	}
 
 	// The CA was rotated: ca.pub changed.
@@ -606,6 +627,153 @@ func TestRevokeRekeyRotatesAndDeletes(t *testing.T) {
 		if err := checker.CheckCert(name, cert); err != nil {
 			t.Errorf("%s cert does not validate against the rotated CA: %v", name, err)
 		}
+	}
+}
+
+// TestRevokeRekeyFailureFlagsRowAndRetries: a Rekey precondition failure (here
+// a leftover ca.next, same shape as a wrong CA passphrase — both fail before
+// any rotation) must NOT hard-delete the peer. The row survives flagged
+// revoked so `list` keeps showing it, the error spells out that the old cert
+// is still valid and how to retry, and a retried `revoke --rekey` converges:
+// it rotates the CA and deletes the row.
+func TestRevokeRekeyFailureFlagsRowAndRetries(t *testing.T) {
+	dataDir, d := setupOpsEnv(t, "alpha", "beta", "mgr")
+	ctx := context.Background()
+
+	oldCAPub, err := os.ReadFile(filepath.Join(dataDir, "ca", "ca.pub"))
+	if err != nil {
+		t.Fatalf("read ca.pub: %v", err)
+	}
+	nextDir := filepath.Join(dataDir, "ca.next")
+	if err := os.MkdirAll(nextDir, 0700); err != nil {
+		t.Fatalf("stage ca.next: %v", err)
+	}
+
+	dialer := &fakeDialer{}
+	var events []Event
+	deps := collectingDeps(dataDir, d, dialer, &events)
+
+	err = RevokePeer(ctx, deps, "alpha", "mgr", true)
+	if err == nil {
+		t.Fatal("expected rekey failure with pre-existing ca.next")
+	}
+	for _, want := range []string{"flagged revoked", "STILL VALID", "certhold revoke --rekey alpha"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %q, want it to mention %q", err, want)
+		}
+	}
+
+	p, err := d.GetPeer(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("alpha row must survive a failed rekey-revoke: %v", err)
+	}
+	if !p.Revoked {
+		t.Error("alpha must be flagged revoked after the failed rekey-revoke")
+	}
+	caPubAfter, err := os.ReadFile(filepath.Join(dataDir, "ca", "ca.pub"))
+	if err != nil {
+		t.Fatalf("read ca.pub after failure: %v", err)
+	}
+	if !bytes.Equal(caPubAfter, oldCAPub) {
+		t.Error("CA must not rotate when the rekey precondition fails")
+	}
+	if got := dialer.dialedHosts; len(got) != 0 {
+		t.Errorf("no peer may be dialed on a precondition failure, got %v", got)
+	}
+
+	// Retry after resolving the ca.next conflict: entry GetPeer and
+	// SetPeerRevoked both accept the already-revoked row, the rotation runs,
+	// and only then is the row deleted.
+	if err := os.RemoveAll(nextDir); err != nil {
+		t.Fatalf("remove ca.next: %v", err)
+	}
+	if err := RevokePeer(ctx, deps, "alpha", "mgr", true); err != nil {
+		t.Fatalf("retried revoke --rekey must succeed: %v", err)
+	}
+	if _, err := d.GetPeer(ctx, "alpha"); !errors.Is(err, db.ErrPeerNotFound) {
+		t.Errorf("alpha row should be deleted after the successful retry, got err=%v", err)
+	}
+	caPubRetry, err := os.ReadFile(filepath.Join(dataDir, "ca", "ca.pub"))
+	if err != nil {
+		t.Fatalf("read ca.pub after retry: %v", err)
+	}
+	if bytes.Equal(caPubRetry, oldCAPub) {
+		t.Error("CA did not rotate on the successful retry")
+	}
+	for _, c := range dialer.snapshot() {
+		if c.host == "alpha" {
+			t.Errorf("revoked alpha must never be contacted: %+v", c)
+		}
+	}
+}
+
+// normalizedAKLine parses an authorized_keys-format public key and re-marshals
+// it, so comparisons ignore comments and trailing whitespace.
+func normalizedAKLine(t *testing.T, ak []byte) string {
+	t.Helper()
+	pub, _, _, _, err := ssh.ParseAuthorizedKey(ak)
+	if err != nil {
+		t.Fatalf("parse authorized key %q: %v", ak, err)
+	}
+	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pub)))
+}
+
+// TestRevokeClearIncludesArchivedCAKeys: the default revoke hands ClearPeer the
+// active CA key plus every readable archived ca.old.* key, so a straggler's
+// stale old-CA trust line is stripped too; an archive with no readable ca.pub
+// only warns and the revoke still completes.
+func TestRevokeClearIncludesArchivedCAKeys(t *testing.T) {
+	dataDir, d := setupOpsEnv(t, "alpha", "mgr")
+	ctx := context.Background()
+
+	archived, err := ca.Generate(filepath.Join(dataDir, "ca.old.20250101T000000"))
+	if err != nil {
+		t.Fatalf("generate archived ca: %v", err)
+	}
+	damagedDir := filepath.Join(dataDir, "ca.old.20250202T000000")
+	if err := os.MkdirAll(damagedDir, 0700); err != nil {
+		t.Fatalf("mkdir damaged archive: %v", err)
+	}
+
+	dialer := &fakeDialer{}
+	var events []Event
+	deps := collectingDeps(dataDir, d, dialer, &events)
+
+	if err := RevokePeer(ctx, deps, "alpha", "mgr", false); err != nil {
+		t.Fatalf("RevokePeer: %v", err)
+	}
+
+	activePub, err := os.ReadFile(filepath.Join(dataDir, "ca", "ca.pub"))
+	if err != nil {
+		t.Fatalf("read active ca.pub: %v", err)
+	}
+	var clearKeys string
+	for _, c := range dialer.snapshot() {
+		if c.op == "clear" {
+			clearKeys = string(c.content)
+		}
+	}
+	if clearKeys == "" {
+		t.Fatal("ClearPeer was not called")
+	}
+	if !strings.Contains(clearKeys, normalizedAKLine(t, activePub)) {
+		t.Errorf("ClearPeer keys missing the active CA key:\n%s", clearKeys)
+	}
+	if !strings.Contains(clearKeys, normalizedAKLine(t, archived.PublicKeyAuthorizedKey())) {
+		t.Errorf("ClearPeer keys missing the archived old-CA key:\n%s", clearKeys)
+	}
+
+	sawWarn := false
+	for _, e := range events {
+		if e.Type == EventWarn && strings.Contains(e.Msg, damagedDir) {
+			sawWarn = true
+		}
+	}
+	if !sawWarn {
+		t.Errorf("expected a warning naming the unreadable archive %s; events=%+v", damagedDir, events)
+	}
+	if _, err := d.GetPeer(ctx, "alpha"); !errors.Is(err, db.ErrPeerNotFound) {
+		t.Errorf("revoke must still delete the row despite a damaged archive, got err=%v", err)
 	}
 }
 
