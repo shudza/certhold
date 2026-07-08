@@ -294,14 +294,16 @@ func (c *Client) SpliceConfigBlock(ctx context.Context, configPath string, insta
 }
 
 // ClearPeer is the inverse of install for a single reachable peer: it strips
-// this instance's keyed config block from ~/.ssh/config, removes the matching
-// cert-authority line from ~/.ssh/authorized_keys, and deletes the instance's
-// identity files (private key + cert). Every step is best-effort and idempotent:
-// a missing file is not an error, so re-running on an already-cleared peer is a
-// no-op. Host-key verification and auth are unchanged from any other push.
+// this instance's keyed config block from ~/.ssh/config, removes every
+// cert-authority line matching one of caPubKeys (this instance's active CA plus
+// any archived pre-rekey CAs, so a straggler's stale trust line goes too) from
+// ~/.ssh/authorized_keys, and deletes the instance's identity files (private
+// key + cert). Every step is best-effort and idempotent: a missing file is not
+// an error, so re-running on an already-cleared peer is a no-op. Host-key
+// verification and auth are unchanged from any other push.
 //
 // The signature is a cross-task contract consumed by the redesigned revoke flow.
-func (c *Client) ClearPeer(ctx context.Context, paths peerfiles.RemotePaths, instanceKey string, caPubKey ssh.PublicKey) error {
+func (c *Client) ClearPeer(ctx context.Context, paths peerfiles.RemotePaths, instanceKey string, caPubKeys []ssh.PublicKey) error {
 	c.mu.Lock()
 	cl := c.client
 	c.mu.Unlock()
@@ -327,7 +329,7 @@ func (c *Client) ClearPeer(ctx context.Context, paths peerfiles.RemotePaths, ins
 		return fmt.Errorf("read authorized_keys %s: %w", paths.AuthorizedKeys, err)
 	}
 	if present {
-		stripped := peerfiles.StripCALine(ak, caPubKey)
+		stripped := peerfiles.StripCALine(ak, caPubKeys...)
 		if !bytes.Equal(stripped, ak) {
 			if err := c.WriteFileAtomic(ctx, paths.AuthorizedKeys, stripped, 0o600); err != nil {
 				return fmt.Errorf("rewrite authorized_keys %s: %w", paths.AuthorizedKeys, err)

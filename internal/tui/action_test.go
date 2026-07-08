@@ -28,7 +28,7 @@ type fakePusher struct{}
 func (p fakePusher) WriteFileAtomic(context.Context, string, []byte, fs.FileMode) error { return nil }
 func (p fakePusher) ReadFile(context.Context, string) ([]byte, error)                   { return nil, nil }
 func (p fakePusher) SpliceConfigBlock(context.Context, string, string, string) error    { return nil }
-func (p fakePusher) ClearPeer(context.Context, peerfiles.RemotePaths, string, ssh.PublicKey) error {
+func (p fakePusher) ClearPeer(context.Context, peerfiles.RemotePaths, string, []ssh.PublicKey) error {
 	return nil
 }
 func (p fakePusher) ReloadSSHD(context.Context) error   { return nil }

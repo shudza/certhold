@@ -80,7 +80,7 @@ func (m *rekeyMockPusher) SpliceConfigBlock(ctx context.Context, p, instanceKey,
 	return nil
 }
 
-func (m *rekeyMockPusher) ClearPeer(ctx context.Context, paths peerfiles.RemotePaths, instanceKey string, caPubKey ssh.PublicKey) error {
+func (m *rekeyMockPusher) ClearPeer(ctx context.Context, paths peerfiles.RemotePaths, instanceKey string, caPubKeys []ssh.PublicKey) error {
 	m.rec.mu.Lock()
 	defer m.rec.mu.Unlock()
 	if err, ok := m.rec.failOn["clear:"+m.host]; ok {

@@ -270,7 +270,7 @@ type stubPusher struct{}
 func (stubPusher) WriteFileAtomic(context.Context, string, []byte, fs.FileMode) error { return nil }
 func (stubPusher) ReadFile(context.Context, string) ([]byte, error)                   { return nil, nil }
 func (stubPusher) SpliceConfigBlock(context.Context, string, string, string) error    { return nil }
-func (stubPusher) ClearPeer(context.Context, peerfiles.RemotePaths, string, ssh.PublicKey) error {
+func (stubPusher) ClearPeer(context.Context, peerfiles.RemotePaths, string, []ssh.PublicKey) error {
 	return nil
 }
 func (stubPusher) ReloadSSHD(context.Context) error   { return nil }

@@ -22,12 +22,17 @@ func StripBlock(existing []byte, instanceKey string) []byte {
 	return re.ReplaceAll(existing, nil)
 }
 
-// StripCALine removes the cert-authority line whose key matches caPubKey from an
-// authorized_keys body, reusing the matching logic in authorized.go. Every other
-// line — including a cert-authority line for a different CA — is preserved
-// verbatim. With no matching line present the input is returned unchanged.
-func StripCALine(existing []byte, caPubKey ssh.PublicKey) []byte {
-	caMarshalled := caPubKey.Marshal()
+// StripCALine removes every cert-authority line whose key matches one of
+// caPubKeys from an authorized_keys body, reusing the matching logic in
+// authorized.go. Multiple keys let revoke strip this instance's active AND
+// archived (pre-rekey) CA lines in one pass. Every other line — including a
+// cert-authority line for a different instance's CA — is preserved verbatim.
+// With no matching line present the input is returned unchanged.
+func StripCALine(existing []byte, caPubKeys ...ssh.PublicKey) []byte {
+	marshalled := make([][]byte, len(caPubKeys))
+	for i, k := range caPubKeys {
+		marshalled[i] = k.Marshal()
+	}
 
 	var out bytes.Buffer
 	scanner := newLineScanner(existing)
@@ -39,10 +44,16 @@ func StripCALine(existing []byte, caPubKey ssh.PublicKey) []byte {
 			writeLine(&out, line)
 			continue
 		}
-		matched, err := lineMatchesCA(trim, caMarshalled)
-		if err != nil || !matched {
+		mine := false
+		for _, m := range marshalled {
+			matched, err := lineMatchesCA(trim, m)
+			if err == nil && matched {
+				mine = true
+				break
+			}
+		}
+		if !mine {
 			writeLine(&out, line)
-			continue
 		}
 	}
 	return out.Bytes()

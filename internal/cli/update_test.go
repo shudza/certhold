@@ -62,7 +62,7 @@ func (m *mockPusher) ReloadSSHD(ctx context.Context) error {
 	return nil
 }
 
-func (m *mockPusher) ClearPeer(ctx context.Context, paths peerfiles.RemotePaths, instanceKey string, caPubKey ssh.PublicKey) error {
+func (m *mockPusher) ClearPeer(ctx context.Context, paths peerfiles.RemotePaths, instanceKey string, caPubKeys []ssh.PublicKey) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.calls = append(m.calls, mockCall{op: "clear", path: paths.ConfigTarget})
