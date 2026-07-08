@@ -33,7 +33,14 @@ type textModal struct {
 func newTextModal(heading, prompt, initial string, kind textKind, subject string) textModal {
 	ti := textinput.New()
 	ti.Prompt = prompt
-	ti.CharLimit = 64
+	// bubbles truncates in SetValue too, so a CharLimit below the stored value's
+	// length would silently corrupt a prefilled address on an untouched submit.
+	// Addresses get the validator's 255-byte budget; group names stay short.
+	if kind == textEditAddress {
+		ti.CharLimit = 255
+	} else {
+		ti.CharLimit = 64
+	}
 	ti.SetValue(initial)
 	ti.CursorEnd()
 	ti.Focus()

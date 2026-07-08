@@ -59,7 +59,7 @@ func newEnrollFormModal(groups []string, taken map[string]bool) enrollFormModal 
 	user.CharLimit = 64
 	addr := textinput.New()
 	addr.Prompt = ""
-	addr.CharLimit = 128
+	addr.CharLimit = 255
 
 	opts := append([]string(nil), groups...)
 	sort.Strings(opts)

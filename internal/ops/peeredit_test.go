@@ -86,6 +86,40 @@ func TestSetPeerAddressRejectsMissingPeer(t *testing.T) {
 	}
 }
 
+func TestSetPeerAddressRejectsInvalidWithoutStoring(t *testing.T) {
+	dataDir, d := setupOpsEnv(t, "alpha")
+	ctx := context.Background()
+	if err := d.SetPeerAddress(ctx, "alpha", "10.0.0.5"); err != nil {
+		t.Fatalf("seed address: %v", err)
+	}
+	before := fleetRev(t, d)
+
+	dialer := &fakeDialer{}
+	var events []Event
+	deps := collectingDeps(dataDir, d, dialer, &events)
+
+	for _, bad := range []string{"10.0.0.5 prod", "a\nProxyCommand evil", "host\t22", strings.Repeat("a", 300)} {
+		err := SetPeerAddress(ctx, deps, "alpha", bad)
+		if err == nil {
+			t.Fatalf("SetPeerAddress(%q) = nil, want error", bad)
+		}
+		if !strings.Contains(err.Error(), "invalid dial address") {
+			t.Errorf("SetPeerAddress(%q) err = %q, want invalid-dial-address", bad, err)
+		}
+	}
+
+	p, err := d.GetPeer(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if p.Address != "10.0.0.5" {
+		t.Errorf("address = %q after rejected updates, want 10.0.0.5 untouched", p.Address)
+	}
+	if after := fleetRev(t, d); after != before {
+		t.Errorf("fleet_rev bumped on rejected address (%q -> %q)", before, after)
+	}
+}
+
 func TestMakeClientStripsCALineAndFlipsInbound(t *testing.T) {
 	dataDir, d := setupOpsEnv(t, "alpha")
 	ctx := context.Background()

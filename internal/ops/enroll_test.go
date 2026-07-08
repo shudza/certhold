@@ -111,6 +111,37 @@ func TestMintEnrollClientSkipsAllowedGroups(t *testing.T) {
 	}
 }
 
+func TestMintEnrollRejectsInvalidAddressBeforeInsert(t *testing.T) {
+	dataDir, d := setupOpsEnv(t)
+	ctx := context.Background()
+	deps := Deps{DB: d, DataDir: dataDir}
+
+	_, err := MintEnroll(ctx, deps, EnrollSpec{
+		Name:    "vm1",
+		Groups:  []string{"infra"},
+		Allowed: []string{"infra"},
+		Address: "bad addr",
+		BaseURL: "https://certhold.home.lan",
+	})
+	if err == nil {
+		t.Fatal("expected invalid-address error")
+	}
+	if !strings.Contains(err.Error(), "invalid dial address") {
+		t.Errorf("err = %q, want invalid-dial-address", err)
+	}
+
+	if _, gerr := d.GetPeer(ctx, "vm1"); !errors.Is(gerr, db.ErrPeerNotFound) {
+		t.Errorf("peer vm1 must not be inserted; GetPeer err = %v, want ErrPeerNotFound", gerr)
+	}
+	rev, err := d.FleetRev(ctx)
+	if err != nil {
+		t.Fatalf("FleetRev: %v", err)
+	}
+	if rev != 0 {
+		t.Errorf("fleet rev = %d, want 0 after rejected enroll", rev)
+	}
+}
+
 // TestMintEnrollFailureRollsBackAll injects a tokens-insert failure via an
 // sqlite trigger on the same file: the peer, groups and token rows must all
 // roll back together.

@@ -150,6 +150,26 @@ func selectGroup(t *testing.T, m Model, name string) Model {
 	return m
 }
 
+// TestTextModalCharLimitPerKind: bubbles truncates in SetValue too, so the
+// edit-address modal must carry the validator's 255-byte budget or a long
+// prefilled address is silently corrupted on an untouched submit. Group-name
+// modals keep the short limit.
+func TestTextModalCharLimitPerKind(t *testing.T) {
+	long := strings.Repeat("a", 60) + ".very-long-subdomain.example.com" // 92 chars
+	tm := newTextModal("address alpha", "address: ", long, textEditAddress, "alpha")
+	if tm.input.CharLimit != 255 {
+		t.Errorf("edit-address CharLimit = %d, want 255", tm.input.CharLimit)
+	}
+	if got := tm.input.Value(); got != long {
+		t.Errorf("edit-address prefill truncated: %q (len %d), want len %d", got, len(got), len(long))
+	}
+
+	gm := newTextModal("rename infra", "new name: ", "infra", textRenameGroup, "infra")
+	if gm.input.CharLimit != 64 {
+		t.Errorf("group-name CharLimit = %d, want 64", gm.input.CharLimit)
+	}
+}
+
 // TestGroupCreate: n → type name → ops.GroupCreate; reload shows the new group.
 func TestGroupCreate(t *testing.T) {
 	dataDir, d, pass := seedActionEnv(t)
