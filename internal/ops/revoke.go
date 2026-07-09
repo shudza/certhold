@@ -47,8 +47,9 @@ func RevokePeer(ctx context.Context, deps Deps, name, hostname string, rekey boo
 	return revokeClear(ctx, deps, peer)
 }
 
-// revokeClear is the default path: clear certhold off the reachable peer, then
-// delete its row.
+// revokeClear is the default path: clear certhold off the reachable peer,
+// delete its row, and bump fleet_rev so other peers refresh on their next pull
+// and drop the revoked peer's Host alias.
 func revokeClear(ctx context.Context, deps Deps, peer *db.Peer) error {
 	name := peer.Name
 	if !peer.Inbound {
@@ -87,6 +88,9 @@ func revokeClear(ctx context.Context, deps Deps, peer *db.Peer) error {
 
 	if err := deps.DB.DeletePeer(ctx, name); err != nil {
 		return fmt.Errorf("delete peer %q: %w", name, err)
+	}
+	if err := deps.DB.BumpFleetRev(ctx); err != nil {
+		return fmt.Errorf("bump fleet_rev: %w", err)
 	}
 	deps.emit(Event{Type: EventPeerDone, Peer: name, Msg: fmt.Sprintf("cleared and removed %s", name)})
 	deps.info(name, fmt.Sprintf("Revoked %s: certhold stripped from the peer and its row deleted.", name))
