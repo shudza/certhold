@@ -45,10 +45,14 @@ func SetPeerAddress(ctx context.Context, deps Deps, name, address string) error 
 // inbound -> client). While the peer is still reachable it is dialed and its
 // ~/.ssh/authorized_keys is rewritten with the CA cert-authority line removed,
 // so it stops accepting fleet inbound SSH; its own identity/config is left
-// intact so outbound keeps working. Only on a successful push is inbound set
-// false and fleet_rev bumped — a dial/push failure returns the error and leaves
-// the peer marked inbound (it still accepts inbound, so the DB must reflect
-// that). An already-client peer is a clear no-op. hostname anchors the manager's
+// intact so outbound keeps working. A failure before the stripped
+// authorized_keys lands (dial/read/write) returns the error and leaves the
+// peer marked inbound (it still accepts inbound, so the DB must reflect that).
+// Once the strip write succeeds the peer no longer trusts the CA and the
+// manager can never dial it again, so the conversion is committed to the DB
+// immediately; the trailing health check is best-effort — its failure is
+// reported as a warning, not an error, and the conversion stands. An
+// already-client peer is a clear no-op. hostname anchors the manager's
 // self-push identity (its own peer name).
 func MakeClient(ctx context.Context, deps Deps, name, hostname string) error {
 	if err := guardNotSelfPeer("convert to client", name, hostname); err != nil {
@@ -100,15 +104,20 @@ func MakeClient(ctx context.Context, deps Deps, name, hostname string) error {
 	if err := pusher.WriteFileAtomic(ctx, remote, stripped, fs.FileMode(0644)); err != nil {
 		return fail(fmt.Errorf("write %s: %w", remote, err))
 	}
-	if err := pusher.VerifyHealth(ctx); err != nil {
-		return fail(fmt.Errorf("verify health: %w", err))
-	}
 
+	// The strip has landed: this was the manager's last possible dial to the
+	// peer. Commit the conversion before anything that can still fail — a DB
+	// left saying inbound=1 here would be unfixable by retrying (no retry can
+	// dial the peer anymore).
 	if err := deps.DB.SetPeerInbound(ctx, name, false); err != nil {
-		return fail(fmt.Errorf("set peer inbound: %w", err))
+		return fail(fmt.Errorf("peer %s: inbound trust was already stripped on the host, but recording the conversion failed (set peer inbound: %v); the DB is out of sync — it still marks the peer inbound, yet the manager can no longer dial it, so retrying make-client cannot work; run 'certhold remove %s' and re-enroll it with --client, or repair the DB by setting the peer's inbound to 0", name, err, name))
 	}
 	if err := deps.DB.BumpFleetRev(ctx); err != nil {
-		return fail(fmt.Errorf("bump fleet_rev: %w", err))
+		return fail(fmt.Errorf("peer %s converted to client (inbound trust stripped and recorded), but bumping fleet_rev failed: %v; other peers may keep a stale Host entry for it until the next fleet change", name, err))
+	}
+
+	if err := pusher.VerifyHealth(ctx); err != nil {
+		deps.warn(name, fmt.Sprintf("peer %s converted to client; health verification failed: %v", name, err))
 	}
 
 	deps.emit(Event{Type: EventPeerDone, Peer: name, Msg: fmt.Sprintf("peer %s converted to client; it no longer accepts fleet inbound SSH", name)})
