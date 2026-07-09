@@ -199,6 +199,118 @@ func TestMakeClientAlreadyClientNoOp(t *testing.T) {
 	}
 }
 
+func TestMakeClientHealthFailureAfterStripCommitsConversion(t *testing.T) {
+	dataDir, d := setupOpsEnv(t, "alpha")
+	ctx := context.Background()
+	before := fleetRev(t, d)
+
+	caLine := opsCALine(t, dataDir, "manager", "infra")
+	dialer := &fakeDialer{
+		readData:  map[string][]byte{"/root/.ssh/authorized_keys": caLine},
+		verifyErr: map[string]error{"alpha": errors.New("health probe timed out")},
+	}
+	var events []Event
+	deps := collectingDeps(dataDir, d, dialer, &events)
+
+	// The strip landed on the peer, so it no longer trusts the CA and can
+	// never be dialed again; the conversion must be committed even though the
+	// trailing health check failed.
+	if err := MakeClient(ctx, deps, "alpha", "mgr"); err != nil {
+		t.Fatalf("MakeClient with post-strip health failure must succeed, got: %v", err)
+	}
+
+	p, err := d.GetPeer(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if p.Inbound {
+		t.Error("inbound must be false: the strip landed, so the conversion must be committed")
+	}
+	if after := fleetRev(t, d); after == before {
+		t.Errorf("fleet_rev not bumped (still %q)", after)
+	}
+
+	var warned bool
+	for _, e := range events {
+		if e.Type == EventWarn && strings.Contains(e.Msg, "health verification failed") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Errorf("expected a health-verification warning event, got %+v", events)
+	}
+	if got := eventTypes(events); got[len(got)-1] != EventPeerDone {
+		t.Errorf("event types = %v, want trailing PeerDone", got)
+	}
+
+	// Retry converges: the peer is already a client, so a re-run is a clear
+	// no-op that dials nothing.
+	dialed := len(dialer.dialedHosts)
+	events = events[:0]
+	if err := MakeClient(ctx, deps, "alpha", "mgr"); err != nil {
+		t.Fatalf("MakeClient retry must be a no-op, got: %v", err)
+	}
+	if len(dialer.dialedHosts) != dialed {
+		t.Errorf("retry must not dial; dialed=%v", dialer.dialedHosts)
+	}
+	if len(events) != 1 || events[0].Type != EventInfo || !strings.Contains(events[0].Msg, "already a client") {
+		t.Errorf("retry events = %+v, want one info no-op notice", events)
+	}
+}
+
+func TestMakeClientWriteFailureLeavesInbound(t *testing.T) {
+	dataDir, d := setupOpsEnv(t, "alpha")
+	ctx := context.Background()
+	before := fleetRev(t, d)
+
+	caLine := opsCALine(t, dataDir, "manager", "infra")
+	dialer := &fakeDialer{
+		readData: map[string][]byte{"/root/.ssh/authorized_keys": caLine},
+		writeErr: map[string]error{"alpha": errors.New("disk full")},
+	}
+	var events []Event
+	deps := collectingDeps(dataDir, d, dialer, &events)
+
+	// The strip never landed: the peer still trusts the CA and accepts fleet
+	// inbound SSH, so the DB must keep saying so and a later retry must still
+	// be able to dial it.
+	err := MakeClient(ctx, deps, "alpha", "mgr")
+	if err == nil {
+		t.Fatal("expected write error")
+	}
+	if !strings.Contains(err.Error(), "write") || !strings.Contains(err.Error(), "disk full") {
+		t.Errorf("err = %q, want wrapped write failure", err)
+	}
+	p, err := d.GetPeer(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if !p.Inbound {
+		t.Error("inbound must remain true after a failed strip write")
+	}
+	if after := fleetRev(t, d); after != before {
+		t.Errorf("fleet_rev bumped on failed strip write (%q -> %q)", before, after)
+	}
+	if got := eventTypes(events); len(got) != 2 || got[0] != EventPeerStart || got[1] != EventPeerFailed {
+		t.Errorf("event types = %v, want [PeerStart PeerFailed]", got)
+	}
+
+	// Retry after the transient failure clears succeeds and converges.
+	dialer.mu.Lock()
+	delete(dialer.writeErr, "alpha")
+	dialer.mu.Unlock()
+	if err := MakeClient(ctx, deps, "alpha", "mgr"); err != nil {
+		t.Fatalf("MakeClient retry after cleared write failure: %v", err)
+	}
+	p, err = d.GetPeer(ctx, "alpha")
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if p.Inbound {
+		t.Error("inbound must be false after successful retry")
+	}
+}
+
 func TestMakeClientDialFailureLeavesInbound(t *testing.T) {
 	dataDir, d := setupOpsEnv(t, "alpha")
 	ctx := context.Background()

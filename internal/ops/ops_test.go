@@ -32,6 +32,8 @@ type fakeDialer struct {
 	calls       []fakeCall
 	failDial    map[string]error
 	clearErr    map[string]error
+	writeErr    map[string]error
+	verifyErr   map[string]error
 	readData    map[string][]byte
 	dialedHosts []string
 	captureSeen bool
@@ -70,6 +72,12 @@ func (p *fakePusher) record(op, path string, content []byte) {
 }
 
 func (p *fakePusher) WriteFileAtomic(ctx context.Context, remotePath string, content []byte, mode fs.FileMode) error {
+	p.d.mu.Lock()
+	writeErr := p.d.writeErr[p.host]
+	p.d.mu.Unlock()
+	if writeErr != nil {
+		return writeErr
+	}
 	p.record("write", remotePath, content)
 	return nil
 }
@@ -108,7 +116,9 @@ func (p *fakePusher) ReloadSSHD(ctx context.Context) error {
 
 func (p *fakePusher) VerifyHealth(ctx context.Context) error {
 	p.record("verify", "", nil)
-	return nil
+	p.d.mu.Lock()
+	defer p.d.mu.Unlock()
+	return p.d.verifyErr[p.host]
 }
 
 func (p *fakePusher) Close() error { return nil }
