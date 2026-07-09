@@ -446,12 +446,17 @@ func TestRekeyAbortEmitsWarnAndReturnsCause(t *testing.T) {
 func TestRevokeDefaultClearsAndDeletes(t *testing.T) {
 	dataDir, d := setupOpsEnv(t, "alpha", "beta", "mgr")
 	ctx := context.Background()
+	revBefore := fleetRevInt(t, d)
 	dialer := &fakeDialer{}
 	var events []Event
 	deps := collectingDeps(dataDir, d, dialer, &events)
 
 	if err := RevokePeer(ctx, deps, "alpha", "mgr", false); err != nil {
 		t.Fatalf("RevokePeer: %v", err)
+	}
+
+	if revAfter := fleetRevInt(t, d); revAfter <= revBefore {
+		t.Errorf("fleet_rev = %d after revoke, want strictly greater than %d", revAfter, revBefore)
 	}
 
 	if _, err := d.GetPeer(ctx, "alpha"); !errors.Is(err, db.ErrPeerNotFound) {
@@ -515,6 +520,7 @@ func TestRevokeDefaultClientPeerErrorsWithoutDial(t *testing.T) {
 func TestRevokeDefaultDialFailurePreservesRow(t *testing.T) {
 	dataDir, d := setupOpsEnv(t, "alpha", "mgr")
 	ctx := context.Background()
+	revBefore := fleetRevInt(t, d)
 	dialer := &fakeDialer{failDial: map[string]error{"alpha": errors.New("connection refused")}}
 	var events []Event
 	deps := collectingDeps(dataDir, d, dialer, &events)
@@ -529,6 +535,9 @@ func TestRevokeDefaultDialFailurePreservesRow(t *testing.T) {
 	if _, err := d.GetPeer(ctx, "alpha"); err != nil {
 		t.Errorf("alpha row must be preserved on dial failure: %v", err)
 	}
+	if revAfter := fleetRevInt(t, d); revAfter != revBefore {
+		t.Errorf("fleet_rev must be unchanged on failed revoke; %d -> %d", revBefore, revAfter)
+	}
 }
 
 // TestRevokeDefaultClearFailurePreservesRow: a dial that succeeds but ClearPeer
@@ -536,6 +545,7 @@ func TestRevokeDefaultDialFailurePreservesRow(t *testing.T) {
 func TestRevokeDefaultClearFailurePreservesRow(t *testing.T) {
 	dataDir, d := setupOpsEnv(t, "alpha", "mgr")
 	ctx := context.Background()
+	revBefore := fleetRevInt(t, d)
 	dialer := &fakeDialer{clearErr: map[string]error{"alpha": errors.New("permission denied")}}
 	var events []Event
 	deps := collectingDeps(dataDir, d, dialer, &events)
@@ -549,6 +559,52 @@ func TestRevokeDefaultClearFailurePreservesRow(t *testing.T) {
 	}
 	if _, err := d.GetPeer(ctx, "alpha"); err != nil {
 		t.Errorf("alpha row must be preserved on clear failure: %v", err)
+	}
+	if revAfter := fleetRevInt(t, d); revAfter != revBefore {
+		t.Errorf("fleet_rev must be unchanged on failed revoke; %d -> %d", revBefore, revAfter)
+	}
+}
+
+// TestRevokeUnknownPeerDoesNotBumpFleetRev: a revoke of a nonexistent peer
+// fails before any deletion, so fleet_rev must be unchanged.
+func TestRevokeUnknownPeerDoesNotBumpFleetRev(t *testing.T) {
+	dataDir, d := setupOpsEnv(t, "mgr")
+	ctx := context.Background()
+	revBefore := fleetRevInt(t, d)
+	dialer := &fakeDialer{}
+	var events []Event
+	deps := collectingDeps(dataDir, d, dialer, &events)
+
+	err := RevokePeer(ctx, deps, "nosuch", "mgr", false)
+	if err == nil {
+		t.Fatal("expected error for unknown peer")
+	}
+	if !errors.Is(err, db.ErrPeerNotFound) {
+		t.Errorf("error does not wrap ErrPeerNotFound: %v", err)
+	}
+	if revAfter := fleetRevInt(t, d); revAfter != revBefore {
+		t.Errorf("fleet_rev must be unchanged on failed revoke; %d -> %d", revBefore, revAfter)
+	}
+}
+
+// TestRevokeSelfGuardRefusalDoesNotBumpFleetRev: the T152 self-guard refusal
+// happens before any peer contact or deletion, so fleet_rev must be unchanged.
+func TestRevokeSelfGuardRefusalDoesNotBumpFleetRev(t *testing.T) {
+	dataDir, d := setupOpsEnv(t, "mgr", "alpha")
+	ctx := context.Background()
+	revBefore := fleetRevInt(t, d)
+	dialer := &fakeDialer{}
+	var events []Event
+	deps := collectingDeps(dataDir, d, dialer, &events)
+
+	if err := RevokePeer(ctx, deps, "mgr", "mgr", false); err == nil {
+		t.Fatal("expected self-guard refusal")
+	}
+	if _, err := d.GetPeer(ctx, "mgr"); err != nil {
+		t.Errorf("mgr row must be preserved on refused self revoke: %v", err)
+	}
+	if revAfter := fleetRevInt(t, d); revAfter != revBefore {
+		t.Errorf("fleet_rev must be unchanged on refused self revoke; %d -> %d", revBefore, revAfter)
 	}
 }
 
