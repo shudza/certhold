@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -166,24 +167,40 @@ func MintEnroll(ctx context.Context, deps Deps, spec EnrollSpec) (EnrollResult, 
 // reachableHostEntries mirrors db.ReachableHosts for a peer that is not yet
 // inserted: its groups are known up front, so the reachable set is computed
 // before the enrollment transaction opens (the single-connection DB cannot
-// serve reads while a tx is held).
+// serve reads while a tx is held). It must stay in sync with db.ReachableHosts:
+// peers that allow one of the groups, OR — when groups contain the manager
+// principal — every inbound non-revoked peer, deduped and ordered by name.
 func reachableHostEntries(ctx context.Context, d *db.DB, peerName string, groups []string) ([]peerfiles.HostEntry, error) {
 	seen := make(map[string]struct{})
 	var names []string
+	add := func(n string) {
+		if n == peerName {
+			return
+		}
+		if _, ok := seen[n]; ok {
+			return
+		}
+		seen[n] = struct{}{}
+		names = append(names, n)
+	}
 	for _, g := range groups {
 		allowedBy, err := d.GetGroupAllowedBy(ctx, g)
 		if err != nil {
 			return nil, err
 		}
 		for _, n := range allowedBy {
-			if n == peerName {
-				continue
+			add(n)
+		}
+	}
+	if slices.Contains(groups, peerfiles.ManagerPrincipal) {
+		peers, err := d.ListPeers(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range peers {
+			if p.Inbound && !p.Revoked {
+				add(p.Name)
 			}
-			if _, ok := seen[n]; ok {
-				continue
-			}
-			seen[n] = struct{}{}
-			names = append(names, n)
 		}
 	}
 	sort.Strings(names)
