@@ -33,9 +33,21 @@ func noDialDeps(t *testing.T, d *db.DB, events *[]Event) Deps {
 	}
 }
 
+// fleetRevInt reads the numeric fleet revision so tests can assert a strict
+// increase, not just inequality.
+func fleetRevInt(t *testing.T, d *db.DB) int64 {
+	t.Helper()
+	v, err := d.FleetRev(context.Background())
+	if err != nil {
+		t.Fatalf("FleetRev: %v", err)
+	}
+	return v
+}
+
 func TestRemovePeerDeletesAndMakesNoContact(t *testing.T) {
 	_, d := setupOpsEnv(t, "alpha", "beta")
 	ctx := context.Background()
+	revBefore := fleetRevInt(t, d)
 	var events []Event
 	deps := noDialDeps(t, d, &events)
 
@@ -53,11 +65,16 @@ func TestRemovePeerDeletesAndMakesNoContact(t *testing.T) {
 	if len(events) != 1 || events[0].Type != EventInfo || events[0].Peer != "alpha" {
 		t.Fatalf("events = %+v, want one EventInfo for alpha", events)
 	}
+
+	if revAfter := fleetRevInt(t, d); revAfter <= revBefore {
+		t.Errorf("fleet_rev = %d after remove, want strictly greater than %d", revAfter, revBefore)
+	}
 }
 
 func TestRemovePeerUnknownReturnsClearError(t *testing.T) {
 	_, d := setupOpsEnv(t)
 	ctx := context.Background()
+	revBefore := fleetRevInt(t, d)
 	var events []Event
 	deps := noDialDeps(t, d, &events)
 
@@ -73,5 +90,23 @@ func TestRemovePeerUnknownReturnsClearError(t *testing.T) {
 	}
 	if len(events) != 0 {
 		t.Errorf("no event should be emitted on failure; got %+v", events)
+	}
+	if revAfter := fleetRevInt(t, d); revAfter != revBefore {
+		t.Errorf("fleet_rev must be unchanged on failed remove; %d -> %d", revBefore, revAfter)
+	}
+}
+
+func TestRemovePeerSelfGuardRefusalDoesNotBumpFleetRev(t *testing.T) {
+	selfGuardSetHostname(t, "mgr")
+	_, d := setupOpsEnv(t, "mgr", "alpha")
+	revBefore := fleetRevInt(t, d)
+	var events []Event
+	deps := noDialDeps(t, d, &events)
+
+	if err := RemovePeer(context.Background(), deps, "mgr"); err == nil {
+		t.Fatal("expected self-guard refusal")
+	}
+	if revAfter := fleetRevInt(t, d); revAfter != revBefore {
+		t.Errorf("fleet_rev must be unchanged on refused self remove; %d -> %d", revBefore, revAfter)
 	}
 }
