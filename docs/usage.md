@@ -400,8 +400,10 @@ running/failed/done status and `esc` hint stay pinned below the transcript.
 The reserved `manager` group is never offered as a choice in the peer group
 pickers (`e`, `u`, `i`): inbound access from the manager is implicit on every
 peer, so there is nothing to grant. A peer that already carries the principal —
-the manager's own row, or a peer enrolled with `--groups manager` — keeps it
-across those edits.
+one enrolled with `--groups manager` — keeps it across those edits. Certhold's
+own peer row is never offered in the `m` members picker at all: it reaches the
+fleet through that principal, and re-signing its cert from group membership
+would strip it.
 
 **Multi-select + batch (Peers view):** `space` marks/unmarks the selected peer
 (marks are keyed by peer name and survive a filter change; the footer shows the
@@ -441,7 +443,10 @@ certhold update <name> --groups <a,b,d> [--host HOST]
 Reissues the peer's cert with a new group set, then SSHes in (as the peer's
 `target_user`) and pushes the new cert plus a refreshed `Host`-alias config
 block. No `sshd` reload. Runs a post-push health check. Errors if the peer is
-unknown or revoked. Every group named in `--groups` must already exist — create
+unknown or revoked, and refuses certhold's own peer row: the manager's fleet-wide
+access comes from the `manager` principal on its cert, which no group grants, so
+a group edit there would strip it — [`rekey`](#rekey) is the path that re-issues
+the self cert. Every group named in `--groups` must already exist — create
 them up front with [`group create`](#group-create); there is no implicit
 creation. A client-style peer is re-signed but **not** dialed: `update` prints
 `client peer <name>: changes pending until 'certhold-cli refresh' runs on it`

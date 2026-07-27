@@ -65,7 +65,7 @@ func newUpdateCmd() *cobra.Command {
 			defer d.Close()
 
 			deps := opsDeps(cmd, d, dataDir, caUnlock, peerUnlock, dialFn)
-			return ops.UpdatePeer(ctx, deps, name, groups, host)
+			return ops.UpdatePeer(ctx, deps, name, groups, host, "")
 		},
 	}
 	cmd.Flags().String("groups", "", "comma-separated list of groups (required)")

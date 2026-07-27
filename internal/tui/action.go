@@ -600,8 +600,9 @@ func (m Model) submitModal(top modal) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) launchEditGroups(name string, groups []string) (tea.Model, tea.Cmd) {
+	hostname := m.action.Hostname
 	run := func(ctx context.Context, deps ops.Deps) error {
-		return ops.UpdatePeer(ctx, deps, name, groups, "")
+		return ops.UpdatePeer(ctx, deps, name, groups, "", hostname)
 	}
 	return m.startAction("update "+name, run)
 }

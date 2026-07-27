@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -366,6 +367,42 @@ func TestUpdateSuccess(t *testing.T) {
 	}
 	if !mp.closed {
 		t.Errorf("pusher was not closed")
+	}
+}
+
+// TestUpdateRefusesManagerSelfRow: `certhold update <manager-hostname>` is
+// refused. The manager's own cert carries the manager principal, which is not a
+// group, so re-signing the row from --groups would strip it and lock the
+// manager out of pushing to every peer. `rekey` is the path that re-issues it.
+func TestUpdateRefusesManagerSelfRow(t *testing.T) {
+	self, err := os.Hostname()
+	if err != nil {
+		t.Fatalf("os.Hostname: %v", err)
+	}
+	dataDir, dbPath, _ := setupUpdateEnv(t, self, []string{"oldA"}, false)
+	preCreateGroups(t, dbPath, "newA")
+	withMockPusher(t)
+
+	_, stderr, err := runUpdate(t, dataDir, dbPath, self, "--groups", "newA")
+	if err == nil {
+		t.Fatal("update against the manager's own peer row must fail")
+	}
+	msg := err.Error() + stderr
+	if !strings.Contains(msg, "certhold's own peer") || !strings.Contains(msg, "self row") {
+		t.Errorf("error %q does not name the manager's self row", msg)
+	}
+
+	d, dbErr := db.Open(dbPath)
+	if dbErr != nil {
+		t.Fatalf("reopen db: %v", dbErr)
+	}
+	defer d.Close()
+	groups, gerr := d.GetPeerGroups(context.Background(), self)
+	if gerr != nil {
+		t.Fatalf("GetPeerGroups: %v", gerr)
+	}
+	if len(groups) != 1 || groups[0] != "oldA" {
+		t.Errorf("self groups = %v, want [oldA] (unchanged)", groups)
 	}
 }
 

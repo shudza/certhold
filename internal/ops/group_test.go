@@ -132,6 +132,61 @@ func TestGroupDeleteSuccessSummaryEvent(t *testing.T) {
 	}
 }
 
+// TestGroupDeleteKeepsManagerPrincipalOnSelfMember: a legacy self membership
+// (only a pre-guard `update` could create one) still cascades — the row's DB
+// groups lose the deleted group and its cert is re-signed — but the re-sign
+// keeps the manager principal, which lives on the cert and in no group.
+func TestGroupDeleteKeepsManagerPrincipalOnSelfMember(t *testing.T) {
+	dataDir, d := setupOpsEnv(t, "alpha")
+	ctx := context.Background()
+	seedSelfRow(t, dataDir, d, "mgr", []string{"infra"})
+	dialer := &fakeDialer{
+		readData: map[string][]byte{"/root/.ssh/authorized_keys": opsCALine(t, dataDir, "manager", "infra")},
+	}
+	var events []Event
+	deps := collectingDeps(dataDir, d, dialer, &events)
+
+	if err := GroupDelete(ctx, deps, "infra", "mgr"); err != nil {
+		t.Fatalf("GroupDelete: %v", err)
+	}
+	if got := strings.Join(storedPrincipals(t, d, "mgr"), ","); got != "mgr,manager" {
+		t.Errorf("self principals = %q, want \"mgr,manager\"", got)
+	}
+	groups, err := d.GetPeerGroups(ctx, "mgr")
+	if err != nil {
+		t.Fatalf("GetPeerGroups: %v", err)
+	}
+	if len(groups) != 0 {
+		t.Errorf("self groups = %v, want [] (deleted group dropped)", groups)
+	}
+	if got := strings.Join(storedPrincipals(t, d, "alpha"), ","); got != "alpha" {
+		t.Errorf("alpha principals = %q, want \"alpha\" (no manager principal granted)", got)
+	}
+}
+
+// TestGroupRenameKeepsManagerPrincipalOnSelfMember: same for the rename
+// cascade, which re-signs members against the renamed group.
+func TestGroupRenameKeepsManagerPrincipalOnSelfMember(t *testing.T) {
+	dataDir, d := setupOpsEnv(t, "alpha")
+	ctx := context.Background()
+	seedSelfRow(t, dataDir, d, "mgr", []string{"infra"})
+	dialer := &fakeDialer{
+		readData: map[string][]byte{"/root/.ssh/authorized_keys": opsCALine(t, dataDir, "manager", "infra")},
+	}
+	var events []Event
+	deps := collectingDeps(dataDir, d, dialer, &events)
+
+	if err := GroupRename(ctx, deps, "infra", "core", "mgr"); err != nil {
+		t.Fatalf("GroupRename: %v", err)
+	}
+	if got := strings.Join(storedPrincipals(t, d, "mgr"), ","); got != "mgr,manager,core" {
+		t.Errorf("self principals = %q, want \"mgr,manager,core\"", got)
+	}
+	if got := strings.Join(storedPrincipals(t, d, "alpha"), ","); got != "alpha,core" {
+		t.Errorf("alpha principals = %q, want \"alpha,core\"", got)
+	}
+}
+
 func TestSetPeerAllowedGroupsClientPeerNoticeNoDial(t *testing.T) {
 	dataDir, d := setupOpsEnv(t)
 	ctx := context.Background()

@@ -211,9 +211,9 @@ func TestEditAddressEmptyClears(t *testing.T) {
 	}
 }
 
-// TestMakeClientOfferedForInbound drives C → y on an inbound peer (beta —
-// alpha is the model's self peer and make-client refuses it): the confirm
-// explains the inbound-strip, and ops.MakeClient flips the peer to client.
+// TestMakeClientOfferedForInbound drives C → y on an ordinary inbound peer
+// (beta): the confirm explains the inbound-strip, and ops.MakeClient flips the
+// peer to client.
 func TestMakeClientOfferedForInbound(t *testing.T) {
 	dataDir, d, _ := seedActionEnv(t)
 	m := batchModel(t, dataDir, d)

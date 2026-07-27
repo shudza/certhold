@@ -149,7 +149,7 @@ func Rekey(ctx context.Context, deps Deps, opts RekeyOptions) error {
 		if err != nil {
 			return deps.abortRekey(fmt.Errorf("parse pubkey for %s: %w", p.Name, err), updated)
 		}
-		principals := append([]string{p.Name}, groups...)
+		principals := certPrincipals(p.Name, groups, false)
 		certBytes, serial, err := newCA.SignCert(ca.SignOptions{
 			Pubkey:     pk,
 			KeyID:      p.Name,
@@ -204,12 +204,7 @@ func Rekey(ctx context.Context, deps Deps, opts RekeyOptions) error {
 	if err != nil {
 		return deps.abortRekey(fmt.Errorf("get groups for self: %w", err), updated)
 	}
-	selfPrincipals := []string{opts.Hostname, peerfiles.ManagerPrincipal}
-	for _, g := range selfGroups {
-		if g != peerfiles.ManagerPrincipal {
-			selfPrincipals = append(selfPrincipals, g)
-		}
-	}
+	selfPrincipals := certPrincipals(opts.Hostname, selfGroups, true)
 	selfPK, _, _, _, err := ssh.ParseAuthorizedKey(self.AuthorizedKey)
 	if err != nil {
 		return deps.abortRekey(fmt.Errorf("parse self pubkey: %w", err), updated)

@@ -71,7 +71,7 @@ func TestUpdatePeerSkipsUnreachable(t *testing.T) {
 	var events []Event
 	deps := collectingDeps(dataDir, d, dialer, &events)
 
-	if err := UpdatePeer(ctx, deps, "peer1", []string{"infra"}, ""); err != nil {
+	if err := UpdatePeer(ctx, deps, "peer1", []string{"infra"}, "", "mgr"); err != nil {
 		t.Fatalf("UpdatePeer: %v", err)
 	}
 	if len(dialer.dialedHosts) != 0 {

@@ -74,8 +74,15 @@ func (r *recDial) dialed() []string {
 
 // recModel builds an action Model whose Dial records pushed hosts. Same seed as
 // seedActionEnv (alpha in infra/db + allowed infra, beta in infra + allowed
-// infra; group ops also present).
+// infra; group ops also present), with the self row outside the fleet.
 func recModel(t *testing.T, dataDir string, d *db.DB, rec *recDial) Model {
+	t.Helper()
+	return recModelHostname(t, dataDir, d, rec, selfRowName)
+}
+
+// recModelHostname is recModel with an explicit manager self-row name, for the
+// flows (rekey) that require the self row to be one of the seeded peers.
+func recModelHostname(t *testing.T, dataDir string, d *db.DB, rec *recDial, hostname string) Model {
 	t.Helper()
 	caAK, err := ca.LoadPublicKey(filepath.Join(dataDir, "ca"))
 	if err != nil {
@@ -91,7 +98,7 @@ func recModel(t *testing.T, dataDir string, d *db.DB, rec *recDial) Model {
 	}
 	m := NewModel(context.Background(), data, reload)
 	m = m.withAction(ActionDeps{
-		Hostname: "alpha",
+		Hostname: hostname,
 		BuildDeps: func(onEvent func(ops.Event), caUnlock, peerPass func() ([]byte, error), hostKeyConfirm func(host, fingerprint, keyType string) (bool, error)) ops.Deps {
 			return ops.Deps{
 				DB:             d,
@@ -462,6 +469,88 @@ func TestMembershipSkipsRevokedMember(t *testing.T) {
 	}
 	if g := peerGroupsSorted(t, d, "ghost"); strings.Join(g, ",") != "infra" {
 		t.Fatalf("revoked ghost groups changed = %v, want [infra] (untouched)", g)
+	}
+}
+
+// TestGroupMembersPickerExcludesSelfRow: with the manager's own row in the
+// fleet (here alpha, itself a member of infra), the members picker neither
+// offers nor pre-checks it — group membership on the self row is refused by ops
+// because re-signing that cert would drop the manager principal — and applying
+// the picker unchanged touches nothing.
+func TestGroupMembersPickerExcludesSelfRow(t *testing.T) {
+	dataDir, d, _ := seedActionEnv(t)
+	rec := &recDial{}
+	m := recModelHostname(t, dataDir, d, rec, "alpha")
+	m = selectGroup(t, m, "infra") // members: alpha (self), beta
+
+	m = press(t, m, "m")
+	pick, ok := topAny(m).(pickModal)
+	if !ok || pick.kind != pickGroupMembers {
+		t.Fatalf("m did not open members pick; top=%T", topAny(m))
+	}
+	if isMember(pick.options, "alpha") {
+		t.Fatalf("members options offer the manager's self row: %v", pick.options)
+	}
+	if pick.checked["alpha"] {
+		t.Fatalf("members pre-check includes the self row: %+v", pick.checked)
+	}
+	if !isMember(pick.options, "beta") || !pick.checked["beta"] {
+		t.Fatalf("members picker lost the ordinary member: options=%v checked=%+v", pick.options, pick.checked)
+	}
+
+	nm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // apply unchanged
+	m = drain(t, nm.(Model), cmd)
+	if _, ok := topAny(m).(progressModal); ok {
+		t.Fatal("unchanged members apply opened an action (self row must not become a delta)")
+	}
+	if got := rec.dialed(); len(got) != 0 {
+		t.Fatalf("unchanged members apply pushed hosts = %v, want none", got)
+	}
+	if g := peerGroupsSorted(t, d, "alpha"); strings.Join(g, ",") != "db,infra" {
+		t.Fatalf("self row groups changed = %v, want [db infra]", g)
+	}
+}
+
+// TestGroupMembersBatchSkipsMarkedSelfRow: a MARKED self row is dropped from the
+// batch members fan-out too, so it never produces a guaranteed-error target.
+func TestGroupMembersBatchSkipsMarkedSelfRow(t *testing.T) {
+	dataDir, d, pass := seedActionEnv(t)
+	rec := &recDial{}
+	m := recModelHostname(t, dataDir, d, rec, "alpha")
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("1")}) // peers view
+	m = markPeer(t, nm.(Model), "alpha")
+	m = markPeer(t, m, "beta")
+	nm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")}) // groups view
+	m = selectGroup(t, nm.(Model), "ops")                                // empty group
+
+	m = press(t, m, "m")
+	pick, ok := topAny(m).(pickModal)
+	if !ok || m.batchKind != batchMembers {
+		t.Fatalf("m with marks did not open batch members pick; top=%T kind=%v", topAny(m), m.batchKind)
+	}
+	if isMember(pick.options, "alpha") || pick.checked["alpha"] {
+		t.Fatalf("marked self row leaked into the batch picker: options=%v checked=%+v", pick.options, pick.checked)
+	}
+	if !pick.checked["beta"] {
+		t.Fatalf("marked ordinary peer not pre-checked: %+v", pick.checked)
+	}
+
+	nm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = drain(t, nm.(Model), cmd, pass)
+
+	pg, ok := topAny(m).(progressModal)
+	if !ok || !pg.done || pg.err != nil {
+		t.Fatalf("batch members not done-ok: %+v", topAny(m))
+	}
+	if tr := strings.Join(pg.lines, "\n"); !strings.Contains(tr, "1 ok, 0 failed") {
+		t.Fatalf("batch summary = %q, want a single-target run with no failure", tr)
+	}
+	if mem := groupMembers(t, d, "ops"); strings.Join(mem, ",") != "beta" {
+		t.Fatalf("ops members = %v, want [beta] (self row never assigned)", mem)
+	}
+	if got := rec.dialed(); strings.Join(got, ",") != "beta" {
+		t.Fatalf("batch pushed hosts = %v, want [beta]", got)
 	}
 }
 
