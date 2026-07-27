@@ -397,6 +397,12 @@ running/failed/done status and `esc` hint stay pinned below the transcript.
 | `D` | Groups | Delete the selected group (confirm; body spells out the affected members and allow-by rewrites). |
 | `m` | Groups | Edit the selected group's membership (peer multi-pick). |
 
+The reserved `manager` group is never offered as a choice in the peer group
+pickers (`e`, `u`, `i`): inbound access from the manager is implicit on every
+peer, so there is nothing to grant. A peer that already carries the principal —
+the manager's own row, or a peer enrolled with `--groups manager` — keeps it
+across those edits.
+
 **Multi-select + batch (Peers view):** `space` marks/unmarks the selected peer
 (marks are keyed by peer name and survive a filter change; the footer shows the
 mark count, `esc` clears them). With one or more peers marked, `u` / `x` / `m`

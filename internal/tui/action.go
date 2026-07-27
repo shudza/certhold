@@ -364,10 +364,7 @@ func (m Model) startEditGroups() (tea.Model, tea.Cmd) {
 	if !m.mutationsEnabled() || m.view != viewPeers || m.detail {
 		return m, nil
 	}
-	opts := make([]string, 0, len(m.data.Groups))
-	for _, g := range m.data.Groups {
-		opts = append(opts, g.Name)
-	}
+	opts := selectableGroupNames(m.data.Groups)
 	// With marks present the pick applies the chosen group SET to every marked
 	// peer (an absolute assignment, since the targets' current groups differ).
 	// The picker opens unchecked so the operator dials in the groups to apply.
@@ -574,12 +571,12 @@ func (m Model) submitModal(top modal) (tea.Model, tea.Cmd) {
 			}
 			return m.launchMembership(mo)
 		case pickPeerAllowed:
-			return m.launchAllowed(mo.subject, mo.selected())
+			return m.launchAllowed(mo.subject, m.keepManagerAllowed(mo.subject, mo.selected()))
 		default:
 			if m.batchKind == batchEditGroups {
 				return m.launchBatchEditGroups(mo.selected())
 			}
-			return m.launchEditGroups(mo.subject, mo.selected())
+			return m.launchEditGroups(mo.subject, m.keepManagerGroup(mo.subject, mo.selected()))
 		}
 	case textModal:
 		m.popModal()

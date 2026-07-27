@@ -171,6 +171,8 @@ func (m Model) launchBatchRemove() (tea.Model, tea.Cmd) {
 
 // launchBatchEditGroups assigns the chosen group SET to every marked peer
 // (absolute UpdatePeer), skipping revoked peers. An empty marked set is a no-op.
+// The set is resolved per peer so a target that already holds the hidden manager
+// principal keeps it, while the others never gain it.
 func (m Model) launchBatchEditGroups(groups []string) (tea.Model, tea.Cmd) {
 	names := m.markedNames()
 	var live []string
@@ -182,8 +184,12 @@ func (m Model) launchBatchEditGroups(groups []string) (tea.Model, tea.Cmd) {
 	if len(live) == 0 {
 		return m, nil
 	}
+	byPeer := make(map[string][]string, len(live))
+	for _, n := range live {
+		byPeer[n] = m.keepManagerGroup(n, groups)
+	}
 	op := func(ctx context.Context, deps ops.Deps, name string) error {
-		return ops.UpdatePeer(ctx, deps, name, groups, "")
+		return ops.UpdatePeer(ctx, deps, name, byPeer[name], "")
 	}
 	return m.startBatch("update", live, op)
 }

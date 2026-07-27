@@ -281,10 +281,7 @@ func (m Model) startEnroll() (tea.Model, tea.Cmd) {
 	if !m.mutationsEnabled() || (m.view != viewPeers && m.view != viewGroups) {
 		return m, nil
 	}
-	groups := make([]string, 0, len(m.data.Groups))
-	for _, g := range m.data.Groups {
-		groups = append(groups, g.Name)
-	}
+	groups := selectableGroupNames(m.data.Groups)
 	taken := make(map[string]bool, len(m.data.Peers))
 	for _, p := range m.data.Peers {
 		taken[p.Name] = true

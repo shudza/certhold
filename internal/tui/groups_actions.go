@@ -170,10 +170,7 @@ func (m Model) startEditAllowed() (tea.Model, tea.Cmd) {
 	if !ok || p.Revoked {
 		return m, nil
 	}
-	opts := make([]string, 0, len(m.data.Groups))
-	for _, g := range m.data.Groups {
-		opts = append(opts, g.Name)
-	}
+	opts := selectableGroupNames(m.data.Groups)
 	m.pushModal(newPickModalKind(pickPeerAllowed, "allowed inbound: "+p.Name, p.Name, opts, p.Allowed))
 	return m, nil
 }
