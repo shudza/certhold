@@ -89,6 +89,10 @@ func (m Model) startRenameGroup() (tea.Model, tea.Cmd) {
 	if !ok {
 		return m, nil
 	}
+	if isReservedGroup(g.Name) {
+		m.notice = reservedGroupNotice("it cannot be renamed")
+		return m, nil
+	}
 	m.pushModal(newTextModal("rename "+g.Name, "new name: ", g.Name, textRenameGroup, g.Name))
 	return m, nil
 }
@@ -102,6 +106,10 @@ func (m Model) startDeleteGroup() (tea.Model, tea.Cmd) {
 	}
 	g, ok := m.selectedGroup()
 	if !ok {
+		return m, nil
+	}
+	if isReservedGroup(g.Name) {
+		m.notice = reservedGroupNotice("it cannot be deleted")
 		return m, nil
 	}
 	body := []string{"Delete group " + g.Name + "?"}
@@ -126,6 +134,12 @@ func (m Model) startGroupMembership() (tea.Model, tea.Cmd) {
 	}
 	g, ok := m.selectedGroup()
 	if !ok {
+		return m, nil
+	}
+	// The reserved row is refused before the marked-set branch, so a batch's
+	// marks survive the refusal and can be aimed at a real group instead.
+	if isReservedGroup(g.Name) {
+		m.notice = reservedGroupNotice("membership cannot be edited from the TUI")
 		return m, nil
 	}
 	opts := make([]string, 0, len(m.data.Peers))

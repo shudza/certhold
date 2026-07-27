@@ -128,6 +128,9 @@ func (m Model) footerLines(w int) []string {
 	}
 
 	var parts []string
+	if m.notice != "" {
+		parts = append(parts, warnStyle.Render(m.notice))
+	}
 	if m.filtering {
 		parts = append(parts, m.filter.View()+metaStyle.Render(fmt.Sprintf("%s%d/%d match", colGap, n, total)))
 	} else if applied := m.filters[m.view]; applied != "" {
