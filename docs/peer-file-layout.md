@@ -36,15 +36,20 @@ block are **per-instance** and isolated. Tarball entries (relative to
 | `id_ed25519_<key>-cert.pub` | `0644` | CA-signed user certificate for that key. |
 | `known_hosts` | `0644` | Outbound host trust; **empty** by default (TOFU). |
 | `config` | `0644` | This instance's keyed SSH client block (below). |
-| `ca_authorized_keys` | `0644` | The `cert-authority` line for this instance's CA; the install script **appends** it to `authorized_keys` idempotently and then removes this staging file. **Omitted entirely** from a client-style (`enroll --no-inbound`) bundle. |
+| `ca_authorized_keys` | `0644` | The `cert-authority` line for this instance's CA; the install script **converges** `authorized_keys` on it (appended when absent, replaced when this instance's line differs, untouched when identical) and then removes this staging file. **Omitted entirely** from a client-style (`enroll --no-inbound`) bundle. |
+| `ca_pub` | `0644` | **Client-style bundles only**: the bare CA public key (no trust line). The install script uses it to **remove** this instance's stale `cert-authority` line when an inbound peer is re-enrolled as a client; a fresh client install finds no matching line and removes nothing. |
 | `certhold-cli` | `0755` | The [client CLI](#certhold-cli-and-the-conf-file); the install script installs it as `~/.local/bin/certhold-cli`. |
 | `certhold_<key>.conf` | `0600` | The pull-channel conf file (below); installed into `<home>/.ssh/`. |
 
-A whole `authorized_keys` file is **never shipped** — the install script appends
-this instance's line only if its CA pubkey isn't already trusted (grep-guarded),
-so other instances' lines (and any pre-existing keys) survive. A client-style
-bundle ships no `ca_authorized_keys` at all, so its install never touches
-`authorized_keys` and the peer ends up with **no inbound trust line**.
+A whole `authorized_keys` file is **never shipped** — the install script
+converges only this instance's line (matched by its CA pubkey): it is appended
+when absent, replaced atomically when its principals changed (a re-enroll with
+an edited allowed set), and left untouched when already identical, so other
+instances' lines (and any pre-existing keys) survive verbatim. A client-style
+bundle ships no `ca_authorized_keys` at all, so the peer ends up with **no
+inbound trust line** for this instance: a fresh client install never touches
+`authorized_keys`, and a client **re-enroll** of a formerly inbound peer removes
+only this instance's stale `cert-authority` line (via the staged `ca_pub`).
 
 ## `authorized_keys` — the inbound trust line
 
@@ -165,10 +170,16 @@ Under `set -e`, the install script:
    staging dir (`curl -kfsSL …?user=<user> | tar -xz`);
 3. installs the namespaced key (`0600`) and cert (`0644`), then runs the optional
    [peer-key passphrase step](security.md#per-peer-passphrases-install-side);
-4. appends `ca_authorized_keys` to `authorized_keys` **only if** this instance's
-   CA pubkey isn't already trusted (grep-guarded), so other instances survive —
-   skipped entirely for a client-style bundle, which stages no
-   `ca_authorized_keys`;
+4. converges `authorized_keys` on the staged `ca_authorized_keys` line: appends
+   it when this instance's CA pubkey isn't trusted yet, atomically replaces
+   this instance's line when its principals changed (never leaving a moment
+   without a trust line), and touches nothing when the line is already
+   identical — other instances' lines and ordinary keys survive either way.
+   A client-style bundle stages no `ca_authorized_keys`; instead, if it stages
+   `ca_pub` and an `authorized_keys` exists, the script **removes** this
+   instance's `cert-authority` line (matched by the CA key, so other instances'
+   lines and ordinary keys survive) — that is how re-enrolling an inbound peer
+   as `--client` drops its inbound trust;
 5. splices the keyed `config` block: the per-instance `sed` delete, then an
    append of the **staged tarball `config` entry** — the hosts-bearing block
    built at mint, so `Host` aliases land at install (guarded by

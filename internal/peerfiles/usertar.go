@@ -45,6 +45,12 @@ func userFileEntries(p UserPeerFiles) []userFileEntry {
 	}
 	if !p.NoInbound {
 		entries = append(entries, userFileEntry{"ca_authorized_keys", 0644, buildAuthorizedKeysLine(p.CAPub, p.Principals)})
+	} else {
+		// A client-style bundle stages the bare CA public key (no trust line)
+		// so the install script can REMOVE this instance's stale cert-authority
+		// line when an inbound peer is re-enrolled as a client. Public material
+		// only; a fresh client install finds no matching line and removes nothing.
+		entries = append(entries, userFileEntry{"ca_pub", 0644, append([]byte(nil), p.CAPub...)})
 	}
 	if p.CLIScript != nil {
 		entries = append(entries, userFileEntry{"certhold-cli", 0755, p.CLIScript})

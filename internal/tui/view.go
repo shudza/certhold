@@ -154,6 +154,8 @@ func (m Model) footerLines(w int) []string {
 	switch {
 	case m.filtering:
 		hints = "enter apply · esc clear · ctrl+c quit"
+	case m.detail && m.mutationsEnabled():
+		hints = "esc back · j/k scroll · E re-enroll · tab/1/2/3/4 views · / filter · r reload · q quit"
 	case m.detail:
 		hints = "esc back · j/k scroll · tab/1/2/3/4 views · / filter · r reload · q quit"
 	case m.view == viewStatus:

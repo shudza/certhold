@@ -107,6 +107,31 @@ func setPeerGroupsTableTx(ctx context.Context, tx *sql.Tx, table, peer string, g
 	return nil
 }
 
+// setPeerGroupsTableStrictTx is setPeerGroupsTableTx WITHOUT the ensure-create
+// of missing groups: a group that no longer exists is an error, never an
+// implicit re-creation. The re-enroll redemption commit uses it because its
+// group list was validated at mint time, in an earlier transaction — a group
+// deleted or renamed in between must fail the commit (rolling the consume
+// back) rather than silently resurrect the group.
+func setPeerGroupsTableStrictTx(ctx context.Context, tx *sql.Tx, table, peer string, groups []string) error {
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE peer_name = ?`, table), peer); err != nil {
+		return fmt.Errorf("delete %s: %w", table, err)
+	}
+	for _, g := range groups {
+		exists, err := groupExistsTx(ctx, tx, g)
+		if err != nil {
+			return fmt.Errorf("check group %s: %w", g, err)
+		}
+		if !exists {
+			return fmt.Errorf("group %q no longer exists (deleted or renamed since the enroll was minted)", g)
+		}
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s(peer_name, group_name) VALUES (?, ?)`, table), peer, g); err != nil {
+			return fmt.Errorf("insert %s: %w", table, err)
+		}
+	}
+	return nil
+}
+
 // CreateGroup inserts a new group and returns ErrGroupExists if the name is
 // already taken, or ErrInvalidGroupName for an empty/whitespace name.
 func (db *DB) CreateGroup(ctx context.Context, name string) error {

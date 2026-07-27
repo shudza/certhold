@@ -141,8 +141,8 @@ func TestMigratePreV3AddsTarballColumnPreservingRows(t *testing.T) {
 	if err := raw.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='schema_version'`).Scan(&ver); err != nil {
 		t.Fatalf("read schema_version: %v", err)
 	}
-	if ver != "8" {
-		t.Errorf("schema_version = %q, want \"8\"", ver)
+	if ver != "9" {
+		t.Errorf("schema_version = %q, want \"9\"", ver)
 	}
 
 	if err := raw.Close(); err != nil {
@@ -245,8 +245,8 @@ func TestMigratePreV4PreservesRowsDroppingDeadColumns(t *testing.T) {
 	if err := raw.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='schema_version'`).Scan(&ver); err != nil {
 		t.Fatalf("read schema_version: %v", err)
 	}
-	if ver != "8" {
-		t.Errorf("schema_version = %q, want \"8\"", ver)
+	if ver != "9" {
+		t.Errorf("schema_version = %q, want \"9\"", ver)
 	}
 
 	if err := raw.Close(); err != nil {
@@ -378,8 +378,8 @@ func TestMigratePreV5AddsAddressColumnPreservingRows(t *testing.T) {
 	if err := raw.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='schema_version'`).Scan(&ver); err != nil {
 		t.Fatalf("read schema_version: %v", err)
 	}
-	if ver != "8" {
-		t.Errorf("schema_version = %q, want \"8\"", ver)
+	if ver != "9" {
+		t.Errorf("schema_version = %q, want \"9\"", ver)
 	}
 
 	if err := raw.Close(); err != nil {
@@ -648,8 +648,8 @@ func TestMigrateV5DropsDeadColumnsPreservingRows(t *testing.T) {
 	if err := raw.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='schema_version'`).Scan(&ver); err != nil {
 		t.Fatalf("read schema_version: %v", err)
 	}
-	if ver != "8" {
-		t.Errorf("schema_version = %q, want \"8\"", ver)
+	if ver != "9" {
+		t.Errorf("schema_version = %q, want \"9\"", ver)
 	}
 
 	// Foreign keys clean.
@@ -828,8 +828,8 @@ func TestMigrateV6AddsClientPeerColumns(t *testing.T) {
 	if err := raw.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='schema_version'`).Scan(&ver); err != nil {
 		t.Fatalf("read schema_version: %v", err)
 	}
-	if ver != "8" {
-		t.Errorf("schema_version = %q, want \"8\"", ver)
+	if ver != "9" {
+		t.Errorf("schema_version = %q, want \"9\"", ver)
 	}
 
 	if err := raw.Close(); err != nil {

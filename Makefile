@@ -10,7 +10,7 @@ test:
 # asserts on live SSH trust. Requires a Docker daemon + `docker compose`; the
 # tests are gated behind the `e2e` build tag so plain `make test` never runs them.
 e2e:
-	go test -tags e2e -count=1 -timeout 20m ./test/e2e/...
+	go test -tags e2e -count=1 -timeout 25m ./test/e2e/...
 
 # Host-level install e2e: requires systemd + passwordless sudo and MUTATES the
 # host (installs/removes certhold.service). Gated behind the e2e_systemd tag.

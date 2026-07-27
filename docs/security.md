@@ -134,6 +134,14 @@ token off permanently** (`410` from both pull endpoints) — that is the remedy
 for a token believed leaked: revoke and re-enroll the peer. `serve` holds no CA
 key, so the pull path cannot be escalated into signing anything.
 
+A plain **re-enroll** of an existing peer (without a revoke first) rotates its
+keypair, cert and pull token, and an unredeemed enroll one-liner is superseded
+(deleted, `404`) by the next mint for the same peer. But a superseded
+*certificate* is replaced, not revoked: like any `update` re-sign, the old cert
+stays valid until a `rekey`/`revoke` rotates the CA (certs carry no expiry and
+nothing revokes individual serials). For a **compromised** key or token,
+revoke first — re-enroll alone is a reconfigure, not a remedy.
+
 ### Per-peer passphrases (install-side)
 
 Separately, the **peer's own** outbound key can be encrypted at install time —

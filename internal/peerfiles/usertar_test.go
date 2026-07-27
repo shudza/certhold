@@ -186,8 +186,23 @@ func TestBuildUser_NoInboundOmitsCAAuthorizedKeys(t *testing.T) {
 	if _, ok := got["ca_authorized_keys"]; ok {
 		t.Errorf("NoInbound tarball must omit ca_authorized_keys; have %v", keys(got))
 	}
-	if len(got) != 4 {
-		t.Errorf("entry count: got %d want 4: %v", len(got), keys(got))
+	// Instead it stages the bare CA pubkey so the install script can strip a
+	// stale trust line when an inbound peer is re-enrolled as a client.
+	caPub, ok := got["ca_pub"]
+	if !ok {
+		t.Fatalf("NoInbound tarball must stage ca_pub; have %v", keys(got))
+	}
+	if string(caPub.data) != string(in.CAPub) {
+		t.Errorf("ca_pub = %q, want the raw CA pubkey %q", caPub.data, in.CAPub)
+	}
+	if strings.Contains(string(caPub.data), "cert-authority") {
+		t.Errorf("ca_pub must not be a trust line: %q", caPub.data)
+	}
+	if caPub.mode != 0644 {
+		t.Errorf("ca_pub mode = %o, want 0644", caPub.mode)
+	}
+	if len(got) != 5 {
+		t.Errorf("entry count: got %d want 5: %v", len(got), keys(got))
 	}
 }
 

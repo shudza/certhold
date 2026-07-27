@@ -312,7 +312,7 @@ func TestMain(m *testing.M) {
 // independent and must run in order. A failure in an early step aborts the rest
 // via t.Fatalf to avoid cascading misleading failures.
 func TestE2E(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 16*time.Minute)
 	defer cancel()
 
 	// instanceKey is discovered after init and used to assert the namespaced
@@ -564,6 +564,10 @@ func TestE2E(t *testing.T) {
 		if strings.Contains(out, "knownhosts") || strings.Contains(out, "dial tcp") {
 			t.Fatalf("update isolated01 attempted a dial it should have skipped:\n%s", out)
 		}
+	})
+
+	t.Run("12_reenroll_flow", func(t *testing.T) {
+		runReenrollFlow(ctx, t, instanceKey)
 	})
 }
 

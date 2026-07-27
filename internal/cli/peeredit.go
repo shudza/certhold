@@ -62,7 +62,8 @@ func newMakeClientCmd() *cobra.Command {
 			"cert-authority trust line from its ~/.ssh/authorized_keys, so it no longer accepts " +
 			"inbound SSH from the fleet. The peer's own identity and config are left intact, so its " +
 			"outbound access keeps working. This is one-way: the manager cannot push to a client " +
-			"peer, so converting back requires re-enrollment. If the peer is unreachable the change " +
+			"peer, so convert back by re-enrolling it ('certhold enroll <name>' reconfigures an " +
+			"existing peer in place). If the peer is unreachable the change " +
 			"is refused (the flag is not flipped while the peer still accepts inbound).",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {

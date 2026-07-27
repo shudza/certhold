@@ -392,6 +392,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.startGroupMembership()
 	case "e":
 		return m.startEnroll()
+	case "E":
+		return m.startReenroll()
 	}
 	return m, nil
 }

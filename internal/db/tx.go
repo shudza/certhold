@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -48,6 +49,41 @@ func (t *Tx) InsertToken(ctx context.Context, token, peerName, groupsCSV, target
 	)
 	if err != nil {
 		return fmt.Errorf("insert token: %w", err)
+	}
+	return nil
+}
+
+// InsertReenrollToken records a re-enroll token: an enrollment token for an
+// EXISTING peer carrying, besides the tarball, the staged material ConsumeToken
+// commits to the peer row at redemption. Until then the peer row is untouched.
+func (t *Tx) InsertReenrollToken(ctx context.Context, token, peerName, groupsCSV, targetUser string, tarball []byte, staged StagedReenroll) error {
+	var allowedCSV any
+	if staged.AllowedSet {
+		allowedCSV = strings.Join(staged.Allowed, ",")
+	}
+	_, err := t.tx.ExecContext(ctx,
+		`INSERT INTO tokens(token, peer_name, groups, consumed, created_at, target_user, tarball,
+		                    staged_authorized_key, staged_fingerprint, staged_serial, staged_cert,
+		                    staged_pull_token, staged_inbound, staged_address, staged_allowed)
+		 VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		token, peerName, groupsCSV, time.Now().UTC(), targetUser, tarball,
+		staged.AuthorizedKey, staged.Fingerprint, int64(staged.Serial), staged.Cert,
+		staged.PullToken, boolToInt(staged.Inbound), staged.Address, allowedCSV,
+	)
+	if err != nil {
+		return fmt.Errorf("insert re-enroll token: %w", err)
+	}
+	return nil
+}
+
+// DeleteUnconsumedPeerTokens supersedes any prior outstanding enrollment
+// one-liners for the peer: minting a new token for the same peer invalidates
+// every unconsumed one (they answer 404 afterwards), and deleting the rows also
+// destroys their stored tarballs (each embeds a usable private key + cert).
+func (t *Tx) DeleteUnconsumedPeerTokens(ctx context.Context, peerName string) error {
+	if _, err := t.tx.ExecContext(ctx,
+		`DELETE FROM tokens WHERE peer_name = ? AND consumed = 0`, peerName); err != nil {
+		return fmt.Errorf("delete unconsumed peer tokens: %w", err)
 	}
 	return nil
 }

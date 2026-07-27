@@ -110,7 +110,7 @@ func MakeClient(ctx context.Context, deps Deps, name, hostname string) error {
 	// left saying inbound=1 here would be unfixable by retrying (no retry can
 	// dial the peer anymore).
 	if err := deps.DB.SetPeerInbound(ctx, name, false); err != nil {
-		return fail(fmt.Errorf("peer %s: inbound trust was already stripped on the host, but recording the conversion failed (set peer inbound: %v); the DB is out of sync — it still marks the peer inbound, yet the manager can no longer dial it, so retrying make-client cannot work; run 'certhold remove %s' and re-enroll it with --client, or repair the DB by setting the peer's inbound to 0", name, err, name))
+		return fail(fmt.Errorf("peer %s: inbound trust was already stripped on the host, but recording the conversion failed (set peer inbound: %v); the DB is out of sync — it still marks the peer inbound, yet the manager can no longer dial it, so retrying make-client cannot work; re-enroll it with 'certhold enroll %s --client' (re-enrolling reconfigures it in place), or repair the DB by setting the peer's inbound to 0", name, err, name))
 	}
 	if err := deps.DB.BumpFleetRev(ctx); err != nil {
 		return fail(fmt.Errorf("peer %s converted to client (inbound trust stripped and recorded), but bumping fleet_rev failed: %v; other peers may keep a stale Host entry for it until the next fleet change", name, err))

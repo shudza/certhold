@@ -110,13 +110,21 @@ when a token is redeemed (see [usage.md](usage.md#onboarding-a-peer)).
 
 ```sql
 CREATE TABLE tokens (
-  token       TEXT PRIMARY KEY,
-  peer_name   TEXT NOT NULL,
-  groups      TEXT NOT NULL,
-  tarball     BLOB,
-  consumed    INTEGER NOT NULL DEFAULT 0,
-  created_at  TIMESTAMP NOT NULL,
-  target_user TEXT NOT NULL DEFAULT ''
+  token                 TEXT PRIMARY KEY,
+  peer_name             TEXT NOT NULL,
+  groups                TEXT NOT NULL,
+  tarball               BLOB,
+  consumed              INTEGER NOT NULL DEFAULT 0,
+  created_at            TIMESTAMP NOT NULL,
+  target_user           TEXT NOT NULL DEFAULT '',
+  staged_authorized_key BLOB,
+  staged_fingerprint    TEXT NOT NULL DEFAULT '',
+  staged_serial         INTEGER NOT NULL DEFAULT 0,
+  staged_cert           BLOB,
+  staged_pull_token     TEXT NOT NULL DEFAULT '',
+  staged_inbound        INTEGER NOT NULL DEFAULT 1,
+  staged_address        TEXT NOT NULL DEFAULT '',
+  staged_allowed        TEXT
 );
 ```
 
@@ -129,9 +137,17 @@ CREATE TABLE tokens (
 | `consumed` | Single-use flag. |
 | `created_at` | Mint timestamp (UTC). |
 | `target_user` | Copied onto the peer row on redeem. If `enroll --user` pinned it, the install request must match; otherwise it is set from the install-time `?user=` value (the user that ran the one-liner). |
+| `staged_*` | Present only on a **re-enroll** token (an enroll of an existing peer): the fresh public key, fingerprint, cert+serial, new pull token, inbound flag and optional address staged at mint. `staged_allowed` is `NULL` unless the allowed-inbound set was chosen explicitly (the TUI form); the commit otherwise preserves the peer's current allowed set. `NULL` `staged_authorized_key` marks an ordinary new-peer token. Cleared when the token is consumed. |
 
 Consuming a token is atomic: in one transaction it checks the row is still
-unconsumed, marks it consumed, and nulls the tarball.
+unconsumed, marks it consumed, and nulls the tarball. For a **re-enroll token**
+the same transaction also commits the staged material to the peer row (key,
+cert, pull token, inbound flag, groups, allowed-set transitions, optional
+address) and bumps `fleet_rev` — either the token stays redeemable and the peer
+row is untouched, or the whole new configuration lands. Until redemption the
+peer row is never modified by a re-enroll mint, and minting again for the same
+peer deletes any prior unconsumed token for it (superseded one-liners answer
+`404`, and deleting the row destroys their staged bundle and its private key).
 
 ### `ca`
 
@@ -154,7 +170,7 @@ A small key/value table; it is not a general configuration store. It holds:
 
 | Key | Meaning |
 |---|---|
-| `schema_version` | Migration bookkeeping (currently `8`). |
+| `schema_version` | Migration bookkeeping (currently `9`). |
 | `instance_key` | The per-instance key (16 lowercase hex chars) namespacing all peer files. |
 | `fleet_rev` | The **fleet revision**: a monotonic counter bumped exactly once per successful mutating command (`enroll`, `update`, `rekey`, `revoke`, `group create`/`delete`/`rename`/`allow`/`disallow`); absent reads as `0`. Refresh-bundle manifests and `GET /pull/<token>/rev` report it, so `certhold-cli status` can tell whether a peer is stale without downloading a bundle. |
 
@@ -169,8 +185,9 @@ the removal of root mode and KRL revocation. The rebuild preserves foreign keys
 (`peer_groups` / `peer_allowed_groups`) and is idempotent — once the dead columns
 are gone it no-ops. These legacy steps only run for databases below schema
 version 6; after them, the additive client-peer migration adds
-`peers.inbound` / `pull_token` / `cert` (schema version 7), and a further
-additive step adds `peers.push_reachable` (schema version 8). The result is the
+`peers.inbound` / `pull_token` / `cert` (schema version 7), a further additive
+step adds `peers.push_reachable` (schema version 8), and another adds the
+`tokens.staged_*` re-enroll columns (schema version 9). The result is the
 schema shown above. Pre-existing rows default to `inbound=1`, an empty
 `pull_token`, a `NULL` cert, and `push_reachable=1` — exactly the push-managed,
 assumed-dialable behavior they had; only a re-enroll mints them a pull token, and

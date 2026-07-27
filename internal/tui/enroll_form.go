@@ -47,6 +47,13 @@ type enrollFormModal struct {
 
 	taken map[string]bool
 	err   string
+
+	// reenroll marks the detail-page re-enroll variant: fixedName is the
+	// existing peer being reconfigured, the name field is locked (skipped in
+	// the tab order, never validated as taken) and the submit runs the same
+	// MintEnroll upsert, which stages everything until the one-liner runs.
+	reenroll  bool
+	fixedName string
 }
 
 func newEnrollFormModal(groups []string, taken map[string]bool) enrollFormModal {
@@ -76,11 +83,44 @@ func newEnrollFormModal(groups []string, taken map[string]bool) enrollFormModal 
 	}
 }
 
-func (e enrollFormModal) title() string { return "enroll peer" }
+// newReenrollFormModal builds the detail-page re-enroll variant of the form,
+// pre-filled from the peer's current configuration: groups and allowed
+// pre-checked (the hidden manager principal is not offered and is preserved at
+// submit), user/address pre-filled, the client toggle mirroring the row. The
+// name is fixed; focus starts on the groups picker.
+func newReenrollFormModal(groups []string, p peerRow) enrollFormModal {
+	e := newEnrollFormModal(groups, nil)
+	e.reenroll = true
+	e.fixedName = p.Name
+	e.name.SetValue(p.Name)
+	for _, g := range p.Groups {
+		e.groupSet[g] = true
+	}
+	for _, g := range p.Allowed {
+		e.allowSet[g] = true
+	}
+	e.user.SetValue(p.TargetUser)
+	e.address.SetValue(p.Address)
+	e.client = !p.Inbound
+	e.field = efGroups
+	e.focusField()
+	return e
+}
+
+func (e enrollFormModal) title() string {
+	if e.reenroll {
+		return "re-enroll " + e.fixedName
+	}
+	return "enroll peer"
+}
 
 // validateName returns the empty string when the trimmed name is a legal new
 // peer, else the reason it is rejected (drives the inline error + submit gate).
+// A re-enroll form's name is fixed to an existing peer, so it always passes.
 func (e enrollFormModal) validateName() string {
+	if e.reenroll {
+		return ""
+	}
 	n := strings.TrimSpace(e.name.Value())
 	if n == "" {
 		return "name is required"
@@ -89,6 +129,24 @@ func (e enrollFormModal) validateName() string {
 		return "peer " + n + " already exists"
 	}
 	return ""
+}
+
+// nextField/prevField advance the focus, skipping the locked name field on a
+// re-enroll form.
+func (e enrollFormModal) nextField(cur int) int {
+	n := (cur + 1) % efCount
+	if e.reenroll && n == efName {
+		n = (n + 1) % efCount
+	}
+	return n
+}
+
+func (e enrollFormModal) prevField(cur int) int {
+	n := (cur - 1 + efCount) % efCount
+	if e.reenroll && n == efName {
+		n = (n - 1 + efCount) % efCount
+	}
+	return n
 }
 
 func (e *enrollFormModal) focusField() {
@@ -110,11 +168,11 @@ func (e enrollFormModal) handle(msg tea.KeyMsg) (modal, modalResult) {
 	case "esc":
 		return e, modalClose
 	case "tab", "down":
-		e.field = (e.field + 1) % efCount
+		e.field = e.nextField(e.field)
 		e.focusField()
 		return e, modalKeep
 	case "shift+tab", "up":
-		e.field = (e.field - 1 + efCount) % efCount
+		e.field = e.prevField(e.field)
 		e.focusField()
 		return e, modalKeep
 	case "enter":
@@ -127,7 +185,7 @@ func (e enrollFormModal) handle(msg tea.KeyMsg) (modal, modalResult) {
 		}
 		// On any other field, enter advances like tab (and submits from the
 		// last field), so the form is completable without reaching for tab.
-		e.field = (e.field + 1) % efCount
+		e.field = e.nextField(e.field)
 		e.focusField()
 		return e, modalKeep
 	}
@@ -243,8 +301,16 @@ func (e enrollFormModal) view(w, _ int) []string {
 		return out
 	}
 
-	lines := []string{
-		label(efName, "name:    "+e.name.View()),
+	var lines []string
+	if e.reenroll {
+		lines = []string{
+			"  name:    " + e.fixedName + " " + modalHintStyle.Render("(existing peer — fixed)"),
+			modalHintStyle.Render("  nothing changes on the peer until the minted one-liner runs on it"),
+		}
+	} else {
+		lines = []string{
+			label(efName, "name:    "+e.name.View()),
+		}
 	}
 	if e.err != "" {
 		lines = append(lines, errStyle.Render("    ✗ "+e.err))
@@ -290,6 +356,31 @@ func (m Model) startEnroll() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// startReenroll opens the pre-filled re-enroll form for the peer shown in the
+// detail pane. Unlike plain enroll (which rejects taken names so a typo cannot
+// silently become a re-key), re-enroll is only reachable from a specific
+// peer's detail page. The manager's own row and revoked rows refuse with a
+// footer notice, mirroring the ops-level guards.
+func (m Model) startReenroll() (tea.Model, tea.Cmd) {
+	if !m.mutationsEnabled() || m.view != viewPeers || !m.detail {
+		return m, nil
+	}
+	p, ok := m.detailPeer()
+	if !ok {
+		return m, nil
+	}
+	if m.isSelfPeer(p.Name) {
+		m.notice = "peer \"" + p.Name + "\" is certhold's own row — it cannot be re-enrolled"
+		return m, nil
+	}
+	if p.Revoked {
+		m.notice = "peer \"" + p.Name + "\" is revoked — it cannot be re-enrolled"
+		return m, nil
+	}
+	m.pushModal(newReenrollFormModal(selectableGroupNames(m.data.Groups), p))
+	return m, nil
+}
+
 // submitEnroll mints the enrollment. It pops the form, runs ops.MintEnroll
 // through the action bridge (so a passphrase-protected CA prompts via the same
 // modal path), and on success replaces the progress modal with the result
@@ -310,6 +401,20 @@ func (m Model) submitEnroll(e enrollFormModal) (tea.Model, tea.Cmd) {
 		Client:  e.client,
 		BaseURL: enrollBaseURL(m.data.BaseURL),
 	}
+	heading := "enroll " + spec.Name
+	if e.reenroll {
+		// The pickers hide the manager principal (T162), so a peer that already
+		// carries it — membership or allowed — keeps it across the re-enroll,
+		// exactly like the u/i edit paths. The picker choices are explicit:
+		// ClientSet/AllowedSet make the upsert apply them rather than fall back
+		// to the defaults-from-DB path.
+		spec.Name = e.fixedName
+		spec.Groups = m.keepManagerGroup(e.fixedName, spec.Groups)
+		spec.Allowed = m.keepManagerAllowed(e.fixedName, spec.Allowed)
+		spec.ClientSet = true
+		spec.AllowedSet = true
+		heading = "re-enroll " + spec.Name
+	}
 	m.enrollPending = true
 	m.enrollClient = spec.Client
 	m.enrollResult.Store(nil)
@@ -322,7 +427,7 @@ func (m Model) submitEnroll(e enrollFormModal) (tea.Model, tea.Cmd) {
 		holder.Store(&res)
 		return nil
 	}
-	return m.startAction("enroll "+spec.Name, run)
+	return m.startAction(heading, run)
 }
 
 // enrollBaseURL mirrors the CLI's base-url normalization (trim trailing

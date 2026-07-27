@@ -770,9 +770,17 @@ func TestEnrollV2User_Script(t *testing.T) {
 		`chmod 700 "$USER_HOME/.ssh"`,
 		`curl -kfsSL ` + env.srv.URL + `/enroll/` + tok + `?user=$TARGET_USER | tar -xzC "$STAGE"`,
 		`install -m 600 "$STAGE/id_ed25519_` + testInstanceKey + `" "$USER_HOME/.ssh/id_ed25519_` + testInstanceKey + `"`,
-		// grep-guarded idempotent authorized_keys append.
+		// Converging trust-line install: append when this CA's key is absent,
+		// atomic temp-file+mv replace when the line differs (changed allowed
+		// set), no-op when byte-identical.
 		`CA_KEY="$(awk '{print $3}' "$STAGE/ca_authorized_keys")"`,
-		`if ! grep -qF "$CA_KEY" "$USER_HOME/.ssh/authorized_keys"; then cat "$STAGE/ca_authorized_keys" >> "$USER_HOME/.ssh/authorized_keys"; fi`,
+		`CA_LINE="$(head -n1 "$STAGE/ca_authorized_keys")"`,
+		`if ! grep -qF "$CA_KEY" "$USER_HOME/.ssh/authorized_keys"; then`,
+		`cat "$STAGE/ca_authorized_keys" >> "$USER_HOME/.ssh/authorized_keys"`,
+		`elif ! grep -qxF "$CA_LINE" "$USER_HOME/.ssh/authorized_keys"; then`,
+		`{ grep -vF "$CA_KEY" "$USER_HOME/.ssh/authorized_keys" || true; cat "$STAGE/ca_authorized_keys"; } > "$USER_HOME/.ssh/.certhold_ak.tmp"`,
+		`mv "$USER_HOME/.ssh/.certhold_ak.tmp" "$USER_HOME/.ssh/authorized_keys"`,
+		`  ~ ~/.ssh/authorized_keys                   (replaced cert-authority line)`,
 		// keyed, version-agnostic sed splice of ~/.ssh/config.
 		`sed -i -E "/^# BEGIN certhold ` + testInstanceKey + `( v[0-9]+)?\$/,/^# END certhold ` + testInstanceKey + `( v[0-9]+)?\$/d" "$USER_HOME/.ssh/config"`,
 		// T09: the staged hosts-bearing config entry is spliced at install;
@@ -1137,6 +1145,391 @@ func TestEnrollV2Script_ExecutionSmoke_ClientBundle(t *testing.T) {
 	assertInstalledConfigHasAlias(t, home, "Host app1\n    HostName peer4\n    User deploy\n")
 }
 
+// seedReenrollFixture inserts an existing inbound peer plus a staged re-enroll
+// token for it, mirroring what ops.MintEnroll stages on the existing-name path.
+func (e *testEnv) seedReenrollFixture(t *testing.T, name, tok string, tarball []byte, staged db.StagedReenroll) {
+	t.Helper()
+	ctx := context.Background()
+	if err := e.db.InsertPeer(ctx, name, 7, "SHA256:old-"+name, []byte("ssh-ed25519 OLD-"+name), "alice", true, "pull-old-"+name); err != nil {
+		t.Fatalf("InsertPeer: %v", err)
+	}
+	if err := e.db.SetPeerCert(ctx, name, []byte("OLDCERT"), 7); err != nil {
+		t.Fatalf("SetPeerCert: %v", err)
+	}
+	if err := e.db.EnsureGroup(ctx, "infra"); err != nil {
+		t.Fatalf("EnsureGroup: %v", err)
+	}
+	if err := e.db.SetPeerGroups(ctx, name, []string{"infra"}); err != nil {
+		t.Fatalf("SetPeerGroups: %v", err)
+	}
+	if err := e.db.SetPeerAllowedGroups(ctx, name, []string{"infra"}); err != nil {
+		t.Fatalf("SetPeerAllowedGroups: %v", err)
+	}
+	if err := e.db.WithTx(ctx, func(tx *db.Tx) error {
+		return tx.InsertReenrollToken(ctx, tok, name, "infra", "alice", tarball, staged)
+	}); err != nil {
+		t.Fatalf("InsertReenrollToken: %v", err)
+	}
+}
+
+// TestEnrollReenrollRedemptionCommits: redeeming a staged re-enroll token over
+// HTTP streams the tarball, commits the staged material to the peer row, bumps
+// fleet_rev, keeps the target-user report-back, and fires the probe.
+func TestEnrollReenrollRedemptionCommits(t *testing.T) {
+	env := setupTestEnv(t)
+	ctx := context.Background()
+
+	got := make(chan string, 1)
+	inner := NewWithProbe(env.db, func(name, host, user string) { got <- name + "|" + user })
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.RemoteAddr = "203.0.113.11:4444"
+		inner.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+
+	const tok = "tok-reenroll"
+	tb := env.seedUserTarball(t, "vmRE", "alice", []string{"infra"})
+	env.seedReenrollFixture(t, "vmRE", tok, tb, db.StagedReenroll{
+		AuthorizedKey: []byte("ssh-ed25519 NEW-vmRE"),
+		Fingerprint:   "SHA256:new-vmRE",
+		Serial:        99,
+		Cert:          []byte("NEWCERT"),
+		PullToken:     "pull-new-vmRE",
+		Inbound:       true,
+	})
+	revBefore, err := env.db.FleetRev(ctx)
+	if err != nil {
+		t.Fatalf("FleetRev: %v", err)
+	}
+
+	resp, err := http.Get(srv.URL + "/enroll/" + tok + "?user=alice")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, body)
+	}
+	if !bytes.Equal(body, tb) {
+		t.Errorf("streamed tarball differs (%d vs %d bytes)", len(body), len(tb))
+	}
+
+	p, err := env.db.GetPeer(ctx, "vmRE")
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if string(p.AuthorizedKey) != "ssh-ed25519 NEW-vmRE" || p.Fingerprint != "SHA256:new-vmRE" ||
+		p.Serial != 99 || !bytes.Equal(p.Cert, []byte("NEWCERT")) || p.PullToken != "pull-new-vmRE" || !p.Inbound {
+		t.Errorf("staged material not committed at redemption: %+v", p)
+	}
+	if p.TargetUser != "alice" {
+		t.Errorf("TargetUser = %q, want alice (report-back preserved)", p.TargetUser)
+	}
+	if p.Address != "203.0.113.11" {
+		t.Errorf("Address = %q, want the install-time source IP backfill", p.Address)
+	}
+	revAfter, err := env.db.FleetRev(ctx)
+	if err != nil {
+		t.Fatalf("FleetRev: %v", err)
+	}
+	if revAfter != revBefore+1 {
+		t.Errorf("fleet rev %d -> %d, want +1 at redemption", revBefore, revAfter)
+	}
+	select {
+	case v := <-got:
+		if v != "vmRE|alice" {
+			t.Errorf("probe args = %q, want vmRE|alice", v)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("reachability probe was not fired for the re-enroll redemption")
+	}
+
+	// A second fetch is 410 like any consumed token.
+	resp2, err := http.Get(srv.URL + "/enroll/" + tok + "?user=alice")
+	if err != nil {
+		t.Fatalf("re-fetch: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusGone {
+		t.Errorf("re-fetch status = %d, want 410", resp2.StatusCode)
+	}
+}
+
+// TestEnrollReenrollUnredeemedLeavesPeerUntouched: while the staged token sits
+// unredeemed, the peer row keeps its old material entirely.
+func TestEnrollReenrollUnredeemedLeavesPeerUntouched(t *testing.T) {
+	env := setupTestEnv(t)
+	ctx := context.Background()
+
+	const tok = "tok-unredeemed"
+	env.seedReenrollFixture(t, "vmUR", tok, []byte("tb"), db.StagedReenroll{
+		AuthorizedKey: []byte("ssh-ed25519 NEW-vmUR"),
+		Fingerprint:   "SHA256:new-vmUR",
+		Serial:        99,
+		Cert:          []byte("NEWCERT"),
+		PullToken:     "pull-new",
+		Inbound:       false,
+	})
+
+	// The .sh script fetch inspects but must not consume or commit anything.
+	resp, err := http.Get(env.srv.URL + "/enroll/" + tok + ".sh")
+	if err != nil {
+		t.Fatalf("GET .sh: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf(".sh status = %d, want 200", resp.StatusCode)
+	}
+
+	p, err := env.db.GetPeer(ctx, "vmUR")
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if string(p.AuthorizedKey) != "ssh-ed25519 OLD-vmUR" || p.Serial != 7 ||
+		!bytes.Equal(p.Cert, []byte("OLDCERT")) || p.PullToken != "pull-old-vmUR" || !p.Inbound {
+		t.Errorf("peer row must stay untouched while the token is unredeemed: %+v", p)
+	}
+	rev, err := env.db.FleetRev(ctx)
+	if err != nil {
+		t.Fatalf("FleetRev: %v", err)
+	}
+	if rev != 0 {
+		t.Errorf("fleet rev = %d, want 0 pre-redemption", rev)
+	}
+}
+
+// TestEnrollReenrollCommitFailureIs500Retryable is the reviewer-reproduced
+// drift case over HTTP: a group named by the staged token is deleted between
+// mint and redemption. Redemption must answer 500 WITHOUT resurrecting the
+// group or touching the peer row, and the same token must redeem once the
+// group exists again.
+func TestEnrollReenrollCommitFailureIs500Retryable(t *testing.T) {
+	env := setupTestEnv(t)
+	ctx := context.Background()
+
+	const tok = "tok-drift-http"
+	tb := env.seedUserTarball(t, "vmDR", "alice", []string{"infra", "tmpg"})
+	env.seedReenrollFixture(t, "vmDR", "seed-unused", []byte("tb0"), db.StagedReenroll{
+		AuthorizedKey: []byte("k0"), Fingerprint: "f0", Serial: 1, Cert: []byte("c0"), PullToken: "p0", Inbound: true,
+	})
+	if err := env.db.EnsureGroup(ctx, "tmpg"); err != nil {
+		t.Fatalf("EnsureGroup tmpg: %v", err)
+	}
+	if err := env.db.WithTx(ctx, func(tx *db.Tx) error {
+		return tx.InsertReenrollToken(ctx, tok, "vmDR", "infra,tmpg", "alice", tb, db.StagedReenroll{
+			AuthorizedKey: []byte("ssh-ed25519 NEW-vmDR"),
+			Fingerprint:   "SHA256:new-vmDR",
+			Serial:        99,
+			Cert:          []byte("NEWCERT"),
+			PullToken:     "pull-new-vmDR",
+			Inbound:       true,
+		})
+	}); err != nil {
+		t.Fatalf("InsertReenrollToken: %v", err)
+	}
+	if err := env.db.DeleteGroup(ctx, "tmpg"); err != nil {
+		t.Fatalf("DeleteGroup tmpg: %v", err)
+	}
+
+	resp, err := http.Get(env.srv.URL + "/enroll/" + tok + "?user=alice")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%s", resp.StatusCode, body)
+	}
+	if exists, gerr := env.db.GroupExists(ctx, "tmpg"); gerr != nil || exists {
+		t.Errorf("group tmpg resurrected by failed redemption (exists=%v err=%v)", exists, gerr)
+	}
+	p, err := env.db.GetPeer(ctx, "vmDR")
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if string(p.AuthorizedKey) != "ssh-ed25519 OLD-vmDR" || p.Serial != 7 || p.PullToken != "pull-old-vmDR" {
+		t.Errorf("peer row must be untouched after 500: %+v", p)
+	}
+
+	// Re-create the group: the SAME one-liner now redeems and commits.
+	if err := env.db.EnsureGroup(ctx, "tmpg"); err != nil {
+		t.Fatalf("re-create tmpg: %v", err)
+	}
+	resp2, err := http.Get(env.srv.URL + "/enroll/" + tok + "?user=alice")
+	if err != nil {
+		t.Fatalf("retry GET: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp2.Body)
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("retry status = %d, want 200 (token must have stayed redeemable)", resp2.StatusCode)
+	}
+	p, err = env.db.GetPeer(ctx, "vmDR")
+	if err != nil {
+		t.Fatalf("GetPeer after retry: %v", err)
+	}
+	if string(p.AuthorizedKey) != "ssh-ed25519 NEW-vmDR" || p.Serial != 99 {
+		t.Errorf("retry did not commit the staged material: %+v", p)
+	}
+}
+
+// TestEnrollV2Script_CarriesStaleTrustLineRemoval pins the client-bundle
+// branch of the install script: when no ca_authorized_keys is staged but a
+// ca_pub is, this instance's cert-authority line is stripped from
+// authorized_keys.
+func TestEnrollV2Script_CarriesStaleTrustLineRemoval(t *testing.T) {
+	s := v2Script("https://demo.example", "TOKEN123", testInstanceKey)
+	for _, m := range []string{
+		`elif [ -f "$STAGE/ca_pub" ] && [ -f "$USER_HOME/.ssh/authorized_keys" ]; then`,
+		`CA_KEY="$(awk '{print $2}' "$STAGE/ca_pub")"`,
+		`grep -vF "$CA_KEY" "$USER_HOME/.ssh/authorized_keys"`,
+		`(removed cert-authority line)`,
+	} {
+		if !strings.Contains(s, m) {
+			t.Errorf("script missing stale trust-line removal piece %q\nfull:\n%s", m, s)
+		}
+	}
+}
+
+// TestEnrollV2Script_ExecutionSmoke_ClientReenrollRemovesTrustLine runs the
+// install script for a client-style bundle against a HOME that already carries
+// this instance's cert-authority line plus a foreign line: only this
+// instance's line is removed, the peer's other keys survive.
+func TestEnrollV2Script_ExecutionSmoke_ClientReenrollRemovesTrustLine(t *testing.T) {
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skipf("bash not on PATH (%v); skipping execution smoke", err)
+	}
+
+	const baseURL = "https://demo.example"
+	const tok = "TOKENRC1"
+	script := v2Script(baseURL, tok, testInstanceKey)
+	keyFile := peerfiles.V2KeyFileName(testInstanceKey)
+
+	fixturePath := writeFixtureTarball(t, []fixtureEntry{
+		{keyFile, []byte("FAKE_PRIVKEY\n")},
+		{keyFile + "-cert.pub", []byte("ssh-ed25519-cert-v01@openssh.com FAKECERT keyid\n")},
+		{"known_hosts", []byte("")},
+		{"ca_pub", []byte("ssh-ed25519 FAKECAKEY\n")},
+		{"config", []byte(peerfiles.V2SshClientBlock(testInstanceKey))},
+	})
+
+	curlLine := `curl -kfsSL ` + baseURL + `/enroll/` + tok + `?user=$TARGET_USER | tar -xzC "$STAGE"`
+	if !strings.Contains(script, curlLine) {
+		t.Fatalf("script missing curl line %q", curlLine)
+	}
+	patched := strings.Replace(script, curlLine, `tar -xzf `+fixturePath+` -C "$STAGE"`, 1)
+
+	home := t.TempDir()
+	sshDir := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(sshDir, 0o700); err != nil {
+		t.Fatalf("mkdir .ssh: %v", err)
+	}
+	akPath := filepath.Join(sshDir, "authorized_keys")
+	foreign := "ssh-ed25519 SOMEUSERKEY user@laptop\n" +
+		`cert-authority,principals="manager,other" ssh-ed25519 OTHERINSTANCECA other-ca` + "\n"
+	stale := `cert-authority,principals="manager,infra" ssh-ed25519 FAKECAKEY certhold-ca` + "\n"
+	if err := os.WriteFile(akPath, []byte(foreign+stale), 0o600); err != nil {
+		t.Fatalf("seed authorized_keys: %v", err)
+	}
+	scriptPath := filepath.Join(home, "install.sh")
+	if err := os.WriteFile(scriptPath, []byte(patched), 0o700); err != nil {
+		t.Fatalf("write patched script: %v", err)
+	}
+
+	cmd := exec.Command(bashPath, scriptPath)
+	cmd.Env = append(os.Environ(), "HOME="+home, "CERTHOLD_NO_PASSPHRASE=1")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("client re-enroll run failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "removed cert-authority line") {
+		t.Errorf("stdout missing removal notice:\n%s", stdout.String())
+	}
+
+	ak, err := os.ReadFile(akPath)
+	if err != nil {
+		t.Fatalf("read authorized_keys: %v", err)
+	}
+	if strings.Contains(string(ak), "FAKECAKEY") {
+		t.Errorf("stale cert-authority line survives:\n%s", ak)
+	}
+	if string(ak) != foreign {
+		t.Errorf("foreign lines must survive untouched:\ngot:\n%s\nwant:\n%s", ak, foreign)
+	}
+
+	// A second run (already stripped) must not print the removal notice.
+	stdout.Reset()
+	stderr.Reset()
+	cmd = exec.Command(bashPath, scriptPath)
+	cmd.Env = append(os.Environ(), "HOME="+home, "CERTHOLD_NO_PASSPHRASE=1")
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("second run failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "removed cert-authority line") {
+		t.Errorf("second run printed removal notice (idempotency broken):\n%s", stdout.String())
+	}
+}
+
+// TestEnrollV2Script_ExecutionSmoke_ClientReenrollSoleTrustLine: stripping the
+// only line of authorized_keys must not kill the script under set -e (grep -v
+// with no output exits 1) and must leave an empty file.
+func TestEnrollV2Script_ExecutionSmoke_ClientReenrollSoleTrustLine(t *testing.T) {
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skipf("bash not on PATH (%v); skipping execution smoke", err)
+	}
+
+	const baseURL = "https://demo.example"
+	const tok = "TOKENRC2"
+	script := v2Script(baseURL, tok, testInstanceKey)
+	keyFile := peerfiles.V2KeyFileName(testInstanceKey)
+
+	fixturePath := writeFixtureTarball(t, []fixtureEntry{
+		{keyFile, []byte("FAKE_PRIVKEY\n")},
+		{keyFile + "-cert.pub", []byte("ssh-ed25519-cert-v01@openssh.com FAKECERT keyid\n")},
+		{"ca_pub", []byte("ssh-ed25519 FAKECAKEY\n")},
+	})
+	curlLine := `curl -kfsSL ` + baseURL + `/enroll/` + tok + `?user=$TARGET_USER | tar -xzC "$STAGE"`
+	patched := strings.Replace(script, curlLine, `tar -xzf `+fixturePath+` -C "$STAGE"`, 1)
+
+	home := t.TempDir()
+	sshDir := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(sshDir, 0o700); err != nil {
+		t.Fatalf("mkdir .ssh: %v", err)
+	}
+	akPath := filepath.Join(sshDir, "authorized_keys")
+	if err := os.WriteFile(akPath, []byte(`cert-authority,principals="manager,infra" ssh-ed25519 FAKECAKEY certhold-ca`+"\n"), 0o600); err != nil {
+		t.Fatalf("seed authorized_keys: %v", err)
+	}
+	scriptPath := filepath.Join(home, "install.sh")
+	if err := os.WriteFile(scriptPath, []byte(patched), 0o700); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	cmd := exec.Command(bashPath, scriptPath)
+	cmd.Env = append(os.Environ(), "HOME="+home, "CERTHOLD_NO_PASSPHRASE=1")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("sole-line run failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	ak, err := os.ReadFile(akPath)
+	if err != nil {
+		t.Fatalf("read authorized_keys: %v", err)
+	}
+	if len(bytes.TrimSpace(ak)) != 0 {
+		t.Errorf("authorized_keys should be empty after stripping its only line:\n%s", ak)
+	}
+}
+
 // TestEnrollV2Script_ExecutionSmoke_NoStagedConfig exercises the fallback
 // branch: a tarball without a config entry (not minted by this codebase) must
 // still install the hosts-less inline keyed block instead of dying under
@@ -1190,5 +1583,165 @@ func TestEnrollV2Script_ExecutionSmoke_NoStagedConfig(t *testing.T) {
 	}
 	if strings.Contains(string(cfg), "Host app1") {
 		t.Errorf("fallback config unexpectedly carries a Host alias\nconfig:\n%s", cfg)
+	}
+}
+
+// setupTrustLineSmoke patches the served install script to unpack a fixture
+// tarball instead of curling, writes it under home, and returns a runner that
+// executes it against that home and returns its stdout.
+func setupTrustLineSmoke(t *testing.T, home, tok string, entries []fixtureEntry) func() string {
+	t.Helper()
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skipf("bash not on PATH (%v); skipping execution smoke", err)
+	}
+
+	const baseURL = "https://demo.example"
+	script := v2Script(baseURL, tok, testInstanceKey)
+	fixturePath := writeFixtureTarball(t, entries)
+	curlLine := `curl -kfsSL ` + baseURL + `/enroll/` + tok + `?user=$TARGET_USER | tar -xzC "$STAGE"`
+	if !strings.Contains(script, curlLine) {
+		t.Fatalf("script missing curl line %q\nscript:\n%s", curlLine, script)
+	}
+	patched := strings.Replace(script, curlLine, `tar -xzf `+fixturePath+` -C "$STAGE"`, 1)
+	scriptPath := filepath.Join(home, "install.sh")
+	if err := os.WriteFile(scriptPath, []byte(patched), 0o700); err != nil {
+		t.Fatalf("write patched script: %v", err)
+	}
+	return func() string {
+		t.Helper()
+		cmd := exec.Command(bashPath, scriptPath)
+		cmd.Env = append(os.Environ(), "HOME="+home, "CERTHOLD_NO_PASSPHRASE=1")
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("install script run failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+		return stdout.String()
+	}
+}
+
+// inboundReenrollFixture is the minimal inbound bundle whose ca_authorized_keys
+// carries the given staged trust line.
+func inboundReenrollFixture(stagedLine string) []fixtureEntry {
+	keyFile := peerfiles.V2KeyFileName(testInstanceKey)
+	return []fixtureEntry{
+		{keyFile, []byte("FAKE_PRIVKEY\n")},
+		{keyFile + "-cert.pub", []byte("ssh-ed25519-cert-v01@openssh.com FAKECERT keyid\n")},
+		{"ca_authorized_keys", []byte(stagedLine)},
+	}
+}
+
+// TestEnrollV2Script_ExecutionSmoke_ReenrollReplacesTrustLine: an inbound
+// re-enroll whose staged trust line carries a changed allowed set must
+// replace this instance's existing cert-authority line — the file ends with
+// exactly the staged principals, foreign lines survive verbatim, and a
+// second run is a byte-level no-op.
+func TestEnrollV2Script_ExecutionSmoke_ReenrollReplacesTrustLine(t *testing.T) {
+	staged := `cert-authority,principals="manager,web" ssh-ed25519 FAKECAKEY certhold-ca` + "\n"
+	home := t.TempDir()
+	run := setupTrustLineSmoke(t, home, "TOKENRI1", inboundReenrollFixture(staged))
+
+	sshDir := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(sshDir, 0o700); err != nil {
+		t.Fatalf("mkdir .ssh: %v", err)
+	}
+	akPath := filepath.Join(sshDir, "authorized_keys")
+	foreignBefore := "ssh-ed25519 SOMEUSERKEY user@laptop\n"
+	foreignAfter := `cert-authority,principals="manager,other" ssh-ed25519 OTHERINSTANCECA other-ca` + "\n"
+	stale := `cert-authority,principals="manager,tmpg,web" ssh-ed25519 FAKECAKEY certhold-ca` + "\n"
+	if err := os.WriteFile(akPath, []byte(foreignBefore+stale+foreignAfter), 0o600); err != nil {
+		t.Fatalf("seed authorized_keys: %v", err)
+	}
+
+	stdout1 := run()
+	if !strings.Contains(stdout1, "replaced cert-authority line") {
+		t.Errorf("stdout missing replacement notice:\n%s", stdout1)
+	}
+	if strings.Contains(stdout1, "appended cert-authority line") {
+		t.Errorf("replacement run must not claim an append:\n%s", stdout1)
+	}
+	ak, err := os.ReadFile(akPath)
+	if err != nil {
+		t.Fatalf("read authorized_keys: %v", err)
+	}
+	if want := foreignBefore + foreignAfter + staged; string(ak) != want {
+		t.Errorf("authorized_keys after replace:\ngot:\n%s\nwant:\n%s", ak, want)
+	}
+	assertFileMode(t, akPath, 0o600)
+
+	stdout2 := run()
+	if strings.Contains(stdout2, "cert-authority line") {
+		t.Errorf("second run must not touch the trust line:\n%s", stdout2)
+	}
+	ak2, err := os.ReadFile(akPath)
+	if err != nil {
+		t.Fatalf("read authorized_keys after second run: %v", err)
+	}
+	if string(ak2) != string(ak) {
+		t.Errorf("second run changed authorized_keys:\ngot:\n%s\nwant:\n%s", ak2, ak)
+	}
+}
+
+// TestEnrollV2Script_ExecutionSmoke_ReenrollSoleTrustLineReplaced: replacing
+// the only line of authorized_keys must survive set -e (grep -v emits
+// nothing) and end with exactly the staged line.
+func TestEnrollV2Script_ExecutionSmoke_ReenrollSoleTrustLineReplaced(t *testing.T) {
+	staged := `cert-authority,principals="manager,web" ssh-ed25519 FAKECAKEY certhold-ca` + "\n"
+	home := t.TempDir()
+	run := setupTrustLineSmoke(t, home, "TOKENRI2", inboundReenrollFixture(staged))
+
+	sshDir := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(sshDir, 0o700); err != nil {
+		t.Fatalf("mkdir .ssh: %v", err)
+	}
+	akPath := filepath.Join(sshDir, "authorized_keys")
+	stale := `cert-authority,principals="manager,tmpg,web" ssh-ed25519 FAKECAKEY certhold-ca` + "\n"
+	if err := os.WriteFile(akPath, []byte(stale), 0o600); err != nil {
+		t.Fatalf("seed authorized_keys: %v", err)
+	}
+
+	stdout := run()
+	if !strings.Contains(stdout, "replaced cert-authority line") {
+		t.Errorf("stdout missing replacement notice:\n%s", stdout)
+	}
+	ak, err := os.ReadFile(akPath)
+	if err != nil {
+		t.Fatalf("read authorized_keys: %v", err)
+	}
+	if string(ak) != staged {
+		t.Errorf("authorized_keys after sole-line replace:\ngot:\n%s\nwant:\n%s", ak, staged)
+	}
+}
+
+// TestEnrollV2Script_ExecutionSmoke_ReenrollUnchangedTrustLineNoop: when the
+// staged trust line is byte-identical to the installed one (unchanged allowed
+// set), the file bytes stay untouched and no trust-line notice is printed.
+func TestEnrollV2Script_ExecutionSmoke_ReenrollUnchangedTrustLineNoop(t *testing.T) {
+	staged := `cert-authority,principals="manager,web" ssh-ed25519 FAKECAKEY certhold-ca` + "\n"
+	home := t.TempDir()
+	run := setupTrustLineSmoke(t, home, "TOKENRI3", inboundReenrollFixture(staged))
+
+	sshDir := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(sshDir, 0o700); err != nil {
+		t.Fatalf("mkdir .ssh: %v", err)
+	}
+	akPath := filepath.Join(sshDir, "authorized_keys")
+	seeded := "ssh-ed25519 SOMEUSERKEY user@laptop\n" + staged
+	if err := os.WriteFile(akPath, []byte(seeded), 0o600); err != nil {
+		t.Fatalf("seed authorized_keys: %v", err)
+	}
+
+	stdout := run()
+	if strings.Contains(stdout, "cert-authority line") {
+		t.Errorf("unchanged trust line must print no trust-line notice:\n%s", stdout)
+	}
+	ak, err := os.ReadFile(akPath)
+	if err != nil {
+		t.Fatalf("read authorized_keys: %v", err)
+	}
+	if string(ak) != seeded {
+		t.Errorf("unchanged trust line must leave the file bytes untouched:\ngot:\n%s\nwant:\n%s", ak, seeded)
 	}
 }
