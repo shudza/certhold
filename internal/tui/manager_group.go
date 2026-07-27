@@ -42,3 +42,13 @@ func (m Model) keepManagerAllowed(peer string, chosen []string) []string {
 	p, ok := m.peerByName(peer)
 	return withManager(chosen, ok && isMember(p.Allowed, peerfiles.ManagerPrincipal))
 }
+
+// isSelfPeer reports whether name is the manager's own peer row. Group
+// MEMBERSHIP there is meaningless — the manager reaches the fleet through the
+// manager principal, which lives on its cert and in no group — and ops refuses
+// the re-sign, so the membership paths drop the row instead of offering a
+// guaranteed-error target. Allowed-inbound edits on the row stay available:
+// they re-sign nothing.
+func (m Model) isSelfPeer(name string) bool {
+	return m.action.Hostname != "" && name == m.action.Hostname
+}

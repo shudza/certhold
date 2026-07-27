@@ -185,7 +185,7 @@ func TestUpdatePeerEventStreamSuccess(t *testing.T) {
 	var events []Event
 	deps := collectingDeps(dataDir, d, dialer, &events)
 
-	if err := UpdatePeer(ctx, deps, "peer1", []string{"infra"}, ""); err != nil {
+	if err := UpdatePeer(ctx, deps, "peer1", []string{"infra"}, "", "mgr"); err != nil {
 		t.Fatalf("UpdatePeer: %v", err)
 	}
 
@@ -227,7 +227,7 @@ func TestUpdatePeerClientPeerEvents(t *testing.T) {
 	var events []Event
 	deps := collectingDeps(dataDir, d, dialer, &events)
 
-	if err := UpdatePeer(ctx, deps, "laptop", []string{"infra"}, ""); err != nil {
+	if err := UpdatePeer(ctx, deps, "laptop", []string{"infra"}, "", "mgr"); err != nil {
 		t.Fatalf("UpdatePeer: %v", err)
 	}
 	if calls := dialer.snapshot(); len(calls) != 0 {
@@ -259,7 +259,7 @@ func TestUpdatePeerPushFailureEmitsPeerFailed(t *testing.T) {
 	var events []Event
 	deps := collectingDeps(dataDir, d, dialer, &events)
 
-	err := UpdatePeer(ctx, deps, "peer1", []string{"infra"}, "")
+	err := UpdatePeer(ctx, deps, "peer1", []string{"infra"}, "", "mgr")
 	if err == nil {
 		t.Fatal("expected dial error")
 	}

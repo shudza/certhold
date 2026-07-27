@@ -130,7 +130,7 @@ func (m Model) startGroupMembership() (tea.Model, tea.Cmd) {
 	}
 	opts := make([]string, 0, len(m.data.Peers))
 	for _, p := range m.data.Peers {
-		if p.Revoked {
+		if p.Revoked || m.isSelfPeer(p.Name) {
 			continue
 		}
 		opts = append(opts, p.Name)
@@ -141,13 +141,13 @@ func (m Model) startGroupMembership() (tea.Model, tea.Cmd) {
 	// routes submit to launchBatchMembers, which assigns every chosen peer to the
 	// group via batch UpdatePeer (continue-on-error, one progress modal).
 	if names := m.markedNames(); len(names) > 0 {
-		pre := append([]string(nil), g.Members...)
+		pre := m.membershipPre(g.Members)
 		seen := map[string]bool{}
 		for _, p := range pre {
 			seen[p] = true
 		}
 		for _, n := range names {
-			if p, ok := m.peerByName(n); ok && !p.Revoked && !seen[n] {
+			if p, ok := m.peerByName(n); ok && !p.Revoked && !seen[n] && !m.isSelfPeer(n) {
 				pre = append(pre, n)
 			}
 		}
@@ -156,8 +156,23 @@ func (m Model) startGroupMembership() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.batchKind = batchNone
-	m.pushModal(newPickModalKind(pickGroupMembers, "members of "+g.Name, g.Name, opts, g.Members))
+	m.pushModal(newPickModalKind(pickGroupMembers, "members of "+g.Name, g.Name, opts, m.membershipPre(g.Members)))
 	return m, nil
+}
+
+// membershipPre is the members picker's pre-checked set: the group's current
+// members minus the manager's self row, which the options omit. A legacy self
+// membership (added by CLI before the row was guarded) would otherwise open
+// pre-checked-but-unlistable and submit as a removal ops refuses.
+func (m Model) membershipPre(members []string) []string {
+	pre := make([]string, 0, len(members))
+	for _, name := range members {
+		if m.isSelfPeer(name) {
+			continue
+		}
+		pre = append(pre, name)
+	}
+	return pre
 }
 
 // startEditAllowed opens the peer-side allowed-inbound multi-pick pre-checked
@@ -231,8 +246,9 @@ type membershipDelta struct {
 // membershipDeltas diffs the picker's selection against its pre-checked snapshot
 // and returns one delta per CHANGED peer only — added peers gain the group,
 // removed peers lose it. Unchanged peers produce no delta, so launchMembership
-// never re-signs or pushes them. The new group list is computed off each peer's
-// current groups in m.data (the load that opened the picker).
+// never re-signs or pushes them. Revoked peers and the manager's self row are
+// never deltas: ops refuses a self-row re-sign. The new group list is computed
+// off each peer's current groups in m.data (the load that opened the picker).
 func (m Model) membershipDeltas(group string, selected []string) []membershipDelta {
 	want := make(map[string]bool, len(selected))
 	for _, p := range selected {
@@ -240,7 +256,7 @@ func (m Model) membershipDeltas(group string, selected []string) []membershipDel
 	}
 	var deltas []membershipDelta
 	for _, p := range m.data.Peers {
-		if p.Revoked {
+		if p.Revoked || m.isSelfPeer(p.Name) {
 			continue
 		}
 		was := isMember(p.Groups, group)
@@ -268,10 +284,11 @@ func (m Model) launchMembership(mo pickModal) (tea.Model, tea.Cmd) {
 	if len(deltas) == 0 {
 		return m, nil
 	}
+	hostname := m.action.Hostname
 	run := func(ctx context.Context, deps ops.Deps) error {
 		var failed []string
 		for _, d := range deltas {
-			if err := ops.UpdatePeer(ctx, deps, d.peer, d.newGroups, ""); err != nil {
+			if err := ops.UpdatePeer(ctx, deps, d.peer, d.newGroups, "", hostname); err != nil {
 				failed = append(failed, d.peer)
 			}
 		}

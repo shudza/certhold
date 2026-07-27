@@ -54,7 +54,8 @@ func (s *frameSink) snapshot() string {
 // integrationCA seeds an encrypted-CA db with three inbound peers (alpha in
 // infra/db, beta in infra, gamma in infra) plus the "infra"/"db"/"web" groups,
 // so the run can enroll, edit membership, and batch-revoke against real ops
-// paths. certhold's own peer "alpha" anchors the rekey self-files. Returns the
+// paths. All three are ordinary peers: the run drives no rekey, so the model's
+// self row (selfRowName) is deliberately outside this fleet. Returns the
 // dataDir, db, dbPath and the CA passphrase the run must type.
 func integrationEnv(t *testing.T) (string, *db.DB, string, string) {
 	t.Helper()
@@ -120,7 +121,7 @@ func TestIntegrationFullSurface(t *testing.T) {
 	defer cancel()
 
 	action := ActionDeps{
-		Hostname: "alpha",
+		Hostname: selfRowName,
 		BuildDeps: func(onEvent func(ops.Event), caUnlock, peerPass func() ([]byte, error), hostKeyConfirm func(host, fingerprint, keyType string) (bool, error)) ops.Deps {
 			return ops.Deps{
 				DB:             d,
@@ -277,12 +278,12 @@ func TestIntegrationFullSurface(t *testing.T) {
 	key("3")
 	waitFrame("FLEET")
 	// beta and gamma were cleared+deleted; their rows must be gone, while the
-	// manager peer alpha survives.
+	// unmarked peer alpha survives.
 	if !waitDBDeleted(t, d, "beta") || !waitDBDeleted(t, d, "gamma") {
 		t.Fatal("db: beta/gamma rows not deleted after default batch revoke")
 	}
 	if _, err := d.GetPeer(ctx, "alpha"); err != nil {
-		t.Fatalf("db: manager peer alpha must survive a peer revoke: %v", err)
+		t.Fatalf("db: unmarked peer alpha must survive a batch revoke: %v", err)
 	}
 
 	// quit cleanly and confirm a clean program exit (no deadlock).

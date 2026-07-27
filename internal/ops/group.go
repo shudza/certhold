@@ -41,8 +41,9 @@ func GroupCreate(ctx context.Context, deps Deps, name string) error {
 
 // GroupRename renames a group and pushes the cascading rewrite to every
 // affected peer: members get a re-signed cert, allowing peers get their
-// authorized_keys principals rewritten. hostname is certhold's own peer name
-// anchoring the self push identity. Per-peer progress is emitted as
+// authorized_keys principals rewritten. hostname is certhold's own peer name:
+// it anchors the self push identity and marks the self row, whose re-signed
+// cert keeps the manager principal no group grants. Per-peer progress is emitted as
 // EventPeerStart/EventPeerDone/EventPeerFailed (Done carries no Msg: the CLI
 // historically printed nothing per peer).
 func GroupRename(ctx context.Context, deps Deps, oldName, newName, hostname string) error {
@@ -64,6 +65,10 @@ func GroupRename(ctx context.Context, deps Deps, oldName, newName, hostname stri
 	}
 
 	casc, err := loadGroupCascade(ctx, deps.DB, oldName)
+	if err != nil {
+		return err
+	}
+	selfName, err := resolveSelfName(hostname)
 	if err != nil {
 		return err
 	}
@@ -132,7 +137,7 @@ func GroupRename(ctx context.Context, deps Deps, oldName, newName, hostname stri
 			if err != nil {
 				return fmt.Errorf("get peer groups %q: %w", peerName, err)
 			}
-			certBytes, err = signAndStorePeerCert(ctx, deps.DB, caObj, peer, currentGroups)
+			certBytes, err = signAndStorePeerCert(ctx, deps.DB, caObj, peer, currentGroups, peerName == selfName)
 			if err != nil {
 				return err
 			}
@@ -174,7 +179,8 @@ func GroupRename(ctx context.Context, deps Deps, oldName, newName, hostname stri
 // affected peer (member certs re-signed without the group, allowing peers'
 // authorized_keys principals rewritten). The group row is only deleted once
 // every affected peer was pushed; stragglers keep it. hostname is certhold's
-// own peer name anchoring the self push identity.
+// own peer name: it anchors the self push identity and marks the self row,
+// whose re-signed cert keeps the manager principal no group grants.
 func GroupDelete(ctx context.Context, deps Deps, name, hostname string) error {
 	if name == peerfiles.ManagerPrincipal {
 		return fmt.Errorf("group %q is reserved", name)
@@ -189,6 +195,10 @@ func GroupDelete(ctx context.Context, deps Deps, name, hostname string) error {
 	}
 
 	casc, err := loadGroupCascade(ctx, deps.DB, name)
+	if err != nil {
+		return err
+	}
+	selfName, err := resolveSelfName(hostname)
 	if err != nil {
 		return err
 	}
@@ -248,7 +258,7 @@ func GroupDelete(ctx context.Context, deps Deps, name, hostname string) error {
 				return fmt.Errorf("get peer groups %q: %w", peerName, err)
 			}
 			newGroups := removeStr(currentGroups, name)
-			certBytes, err = signAndStorePeerCert(ctx, deps.DB, caObj, peer, newGroups)
+			certBytes, err = signAndStorePeerCert(ctx, deps.DB, caObj, peer, newGroups, peerName == selfName)
 			if err != nil {
 				return err
 			}
@@ -423,13 +433,14 @@ func loadGroupCascade(ctx context.Context, d *db.DB, name string) (groupCascade,
 }
 
 // signAndStorePeerCert re-signs a member peer's cert with the given groups and
-// persists the new cert + serial.
-func signAndStorePeerCert(ctx context.Context, d *db.DB, caObj *ca.CA, peer *db.Peer, groups []string) ([]byte, error) {
+// persists the new cert + serial. self marks the manager's own peer row, whose
+// cert keeps the manager principal no matter what its groups say.
+func signAndStorePeerCert(ctx context.Context, d *db.DB, caObj *ca.CA, peer *db.Peer, groups []string, self bool) ([]byte, error) {
 	pk, _, _, _, err := ssh.ParseAuthorizedKey(peer.AuthorizedKey)
 	if err != nil {
 		return nil, fmt.Errorf("parse peer pubkey %q: %w", peer.Name, err)
 	}
-	principals := append([]string{peer.Name}, groups...)
+	principals := certPrincipals(peer.Name, groups, self)
 	certBytes, serial, err := caObj.SignCert(ca.SignOptions{
 		Pubkey:     pk,
 		KeyID:      peer.Name,

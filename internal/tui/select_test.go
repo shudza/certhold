@@ -380,8 +380,8 @@ func TestEscPrecedenceModalFilterMarks(t *testing.T) {
 }
 
 // TestSinglePeerUnchangedWhenNoMarks checks x/u with zero marks still drive the
-// single selected peer (the v1 path), not a batch. Targets beta: alpha is the
-// model's self peer and revoke refuses it.
+// single selected peer (the v1 path), not a batch. Targets beta, one of the
+// seed's ordinary peers.
 func TestSinglePeerUnchangedWhenNoMarks(t *testing.T) {
 	dataDir, d, pass := seedThreePeers(t)
 	m := batchModel(t, dataDir, d) // no marks
@@ -497,6 +497,33 @@ func TestMarkedRowsRenderTextualMarker(t *testing.T) {
 	}
 	if !strings.Contains(v, "2 marked") {
 		t.Fatalf("footer missing mark count:\n%s", v)
+	}
+}
+
+// TestPickModalEmptyStateCopyPerKind: the members picker lists PEERS (minus the
+// manager's own row), so a fleet where nothing else is enrolled yet must not be
+// told to create a group — groups do exist there. The group-option pickers keep
+// the group copy.
+func TestPickModalEmptyStateCopyPerKind(t *testing.T) {
+	const (
+		peerCopy  = "no other peers yet — enroll one with 'e'"
+		groupCopy = "no groups exist — create one with 'certhold group create'"
+	)
+
+	members := newPickModalKind(pickGroupMembers, "members of infra", "infra", nil, nil)
+	body := strings.Join(members.view(60, 8), "\n")
+	if !strings.Contains(body, peerCopy) {
+		t.Fatalf("empty members picker missing the peer copy:\n%s", body)
+	}
+	if strings.Contains(body, "certhold group create") {
+		t.Fatalf("empty members picker offers group-creation copy:\n%s", body)
+	}
+
+	for _, kind := range []pickKind{pickPeerGroups, pickPeerAllowed} {
+		p := newPickModalKind(kind, "groups", "alpha", nil, nil)
+		if got := strings.Join(p.view(60, 8), "\n"); !strings.Contains(got, groupCopy) {
+			t.Fatalf("empty group picker (kind %d) lost the group copy:\n%s", kind, got)
+		}
 	}
 }
 

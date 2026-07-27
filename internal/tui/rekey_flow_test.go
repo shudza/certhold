@@ -15,7 +15,8 @@ import (
 func TestRekeyConfirmGate(t *testing.T) {
 	dataDir, d, _ := seedActionEnv(t)
 	rec := &recDial{}
-	m := recModel(t, dataDir, d, rec)
+	// rekey rotates the self row last, so it must be one of the seeded peers.
+	m := recModelHostname(t, dataDir, d, rec, "alpha")
 
 	m = press(t, m, "K")
 	rk, ok := topAny(m).(rekeyModal)
@@ -49,7 +50,8 @@ func TestRekeyConfirmGate(t *testing.T) {
 func TestRekeySuccessStreamsPeerEvents(t *testing.T) {
 	dataDir, d, pass := seedActionEnv(t)
 	rec := &recDial{}
-	m := recModel(t, dataDir, d, rec)
+	// rekey rotates the self row last, so it must be one of the seeded peers.
+	m := recModelHostname(t, dataDir, d, rec, "alpha")
 
 	m = press(t, m, "K")
 	m = typeRunes(m, "rekey")
@@ -79,7 +81,8 @@ func TestRekeySuccessStreamsPeerEvents(t *testing.T) {
 func TestRekeyStragglerSurfaced(t *testing.T) {
 	dataDir, d, pass := seedActionEnv(t)
 	rec := &recDial{failHosts: map[string]bool{"beta": true}}
-	m := recModel(t, dataDir, d, rec)
+	// rekey rotates the self row last, so it must be one of the seeded peers.
+	m := recModelHostname(t, dataDir, d, rec, "alpha")
 
 	m = press(t, m, "K")
 	m = typeRunes(m, "rekey")
@@ -108,7 +111,8 @@ func TestRekeyStragglerSurfaced(t *testing.T) {
 func TestRekeyRotatePassphraseMismatchReprompts(t *testing.T) {
 	dataDir, d, pass := seedActionEnv(t)
 	rec := &recDial{}
-	m := recModel(t, dataDir, d, rec)
+	// rekey rotates the self row last, so it must be one of the seeded peers.
+	m := recModelHostname(t, dataDir, d, rec, "alpha")
 
 	m = press(t, m, "K")
 	m = typeRunes(m, "rekey")

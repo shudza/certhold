@@ -88,6 +88,13 @@ func seedActionEnv(t *testing.T) (string, *db.DB, string) {
 	return dataDir, d, pass
 }
 
+// selfRowName is the manager's own peer name the action models carry. It is
+// deliberately NOT one of the seeded peers, so alpha/beta stay ordinary edit
+// targets: group edits on the self row are refused by ops and its row is kept
+// out of the members picker. Flows that need the self row to exist in the fleet
+// (rekey) pass a seeded name explicitly.
+const selfRowName = "mgr"
+
 func actionModel(t *testing.T, dataDir string, d *db.DB) Model {
 	t.Helper()
 	reload := func(ctx context.Context) (fleetData, error) {
@@ -99,7 +106,7 @@ func actionModel(t *testing.T, dataDir string, d *db.DB) Model {
 	}
 	m := NewModel(context.Background(), data, reload)
 	m = m.withAction(ActionDeps{
-		Hostname: "alpha",
+		Hostname: selfRowName,
 		BuildDeps: func(onEvent func(ops.Event), caUnlock, peerPass func() ([]byte, error), hostKeyConfirm func(host, fingerprint, keyType string) (bool, error)) ops.Deps {
 			return ops.Deps{
 				DB:             d,
@@ -220,7 +227,8 @@ func peerGroups(t *testing.T, d *db.DB, name string) []string {
 
 // TestRevokeFlow drives confirm → progress on the default (clear+delete) revoke
 // path and asserts the db row is deleted and the reloaded table no longer lists
-// the peer. Targets beta: alpha is the model's self peer and revoke refuses it.
+// the peer. Targets beta, one of the seed's ordinary peers (the model's self
+// row is selfRowName, which this fleet does not contain).
 func TestRevokeFlow(t *testing.T) {
 	dataDir, d, pass := seedActionEnv(t)
 	m := actionModel(t, dataDir, d)

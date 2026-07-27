@@ -245,8 +245,15 @@ func (p pickModal) title() string { return p.heading }
 
 func (p pickModal) view(w, h int) []string {
 	if len(p.options) == 0 {
+		// The members picker lists peers, not groups, and drops the manager's own
+		// row — a fresh fleet with nothing enrolled yet reaches this branch with
+		// groups that do exist, so it needs its own copy.
+		empty := "no groups exist — create one with 'certhold group create'"
+		if p.kind == pickGroupMembers {
+			empty = "no other peers yet — enroll one with 'e'"
+		}
 		return []string{
-			modalHintStyle.Render("no groups exist — create one with 'certhold group create'"),
+			modalHintStyle.Render(empty),
 			"",
 			modalHintStyle.Render("enter apply · esc cancel"),
 		}

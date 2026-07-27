@@ -14,8 +14,17 @@ import (
 
 // UpdatePeer reissues a peer's cert with new groups (sign → db SetPeerGroups/
 // SetPeerCert → BumpFleetRev → push to inbound peer). host overrides the dial
-// target; empty means the peer's DialHost().
-func UpdatePeer(ctx context.Context, deps Deps, name string, groups []string, host string) error {
+// target; empty means the peer's DialHost(). hostname is certhold's own peer
+// name when the caller has one; empty resolves it from the OS. The manager's
+// own peer row is refused: its groups are meaningless (the manager reaches the
+// whole fleet through the manager principal, which lives on its cert and not in
+// the group table) and re-signing it here would strip that principal. `rekey`
+// is the sanctioned path that re-issues the self cert.
+func UpdatePeer(ctx context.Context, deps Deps, name string, groups []string, host, hostname string) error {
+	if err := guardNotSelfPeer("edit the groups of", name, hostname); err != nil {
+		return err
+	}
+
 	caObj, err := ca.LoadWithPassphrase(filepath.Join(deps.DataDir, "ca"), deps.CAUnlock)
 	if err != nil {
 		return fmt.Errorf("load ca: %w", err)
@@ -40,7 +49,7 @@ func UpdatePeer(ctx context.Context, deps Deps, name string, groups []string, ho
 		return fmt.Errorf("parse peer pubkey: %w", err)
 	}
 
-	principals := append([]string{name}, groups...)
+	principals := certPrincipals(name, groups, false)
 	certBytes, serial, err := caObj.SignCert(ca.SignOptions{
 		Pubkey:     pk,
 		KeyID:      name,

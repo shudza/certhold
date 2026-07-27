@@ -188,8 +188,9 @@ func (m Model) launchBatchEditGroups(groups []string) (tea.Model, tea.Cmd) {
 	for _, n := range live {
 		byPeer[n] = m.keepManagerGroup(n, groups)
 	}
+	hostname := m.action.Hostname
 	op := func(ctx context.Context, deps ops.Deps, name string) error {
-		return ops.UpdatePeer(ctx, deps, name, byPeer[name], "")
+		return ops.UpdatePeer(ctx, deps, name, byPeer[name], "", hostname)
 	}
 	return m.startBatch("update", live, op)
 }
@@ -209,8 +210,9 @@ func (m Model) launchBatchMembers(mo pickModal) (tea.Model, tea.Cmd) {
 		byPeer[d.peer] = d.newGroups
 		names = append(names, d.peer)
 	}
+	hostname := m.action.Hostname
 	op := func(ctx context.Context, deps ops.Deps, name string) error {
-		return ops.UpdatePeer(ctx, deps, name, byPeer[name], "")
+		return ops.UpdatePeer(ctx, deps, name, byPeer[name], "", hostname)
 	}
 	return m.startBatch("update", names, op)
 }

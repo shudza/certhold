@@ -456,6 +456,14 @@ func TestRekeyHappyPathRemovesStagingDir(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dataDir, "ca", "ca.pub")); err != nil {
 		t.Fatalf("live ca.pub missing after rekey: %v", err)
 	}
+	// Rekey is the sanctioned path that re-issues the self cert: it must carry
+	// the manager principal (no group grants it) while ordinary peers must not.
+	if got := strings.Join(storedPrincipals(t, d, "mgr"), ","); got != "mgr,manager,infra" {
+		t.Errorf("self principals after rekey = %q, want \"mgr,manager,infra\"", got)
+	}
+	if got := strings.Join(storedPrincipals(t, d, "alpha"), ","); got != "alpha,infra" {
+		t.Errorf("alpha principals after rekey = %q, want \"alpha,infra\"", got)
+	}
 	for _, e := range events {
 		if e.Type == EventWarn {
 			t.Errorf("unexpected warn on happy path: %+v", e)
