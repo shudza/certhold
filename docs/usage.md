@@ -397,13 +397,23 @@ running/failed/done status and `esc` hint stay pinned below the transcript.
 | `D` | Groups | Delete the selected group (confirm; body spells out the affected members and allow-by rewrites). |
 | `m` | Groups | Edit the selected group's membership (peer multi-pick). |
 
-The reserved `manager` group is never offered as a choice in the peer group
-pickers (`e`, `u`, `i`): inbound access from the manager is implicit on every
-peer, so there is nothing to grant. A peer that already carries the principal —
-one enrolled with `--groups manager` — keeps it across those edits. Certhold's
-own peer row is never offered in the `m` members picker at all: it reaches the
-fleet through that principal, and re-signing its cert from group membership
-would strip it.
+No TUI picker can grant or revoke the reserved `manager` group. It is not
+offered as a choice in the peer group pickers (`e`, `u`, `i`): inbound access
+from the manager is implicit on every peer, so there is nothing to grant, and a
+peer that already carries the principal — one enrolled with `--groups manager` —
+keeps it across those edits. Its row stays listed in the Groups view (it is real
+fleet state, and `certhold list` shows it too), but every mutating key on that
+row refuses with a footer note instead of opening a modal: `m` (membership,
+including the marked-peers batch), `R` (rename) and `D` (delete). Adding or
+removing the principal stays an explicit CLI act — [`enroll`](#enroll) or
+[`update`](#update) with `--groups manager`.
+
+Certhold's own peer row is never offered in the `m` members picker at all: it
+reaches the fleet through that principal, and re-signing its cert from group
+membership would strip it. Its groups are not editable from the Peers view
+either — `u` opens the picker, but applying it fails with the same refusal
+[`update`](#update) gives on the command line; [`rekey`](#rekey) is the path
+that re-issues the self cert.
 
 **Multi-select + batch (Peers view):** `space` marks/unmarks the selected peer
 (marks are keyed by peer name and survive a filter change; the footer shows the

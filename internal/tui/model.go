@@ -63,6 +63,11 @@ type Model struct {
 	filter    textinput.Model
 	filters   [viewCount]string
 
+	// notice is the footer flash a refused key leaves behind (a mutating key on
+	// the reserved manager group's row). It opens no modal and starts no action,
+	// so the next keypress clears it.
+	notice string
+
 	readOnly    bool
 	action      ActionDeps
 	pass        *passSession
@@ -231,6 +236,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case actionDoneMsg:
 		return m.handleActionDone(msg)
 	case tea.KeyMsg:
+		m.notice = ""
 		if _, ok := m.topModal(); ok {
 			return m.handleModalKey(msg)
 		}

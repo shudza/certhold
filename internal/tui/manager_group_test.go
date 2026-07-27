@@ -238,6 +238,123 @@ func TestBatchEditGroupsKeepsManagerPerPeer(t *testing.T) {
 	}
 }
 
+// groupsModel is an action model parked on the groups view.
+func groupsModel(t *testing.T, dataDir string, d *db.DB) Model {
+	t.Helper()
+	m := actionModel(t, dataDir, d)
+	return press(t, m, "2")
+}
+
+// pickGroup rewinds to the first group row before selecting, so a test can move
+// the cursor back up to a row above the current one.
+func pickGroup(t *testing.T, m Model, name string) Model {
+	t.Helper()
+	for i := 0; i < len(m.data.Groups)+2; i++ {
+		m = press(t, m, "k")
+	}
+	return selectGroup(t, m, name)
+}
+
+func assertReservedRefusal(t *testing.T, m Model, key string) {
+	t.Helper()
+	if len(m.modals) != 0 {
+		t.Fatalf("%s on the manager row opened a modal: %T", key, topAny(m))
+	}
+	if !strings.Contains(m.notice, "reserved") || !strings.Contains(m.notice, peerfiles.ManagerPrincipal) {
+		t.Fatalf("%s on the manager row left notice %q, want a reserved-group refusal", key, m.notice)
+	}
+	if !strings.Contains(m.View(), "reserved") {
+		t.Fatalf("%s refusal is not rendered in the frame", key)
+	}
+}
+
+// TestGroupMembersRefusedOnManagerRow: m on the reserved group's row opens no
+// picker and flashes why; an ordinary row still opens the members picker, and
+// the reserved row stays listed with its real membership untouched.
+func TestGroupMembersRefusedOnManagerRow(t *testing.T) {
+	dataDir, d := seedManagerEnv(t)
+	m := groupsModel(t, dataDir, d)
+
+	m = pickGroup(t, m, peerfiles.ManagerPrincipal)
+	m = press(t, m, "m")
+	assertReservedRefusal(t, m, "m")
+	if m.batchKind != batchNone {
+		t.Fatalf("refused m armed a batch: kind=%v", m.batchKind)
+	}
+	if mem := groupMembers(t, d, peerfiles.ManagerPrincipal); strings.Join(mem, ",") != "beta" {
+		t.Fatalf("manager members = %v, want [beta] (refusal must not touch the DB)", mem)
+	}
+
+	m = pickGroup(t, m, "infra")
+	m = press(t, m, "m")
+	pick, ok := topAny(m).(pickModal)
+	if !ok || pick.kind != pickGroupMembers {
+		t.Fatalf("m on an ordinary group did not open the members picker; top=%T", topAny(m))
+	}
+	if m.notice != "" {
+		t.Fatalf("notice %q survived the next keypress", m.notice)
+	}
+}
+
+// TestGroupMembersRefusedOnManagerRowWithMarks: the marked-peers variant is
+// refused too, and the refusal neither consumes the marks nor arms the batch —
+// the operator can aim the same marked set at a real group.
+func TestGroupMembersRefusedOnManagerRowWithMarks(t *testing.T) {
+	dataDir, d := seedManagerEnv(t)
+	m := batchModel(t, dataDir, d)
+	m = markPeer(t, m, "alpha")
+	m = markPeer(t, m, "beta")
+
+	m = press(t, m, "2")
+	m = pickGroup(t, m, peerfiles.ManagerPrincipal)
+	m = press(t, m, "m")
+	assertReservedRefusal(t, m, "m (marked)")
+	if m.batchKind != batchNone {
+		t.Fatalf("refused batch m armed a batch: kind=%v", m.batchKind)
+	}
+	if len(m.markedNames()) != 2 {
+		t.Fatalf("marks after refusal = %v, want alpha+beta kept", m.markedNames())
+	}
+
+	m = pickGroup(t, m, "infra")
+	m = press(t, m, "m")
+	if _, ok := topAny(m).(pickModal); !ok || m.batchKind != batchMembers {
+		t.Fatalf("kept marks did not drive a batch on an ordinary group; top=%T kind=%v", topAny(m), m.batchKind)
+	}
+}
+
+// TestGroupRenameDeleteRefusedOnManagerRow: R and D on the reserved row refuse
+// in the TUI (ops would reject them anyway) instead of walking the operator
+// through a name entry or a confirm that can only fail.
+func TestGroupRenameDeleteRefusedOnManagerRow(t *testing.T) {
+	dataDir, d := seedManagerEnv(t)
+	m := groupsModel(t, dataDir, d)
+	m = pickGroup(t, m, peerfiles.ManagerPrincipal)
+
+	m = press(t, m, "R")
+	assertReservedRefusal(t, m, "R")
+	m = press(t, m, "D")
+	assertReservedRefusal(t, m, "D")
+
+	if !groupExists(t, d, peerfiles.ManagerPrincipal) {
+		t.Fatal("manager group vanished from the DB")
+	}
+	if !fleetHasManagerGroup(m) {
+		t.Fatal("manager group is no longer listed in the groups view")
+	}
+
+	m = pickGroup(t, m, "infra")
+	m = press(t, m, "R")
+	if _, ok := topAny(m).(textModal); !ok {
+		t.Fatalf("R on an ordinary group did not open the rename modal; top=%T", topAny(m))
+	}
+	m = press(t, m, "esc")
+	m = press(t, m, "D")
+	if _, ok := topAny(m).(confirmModal); !ok {
+		t.Fatalf("D on an ordinary group did not open the delete confirm; top=%T", topAny(m))
+	}
+}
+
 func fleetHasManagerGroup(m Model) bool {
 	for _, g := range m.data.Groups {
 		if g.Name == peerfiles.ManagerPrincipal {

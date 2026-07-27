@@ -43,6 +43,21 @@ func (m Model) keepManagerAllowed(peer string, chosen []string) []string {
 	return withManager(chosen, ok && isMember(p.Allowed, peerfiles.ManagerPrincipal))
 }
 
+// isReservedGroup reports whether a groups-view row is the reserved manager
+// principal. The row stays listed (it is real DB state), but every mutating key
+// on it refuses: membership there would mint or strip a fleet-wide principal,
+// and ops rejects a rename or delete outright. Granting it stays a deliberate
+// CLI act (`enroll`/`update --groups manager`).
+func isReservedGroup(name string) bool {
+	return name == peerfiles.ManagerPrincipal
+}
+
+// reservedGroupNotice is the footer flash a refused key raises, so the operator
+// learns why nothing opened instead of watching the key do nothing.
+func reservedGroupNotice(why string) string {
+	return "group \"" + peerfiles.ManagerPrincipal + "\" is reserved — " + why
+}
+
 // isSelfPeer reports whether name is the manager's own peer row. Group
 // MEMBERSHIP there is meaningless — the manager reaches the fleet through the
 // manager principal, which lives on its cert and in no group — and ops refuses
