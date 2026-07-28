@@ -26,6 +26,7 @@ func newEnrollCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			groupsSet := cmd.Flags().Changed("groups")
 			baseURL, err := resolveBaseURL(cmd)
 			if err != nil {
 				return err
@@ -50,10 +51,14 @@ func newEnrollCmd() *cobra.Command {
 				return err
 			}
 			clientMode := noInbound || client
+			clientSet := cmd.Flags().Changed("no-inbound") || cmd.Flags().Changed("client")
 
-			groups, err := parseGroups(groupsCSV)
-			if err != nil {
-				return err
+			var groups []string
+			if groupsSet {
+				groups, err = parseGroups(groupsCSV)
+				if err != nil {
+					return err
+				}
 			}
 
 			dataDir, err := cmd.Root().PersistentFlags().GetString("data-dir")
@@ -82,34 +87,37 @@ func newEnrollCmd() *cobra.Command {
 
 			deps := ops.Deps{DB: d, DataDir: dataDir, CAUnlock: caUnlock.get}
 			res, err := ops.MintEnroll(ctx, deps, ops.EnrollSpec{
-				Name:    name,
-				Groups:  groups,
-				Allowed: groups,
-				User:    targetUser,
-				Address: address,
-				Client:  clientMode,
-				BaseURL: baseURL,
+				Name:      name,
+				Groups:    groups,
+				Allowed:   groups,
+				User:      targetUser,
+				Address:   address,
+				Client:    clientMode,
+				ClientSet: clientSet,
+				BaseURL:   baseURL,
 			})
 			if err != nil {
 				return err
 			}
 
 			fmt.Fprintf(cmd.OutOrStdout(), "%s\n", res.OneLiner)
-			if clientMode {
+			if res.Reenroll {
+				fmt.Fprintf(cmd.OutOrStdout(), "re-enroll minted for existing peer %s: its current keys and config stay active until the one-liner runs on the peer; this supersedes any earlier unredeemed one-liner for it.\n", res.PeerName)
+			}
+			if res.Client {
 				fmt.Fprintf(cmd.OutOrStdout(), "client-style peer; manager cannot push to it; updates arrive via `certhold-cli refresh`.\n")
 			}
 			return nil
 		},
 	}
 
-	cmd.Flags().String("groups", "", "comma-separated list of groups for the new peer (required)")
+	cmd.Flags().String("groups", "", "comma-separated list of groups for the peer (required for a new peer; a re-enroll of an existing peer defaults to its current groups)")
 	cmd.Flags().String("base-url", legacyBaseURL, "base URL of certhold's enroll endpoint (defaults to value persisted by `init`, then $CERTHOLD_BASE_URL, then https://certhold.home.lan)")
 	cmd.Flags().String("user", "", "Unix user owning the ~/.ssh files; when set, acts as a hard constraint at install time (--user root targets /root/.ssh)")
 	cmd.Flags().String("hostname", "", "deprecated/unused under layout v2 (host trust is TOFU known_hosts)")
 	cmd.Flags().String("address", "", "network address (host or IP) certhold uses to SSH to this peer; defaults to the source IP seen at install, then the peer name")
 	cmd.Flags().Bool("no-inbound", false, "enroll a client-style peer: no inbound trust line, other peers cannot SSH into it, updates arrive via certhold-cli refresh")
 	cmd.Flags().Bool("client", false, "alias for --no-inbound")
-	_ = cmd.MarkFlagRequired("groups")
 
 	return cmd
 }

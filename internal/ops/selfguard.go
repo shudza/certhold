@@ -3,6 +3,9 @@ package ops
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+
+	"golang.org/x/crypto/ssh"
 
 	"github.com/shudza/certhold/internal/peerfiles"
 )
@@ -58,4 +61,32 @@ func guardNotSelfPeer(op, name, hostname string) error {
 		return fmt.Errorf("refusing to %s certhold's own peer %q: this is the manager's self row; deleting or altering it breaks rekey, revoke --rekey and all pushes", op, name)
 	}
 	return nil
+}
+
+// selfCertKeyID resolves the manager's own peer name from its self cert under
+// <data-dir>/self/<home>/.ssh/ (its KeyID is the name init enrolled the
+// manager as). This is authoritative even when `init --hostname` named the
+// manager differently from os.Hostname(), which the hostname-based guard alone
+// cannot see. Empty when no self cert is found or parseable (fresh test
+// environments) — callers treat that as "no extra signal".
+func selfCertKeyID(dataDir, instanceKey string) string {
+	certFile := peerfiles.V2CertFileName(instanceKey)
+	candidates := []string{filepath.Join(dataDir, "self", "root", ".ssh", certFile)}
+	if matches, err := filepath.Glob(filepath.Join(dataDir, "self", "home", "*", ".ssh", certFile)); err == nil {
+		candidates = append(candidates, matches...)
+	}
+	for _, path := range candidates {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		pk, _, _, _, err := ssh.ParseAuthorizedKey(raw)
+		if err != nil {
+			continue
+		}
+		if cert, ok := pk.(*ssh.Certificate); ok {
+			return cert.KeyId
+		}
+	}
+	return ""
 }

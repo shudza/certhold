@@ -7,14 +7,20 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
+	"golang.org/x/crypto/ssh"
+
 	_ "modernc.org/sqlite"
 
+	"github.com/shudza/certhold/internal/ca"
 	"github.com/shudza/certhold/internal/db"
 	"github.com/shudza/certhold/internal/peerfiles"
 )
@@ -364,6 +370,579 @@ func TestReachableHostEntriesNonManagerIntersectionOnly(t *testing.T) {
 	want := []peerfiles.HostEntry{{Name: "peerA", Address: "10.0.0.1", User: "root"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("reachableHostEntries = %+v, want only peerA (%+v)", got, want)
+	}
+}
+
+// snapshotPeer captures the full DB-visible state of a peer for byte-identical
+// comparisons around a re-enroll mint.
+func snapshotPeer(t *testing.T, d *db.DB, name string) string {
+	t.Helper()
+	ctx := context.Background()
+	p, err := d.GetPeer(ctx, name)
+	if err != nil {
+		t.Fatalf("GetPeer %s: %v", name, err)
+	}
+	groups, err := d.GetPeerGroups(ctx, name)
+	if err != nil {
+		t.Fatalf("GetPeerGroups %s: %v", name, err)
+	}
+	allowed, err := d.GetPeerAllowedGroups(ctx, name)
+	if err != nil {
+		t.Fatalf("GetPeerAllowedGroups %s: %v", name, err)
+	}
+	return fmt.Sprintf("%+v|groups=%v|allowed=%v", *p, groups, allowed)
+}
+
+// TestMintReenrollLeavesPeerRowUntouched: minting a re-enroll for an existing
+// peer stages everything on the token row — the peer's DB state is
+// byte-identical afterwards and fleet_rev does not move.
+func TestMintReenrollLeavesPeerRowUntouched(t *testing.T) {
+	dataDir, d := setupOpsEnv(t, "peerA")
+	ctx := context.Background()
+	deps := Deps{DB: d, DataDir: dataDir}
+
+	before := snapshotPeer(t, d, "peerA")
+	revBefore, err := d.FleetRev(ctx)
+	if err != nil {
+		t.Fatalf("FleetRev: %v", err)
+	}
+
+	res, err := MintEnroll(ctx, deps, EnrollSpec{Name: "peerA", BaseURL: "https://certhold.home.lan"})
+	if err != nil {
+		t.Fatalf("MintEnroll re-enroll: %v", err)
+	}
+	if !res.Reenroll {
+		t.Error("Reenroll = false, want true for an existing peer")
+	}
+	if res.Client {
+		t.Error("Client = true, want false (peerA is inbound and no flag was set)")
+	}
+
+	if after := snapshotPeer(t, d, "peerA"); after != before {
+		t.Errorf("peer state changed by re-enroll mint:\nbefore: %s\nafter:  %s", before, after)
+	}
+	revAfter, err := d.FleetRev(ctx)
+	if err != nil {
+		t.Fatalf("FleetRev: %v", err)
+	}
+	if revAfter != revBefore {
+		t.Errorf("fleet rev moved at mint: %d -> %d (must only bump at redemption)", revBefore, revAfter)
+	}
+}
+
+// TestMintReenrollDefaultsFromDB: with no flags, the staged token carries the
+// peer's current groups and target user, and the tarball ships an inbound
+// trust line built from the current allowed set.
+func TestMintReenrollDefaultsFromDB(t *testing.T) {
+	dataDir, d := setupOpsEnv(t, "peerA")
+	ctx := context.Background()
+	if err := d.EnsureGroup(ctx, "db"); err != nil {
+		t.Fatalf("EnsureGroup: %v", err)
+	}
+	if err := d.SetPeerAllowedGroups(ctx, "peerA", []string{"infra", "db"}); err != nil {
+		t.Fatalf("SetPeerAllowedGroups: %v", err)
+	}
+	deps := Deps{DB: d, DataDir: dataDir}
+
+	res, err := MintEnroll(ctx, deps, EnrollSpec{Name: "peerA", BaseURL: "https://certhold.home.lan"})
+	if err != nil {
+		t.Fatalf("MintEnroll: %v", err)
+	}
+
+	peerName, groupsCSV, targetUser, tarball, err := d.ConsumeToken(ctx, res.Token)
+	if err != nil {
+		t.Fatalf("ConsumeToken: %v", err)
+	}
+	if peerName != "peerA" || groupsCSV != "infra" || targetUser != "root" {
+		t.Errorf("token = (%q,%q,%q), want peerA/infra/root (defaults from DB)", peerName, groupsCSV, targetUser)
+	}
+	ak := tarballFile(t, tarball, "ca_authorized_keys")
+	if !strings.HasPrefix(ak, `cert-authority,principals="manager,db,infra" `) &&
+		!strings.HasPrefix(ak, `cert-authority,principals="manager,infra,db" `) {
+		t.Errorf("trust line principals should be the current allowed set: %q", ak)
+	}
+	if !hasTarballEntry(t, tarball, "certhold-cli") {
+		t.Error("re-enroll bundle must ship certhold-cli (the motivating upgrade path)")
+	}
+}
+
+// TestMintReenrollCommitAppliesStagedConfig: redeeming the re-enroll token
+// commits the fresh key/cert/pull-token to the peer row (a full db-level
+// mint->consume round trip through the real staged material).
+func TestMintReenrollCommitAppliesStagedConfig(t *testing.T) {
+	dataDir, d := setupOpsEnv(t, "peerA")
+	ctx := context.Background()
+	deps := Deps{DB: d, DataDir: dataDir}
+
+	old, err := d.GetPeer(ctx, "peerA")
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	res, err := MintEnroll(ctx, deps, EnrollSpec{Name: "peerA", BaseURL: "https://certhold.home.lan"})
+	if err != nil {
+		t.Fatalf("MintEnroll: %v", err)
+	}
+	if _, _, _, _, err := d.ConsumeToken(ctx, res.Token); err != nil {
+		t.Fatalf("ConsumeToken: %v", err)
+	}
+	p, err := d.GetPeer(ctx, "peerA")
+	if err != nil {
+		t.Fatalf("GetPeer after consume: %v", err)
+	}
+	if bytes.Equal(p.AuthorizedKey, old.AuthorizedKey) {
+		t.Error("peer key unchanged after redemption; re-enroll must mint a fresh keypair")
+	}
+	if p.Serial == old.Serial || len(p.Cert) == 0 || p.PullToken == old.PullToken || p.PullToken == "" {
+		t.Errorf("staged material not committed: serial %d->%d, cert %d bytes, pull %q->%q",
+			old.Serial, p.Serial, len(p.Cert), old.PullToken, p.PullToken)
+	}
+	cert, err := parseCert(p.Cert)
+	if err != nil {
+		t.Fatalf("parse committed cert: %v", err)
+	}
+	if !bytes.Equal(ssh.MarshalAuthorizedKey(cert.Key), p.AuthorizedKey) {
+		t.Error("committed cert is not signed for the committed key")
+	}
+	rev, err := d.FleetRev(ctx)
+	if err != nil {
+		t.Fatalf("FleetRev: %v", err)
+	}
+	if rev != 1 {
+		t.Errorf("fleet rev = %d, want 1 (bumped once, at redemption)", rev)
+	}
+}
+
+// TestMintReenrollSupersedesPriorToken: a second re-enroll mint invalidates the
+// first token (not-found afterwards) while the new one redeems normally.
+func TestMintReenrollSupersedesPriorToken(t *testing.T) {
+	dataDir, d := setupOpsEnv(t, "peerA")
+	ctx := context.Background()
+	deps := Deps{DB: d, DataDir: dataDir}
+
+	first, err := MintEnroll(ctx, deps, EnrollSpec{Name: "peerA", BaseURL: "https://certhold.home.lan"})
+	if err != nil {
+		t.Fatalf("first MintEnroll: %v", err)
+	}
+	second, err := MintEnroll(ctx, deps, EnrollSpec{Name: "peerA", BaseURL: "https://certhold.home.lan"})
+	if err != nil {
+		t.Fatalf("second MintEnroll: %v", err)
+	}
+
+	if _, _, _, _, err := d.LookupToken(ctx, first.Token); !errors.Is(err, db.ErrTokenNotFound) {
+		t.Errorf("superseded token lookup err = %v, want ErrTokenNotFound", err)
+	}
+	if _, _, _, tarball, err := d.ConsumeToken(ctx, second.Token); err != nil || len(tarball) == 0 {
+		t.Fatalf("second token must redeem: err=%v tarball=%d bytes", err, len(tarball))
+	}
+}
+
+// TestMintReenrollClientTransition: --client on a re-enroll stages a
+// no-inbound bundle (ca_pub for the stale-line strip, no ca_authorized_keys)
+// and an inbound=false commit.
+func TestMintReenrollClientTransition(t *testing.T) {
+	dataDir, d := setupOpsEnv(t, "peerA")
+	ctx := context.Background()
+	deps := Deps{DB: d, DataDir: dataDir}
+
+	res, err := MintEnroll(ctx, deps, EnrollSpec{
+		Name: "peerA", Client: true, ClientSet: true, BaseURL: "https://certhold.home.lan",
+	})
+	if err != nil {
+		t.Fatalf("MintEnroll --client: %v", err)
+	}
+	if !res.Client {
+		t.Error("Client = false, want true")
+	}
+
+	// Peer row still inbound until redemption.
+	p, err := d.GetPeer(ctx, "peerA")
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if !p.Inbound {
+		t.Fatal("peer flipped to client at mint; must only flip at redemption")
+	}
+
+	_, _, _, tarball, err := d.ConsumeToken(ctx, res.Token)
+	if err != nil {
+		t.Fatalf("ConsumeToken: %v", err)
+	}
+	if hasTarballEntry(t, tarball, "ca_authorized_keys") {
+		t.Error("client re-enroll bundle must not ship ca_authorized_keys")
+	}
+	if !hasTarballEntry(t, tarball, "ca_pub") {
+		t.Error("client re-enroll bundle must ship ca_pub for the stale trust-line strip")
+	}
+	p, err = d.GetPeer(ctx, "peerA")
+	if err != nil {
+		t.Fatalf("GetPeer after consume: %v", err)
+	}
+	if p.Inbound {
+		t.Error("Inbound = true after client re-enroll redemption, want false")
+	}
+	allowed, err := d.GetPeerAllowedGroups(ctx, "peerA")
+	if err != nil {
+		t.Fatalf("GetPeerAllowedGroups: %v", err)
+	}
+	if len(allowed) != 0 {
+		t.Errorf("allowed = %v, want none after client transition", allowed)
+	}
+}
+
+// TestMintReenrollInboundTransition: a client peer re-enrolled without flags
+// stays client; with an explicit inbound choice it stages a trust-line-bearing
+// bundle and flips inbound at redemption with symmetric allowed rows.
+func TestMintReenrollInboundTransition(t *testing.T) {
+	dataDir, d := setupOpsEnv(t)
+	ctx := context.Background()
+	if err := d.InsertPeer(ctx, "laptop", 5, "fp-l", []byte("ssh-ed25519 OLD"), "alice", false, "pull-old"); err != nil {
+		t.Fatalf("InsertPeer: %v", err)
+	}
+	if err := d.SetPeerGroups(ctx, "laptop", []string{"infra"}); err != nil {
+		t.Fatalf("SetPeerGroups: %v", err)
+	}
+	deps := Deps{DB: d, DataDir: dataDir}
+
+	// Default: stays client.
+	res, err := MintEnroll(ctx, deps, EnrollSpec{Name: "laptop", BaseURL: "https://certhold.home.lan"})
+	if err != nil {
+		t.Fatalf("MintEnroll default: %v", err)
+	}
+	if !res.Client {
+		t.Error("re-enroll of a client peer without flags must stay client")
+	}
+
+	// Explicit inbound choice flips it.
+	res, err = MintEnroll(ctx, deps, EnrollSpec{
+		Name: "laptop", Client: false, ClientSet: true, BaseURL: "https://certhold.home.lan",
+	})
+	if err != nil {
+		t.Fatalf("MintEnroll inbound: %v", err)
+	}
+	if res.Client {
+		t.Error("Client = true, want false for an explicit inbound re-enroll")
+	}
+	_, _, _, tarball, err := d.ConsumeToken(ctx, res.Token)
+	if err != nil {
+		t.Fatalf("ConsumeToken: %v", err)
+	}
+	ak := tarballFile(t, tarball, "ca_authorized_keys")
+	if !strings.HasPrefix(ak, `cert-authority,principals="manager,infra" `) {
+		t.Errorf("trust line = %q, want manager,infra (symmetric with groups)", ak)
+	}
+	p, err := d.GetPeer(ctx, "laptop")
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if !p.Inbound {
+		t.Error("Inbound = false after inbound re-enroll redemption, want true")
+	}
+	allowed, err := d.GetPeerAllowedGroups(ctx, "laptop")
+	if err != nil {
+		t.Fatalf("GetPeerAllowedGroups: %v", err)
+	}
+	if !reflect.DeepEqual(allowed, []string{"infra"}) {
+		t.Errorf("allowed = %v, want [infra]", allowed)
+	}
+}
+
+// TestMintReenrollAllowedSetHonored: an explicit Allowed choice (the TUI
+// form's picker) is staged and applied at redemption, overriding the
+// preserve-current default, and the tarball trust line mirrors it.
+func TestMintReenrollAllowedSetHonored(t *testing.T) {
+	dataDir, d := setupOpsEnv(t, "peerA")
+	ctx := context.Background()
+	if err := d.EnsureGroup(ctx, "db"); err != nil {
+		t.Fatalf("EnsureGroup: %v", err)
+	}
+	deps := Deps{DB: d, DataDir: dataDir}
+
+	res, err := MintEnroll(ctx, deps, EnrollSpec{
+		Name:       "peerA",
+		Allowed:    []string{"db"},
+		AllowedSet: true,
+		BaseURL:    "https://certhold.home.lan",
+	})
+	if err != nil {
+		t.Fatalf("MintEnroll AllowedSet: %v", err)
+	}
+
+	// Unredeemed: DB allowed still the current set.
+	allowed, err := d.GetPeerAllowedGroups(ctx, "peerA")
+	if err != nil {
+		t.Fatalf("GetPeerAllowedGroups: %v", err)
+	}
+	if !reflect.DeepEqual(allowed, []string{"infra"}) {
+		t.Fatalf("allowed changed at mint: %v", allowed)
+	}
+
+	_, _, _, tarball, err := d.ConsumeToken(ctx, res.Token)
+	if err != nil {
+		t.Fatalf("ConsumeToken: %v", err)
+	}
+	ak := tarballFile(t, tarball, "ca_authorized_keys")
+	if !strings.HasPrefix(ak, `cert-authority,principals="manager,db" `) {
+		t.Errorf("trust line = %q, want manager,db (the explicit allowed set)", ak)
+	}
+	allowed, err = d.GetPeerAllowedGroups(ctx, "peerA")
+	if err != nil {
+		t.Fatalf("GetPeerAllowedGroups after commit: %v", err)
+	}
+	if !reflect.DeepEqual(allowed, []string{"db"}) {
+		t.Errorf("allowed after commit = %v, want [db]", allowed)
+	}
+}
+
+// TestMintReenrollAllowedSetValidatesGroups: an explicit allowed list is
+// group-exists validated at mint like the membership list.
+func TestMintReenrollAllowedSetValidatesGroups(t *testing.T) {
+	dataDir, d := setupOpsEnv(t, "peerA")
+	ctx := context.Background()
+	deps := Deps{DB: d, DataDir: dataDir}
+
+	_, err := MintEnroll(ctx, deps, EnrollSpec{
+		Name:       "peerA",
+		Allowed:    []string{"nope"},
+		AllowedSet: true,
+		BaseURL:    "https://certhold.home.lan",
+	})
+	if err == nil || !strings.Contains(err.Error(), `group "nope" does not exist`) {
+		t.Fatalf("err = %v, want group-does-not-exist for the allowed list", err)
+	}
+}
+
+// TestMintReenrollGroupEditPushUsesOldKey is the unredeemed-one-liner safety
+// property end to end: after a re-enroll mint, a group edit + push cycle still
+// re-signs and pushes a cert for the peer's OLD key, so the live peer (which
+// never ran the one-liner) keeps working.
+func TestMintReenrollGroupEditPushUsesOldKey(t *testing.T) {
+	dataDir, d := setupOpsEnv(t, "peerA")
+	ctx := context.Background()
+
+	old, err := d.GetPeer(ctx, "peerA")
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+
+	mintDeps := Deps{DB: d, DataDir: dataDir}
+	if _, err := MintEnroll(ctx, mintDeps, EnrollSpec{Name: "peerA", BaseURL: "https://certhold.home.lan"}); err != nil {
+		t.Fatalf("MintEnroll re-enroll: %v", err)
+	}
+
+	dialer := &fakeDialer{readData: map[string][]byte{
+		"/root/.ssh/authorized_keys": opsCALine(t, dataDir, "manager", "infra"),
+	}}
+	var events []Event
+	deps := collectingDeps(dataDir, d, dialer, &events)
+	if err := UpdatePeer(ctx, deps, "peerA", []string{"infra"}, "", "mgr"); err != nil {
+		t.Fatalf("UpdatePeer after re-enroll mint: %v", err)
+	}
+
+	instanceKey, err := EnsureInstanceKey(ctx, d)
+	if err != nil {
+		t.Fatalf("EnsureInstanceKey: %v", err)
+	}
+	certPath := PeerCertRemotePath(old, instanceKey)
+	var pushedCert []byte
+	for _, c := range dialer.snapshot() {
+		if c.op == "write" && c.path == certPath {
+			pushedCert = c.content
+		}
+	}
+	if pushedCert == nil {
+		t.Fatalf("no cert write to %s in push calls: %+v", certPath, dialer.snapshot())
+	}
+	cert, err := parseCert(pushedCert)
+	if err != nil {
+		t.Fatalf("parse pushed cert: %v", err)
+	}
+	if !bytes.Equal(ssh.MarshalAuthorizedKey(cert.Key), old.AuthorizedKey) {
+		t.Error("pushed cert is not signed for the peer's OLD key; the unredeemed re-enroll leaked into the push path")
+	}
+}
+
+// TestMintReenrollRefusesSelf: the manager's own row cannot be re-enrolled.
+func TestMintReenrollRefusesSelf(t *testing.T) {
+	dataDir, d := setupOpsEnv(t, "mgrhost")
+	ctx := context.Background()
+	selfGuardSetHostname(t, "mgrhost")
+	deps := Deps{DB: d, DataDir: dataDir}
+
+	_, err := MintEnroll(ctx, deps, EnrollSpec{Name: "mgrhost", BaseURL: "https://certhold.home.lan"})
+	if err == nil {
+		t.Fatal("expected self-guard refusal")
+	}
+	if !strings.Contains(err.Error(), "refusing to re-enroll") || !strings.Contains(err.Error(), "self row") {
+		t.Errorf("err = %q, want the self-guard refusal", err)
+	}
+}
+
+// TestMintReenrollRefusesSelfByCert: the self row is refused even when it was
+// named via `init --hostname` and differs from os.Hostname() — the self cert
+// on disk (KeyID = manager name) is the second guard signal.
+func TestMintReenrollRefusesSelfByCert(t *testing.T) {
+	dataDir, d := setupOpsEnv(t, "namedmgr")
+	ctx := context.Background()
+	selfGuardSetHostname(t, "some-other-host")
+
+	caObj, err := ca.LoadWithPassphrase(filepath.Join(dataDir, "ca"), nil)
+	if err != nil {
+		t.Fatalf("load ca: %v", err)
+	}
+	_, _, sshPub, err := ca.GeneratePeerKey()
+	if err != nil {
+		t.Fatalf("GeneratePeerKey: %v", err)
+	}
+	certBytes, _, err := caObj.SignCert(ca.SignOptions{
+		Pubkey: sshPub, KeyID: "namedmgr", Principals: []string{"namedmgr", peerfiles.ManagerPrincipal},
+	})
+	if err != nil {
+		t.Fatalf("SignCert: %v", err)
+	}
+	key := mustInstanceKey(t, d)
+	selfSSH := filepath.Join(dataDir, "self", "home", "alice", ".ssh")
+	if err := os.MkdirAll(selfSSH, 0o700); err != nil {
+		t.Fatalf("mkdir self: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(selfSSH, peerfiles.V2CertFileName(key)), certBytes, 0o644); err != nil {
+		t.Fatalf("write self cert: %v", err)
+	}
+
+	deps := Deps{DB: d, DataDir: dataDir}
+	_, err = MintEnroll(ctx, deps, EnrollSpec{Name: "namedmgr", BaseURL: "https://certhold.home.lan"})
+	if err == nil {
+		t.Fatal("expected self-guard refusal via the self cert")
+	}
+	if !strings.Contains(err.Error(), "refusing to re-enroll") || !strings.Contains(err.Error(), "self row") {
+		t.Errorf("err = %q, want the self-guard refusal", err)
+	}
+}
+
+// TestMintReenrollRefusesRevoked: a revoked row is not silently resurrected.
+func TestMintReenrollRefusesRevoked(t *testing.T) {
+	dataDir, d := setupOpsEnv(t, "peerA")
+	ctx := context.Background()
+	if err := d.SetPeerRevoked(ctx, "peerA"); err != nil {
+		t.Fatalf("SetPeerRevoked: %v", err)
+	}
+	deps := Deps{DB: d, DataDir: dataDir}
+
+	_, err := MintEnroll(ctx, deps, EnrollSpec{Name: "peerA", BaseURL: "https://certhold.home.lan"})
+	if err == nil {
+		t.Fatal("expected revoked refusal")
+	}
+	if !strings.Contains(err.Error(), "revoked") {
+		t.Errorf("err = %q, want revoked refusal", err)
+	}
+}
+
+// TestMintEnrollNewNameRequiresGroups: the new-name path still demands
+// --groups.
+func TestMintEnrollNewNameRequiresGroups(t *testing.T) {
+	dataDir, d := setupOpsEnv(t)
+	ctx := context.Background()
+	deps := Deps{DB: d, DataDir: dataDir}
+
+	_, err := MintEnroll(ctx, deps, EnrollSpec{Name: "brandnew", BaseURL: "https://certhold.home.lan"})
+	if err == nil {
+		t.Fatal("expected groups-required error")
+	}
+	if !strings.Contains(err.Error(), "--groups is required") {
+		t.Errorf("err = %q, want --groups-required", err)
+	}
+}
+
+// TestMintReenrollManagerGroup: T157 semantics survive the re-enroll path — an
+// explicit --groups manager mints a cert carrying the manager principal.
+func TestMintReenrollManagerGroup(t *testing.T) {
+	dataDir, d := setupManagerFixture(t)
+	ctx := context.Background()
+	deps := Deps{DB: d, DataDir: dataDir}
+
+	res, err := MintEnroll(ctx, deps, EnrollSpec{
+		Name:    "peerA",
+		Groups:  []string{peerfiles.ManagerPrincipal},
+		Allowed: []string{peerfiles.ManagerPrincipal},
+		BaseURL: "https://certhold.home.lan",
+	})
+	if err != nil {
+		t.Fatalf("MintEnroll --groups manager: %v", err)
+	}
+	_, groupsCSV, _, tarball, err := d.ConsumeToken(ctx, res.Token)
+	if err != nil {
+		t.Fatalf("ConsumeToken: %v", err)
+	}
+	if groupsCSV != peerfiles.ManagerPrincipal {
+		t.Errorf("groups CSV = %q, want manager", groupsCSV)
+	}
+	certRaw := tarballFile(t, tarball, "id_ed25519_"+mustInstanceKey(t, d)+"-cert.pub")
+	cert, err := parseCert([]byte(certRaw))
+	if err != nil {
+		t.Fatalf("parse minted cert: %v", err)
+	}
+	if !slices.Contains(cert.ValidPrincipals, peerfiles.ManagerPrincipal) {
+		t.Errorf("cert principals = %v, want manager included", cert.ValidPrincipals)
+	}
+}
+
+// TestMintReenrollRejectsUnknownGroup: group-exists validation is unchanged on
+// the re-enroll path.
+func TestMintReenrollRejectsUnknownGroup(t *testing.T) {
+	dataDir, d := setupOpsEnv(t, "peerA")
+	ctx := context.Background()
+	deps := Deps{DB: d, DataDir: dataDir}
+
+	before := snapshotPeer(t, d, "peerA")
+	_, err := MintEnroll(ctx, deps, EnrollSpec{
+		Name: "peerA", Groups: []string{"nope"}, Allowed: []string{"nope"}, BaseURL: "https://certhold.home.lan",
+	})
+	if err == nil || !strings.Contains(err.Error(), `group "nope" does not exist`) {
+		t.Fatalf("err = %v, want group-does-not-exist", err)
+	}
+	if after := snapshotPeer(t, d, "peerA"); after != before {
+		t.Errorf("failed re-enroll mint changed peer state:\nbefore: %s\nafter:  %s", before, after)
+	}
+}
+
+func mustInstanceKey(t *testing.T, d *db.DB) string {
+	t.Helper()
+	key, err := EnsureInstanceKey(context.Background(), d)
+	if err != nil {
+		t.Fatalf("EnsureInstanceKey: %v", err)
+	}
+	return key
+}
+
+func parseCert(b []byte) (*ssh.Certificate, error) {
+	pk, _, _, _, err := ssh.ParseAuthorizedKey(b)
+	if err != nil {
+		return nil, err
+	}
+	cert, ok := pk.(*ssh.Certificate)
+	if !ok {
+		return nil, fmt.Errorf("not a certificate: %T", pk)
+	}
+	return cert, nil
+}
+
+func hasTarballEntry(t *testing.T, tarball []byte, name string) bool {
+	t.Helper()
+	gz, err := gzip.NewReader(bytes.NewReader(tarball))
+	if err != nil {
+		t.Fatalf("gzip.NewReader: %v", err)
+	}
+	tr := tar.NewReader(gz)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return false
+		}
+		if err != nil {
+			t.Fatalf("tar.Next: %v", err)
+		}
+		if hdr.Name == name {
+			return true
+		}
 	}
 }
 

@@ -90,8 +90,9 @@ address is reachable from the manager, pass --address to certhold enroll next ti
 
 `+` marks files certhold installs whole; `~` marks files it edits in place
 (`known_hosts` and `authorized_keys` lines are only printed if this install
-actually appended them, so a re-run on an already-trusted peer shows fewer
-lines). If `~/.local/bin` is not on the user's `PATH`, the script prints
+actually changed them — the `authorized_keys` notice reads `appended` or
+`replaced cert-authority line` accordingly — so a re-run on an already-trusted
+peer shows fewer lines). If `~/.local/bin` is not on the user's `PATH`, the script prints
 `hint: ~/.local/bin is not on your PATH; add it to run certhold-cli by name` —
 it never edits shell rc files. The host in the `Success` line comes from the
 peer's own `hostname -f`; if that isn't the address reachable from the manager,
@@ -107,7 +108,7 @@ What happens under the hood:
   and stores the signed cert on the peer row, so the peer can later pull
   refreshed material from `serve`.
 - The peer's `curl … | bash` fetches a small install script, then the tarball,
-  unpacks it into the invoking user's `~/.ssh/`, appends the `cert-authority`
+  unpacks it into the invoking user's `~/.ssh/`, converges the `cert-authority`
   line, splices the keyed `~/.ssh/config` block, and installs `certhold-cli`
   plus its conf file. Nothing system-wide changes and there is no `sshd` reload.
 
@@ -177,6 +178,59 @@ Onboarding is the same one-liner; the changed-files output simply lacks the
 [architecture.md](architecture.md#client-style-peers-and-the-pull-channel) for
 the push-vs-pull model and
 [`certhold-cli`](#certhold-cli-on-the-peer) for the peer-side commands.
+
+### Re-enrolling an existing peer
+
+`certhold enroll <name>` with a name that already exists does **not** error: it
+mints a fresh one-liner that, when run on the peer, reconfigures it **in
+place** — new keypair and cert, replaced files, `certhold-cli` installed, a new
+pull token. Running the same enroll twice yields the same end state. Use it to
+ship `certhold-cli` to peers enrolled before it existed, to fix a lost or
+corrupted install, or to switch a peer between inbound and client-style
+(`--client` and back — this is the documented path from client back to
+inbound; re-enrolling an inbound peer to `--client` also removes its
+`cert-authority` trust line at install).
+
+On a re-enroll all flags are optional and default to the peer's current
+configuration: `--groups`, `--user`, `--address`, and the `--client`/inbound
+choice. Passing a flag overrides just that setting. Note the user default is an
+install-time constraint too: the one-liner must be run as the recorded target
+user (a different OS user is rejected with `user mismatch`), so pass `--user`
+to move a peer to a new account. An inbound peer's allowed-inbound set (curated
+with `group allow`/`disallow`) is preserved; a client peer re-enrolled inbound
+starts symmetric (allowed = groups), like a fresh enroll. Either way the
+install converges the peer's `cert-authority` trust line on the staged allowed
+set — a line whose principals no longer match (say, after a re-enroll from the
+TUI with an edited allowed picker) is replaced in place, not left behind. The
+manager's own row is refused, as is a revoked row.
+
+The [TUI](#tui) offers the same reconfigure as `E` on a peer's detail pane: the
+enroll form opens pre-filled with that peer's current config (name fixed) and
+submit mints the same staged one-liner. The plain `e` enroll form keeps
+rejecting taken names — a typo must not silently become a re-key; intentional
+re-enroll is only reachable from a specific peer's detail page (or by naming
+an existing peer on the command line).
+
+The key property is **stage at mint, commit at redemption**: the mint changes
+nothing about the live peer — the new key, cert, pull token and configuration
+are staged on the token row, and only redeeming the one-liner on the peer
+commits them (atomically, bumping the fleet revision and re-running the
+reachability probe). An unredeemed one-liner leaves the peer exactly as it was,
+forever: group edits and pushes keep working against the peer's old key.
+Minting a new enroll for the same peer supersedes any earlier unredeemed
+one-liner for it (the old token answers `404` and its bundle is destroyed).
+
+Two consequences to know about:
+
+- Group edits made between mint and redemption are overwritten at redemption by
+  the mint-time configuration (the cert was signed at mint); the fleet-revision
+  bump plus the next push/`certhold-cli refresh` reconcile everything after.
+  A group **deleted or renamed** in between makes the one-liner fail (nothing
+  is committed and no group is implicitly re-created) until `enroll` is re-run
+  against the current state.
+- The peer's previous certificate is superseded, not revoked: like an `update`
+  re-sign, it stays valid until the next `rekey`/`revoke`. See
+  [security.md](security.md).
 
 ### Serve endpoints
 
@@ -280,14 +334,16 @@ certhold enroll <name> --groups <a,b,c> [--base-url URL]
 
 Mints a one-time token, signs the peer cert (sign-at-mint), builds and stores the
 install tarball, records the peer (with a standing pull token and the signed
-cert), and prints the onboarding one-liner. Errors if a peer of that name
-already exists. Every group named in `--groups` must already exist — create them
-up front with [`group create`](#group-create); there is no implicit creation. No
-SSH push — the peer pulls its tarball from `serve`.
+cert), and prints the onboarding one-liner. Enrolling a name that **already
+exists** is a supported in-place reconfigure — see
+[re-enrolling an existing peer](#re-enrolling-an-existing-peer). Every group
+named in `--groups` must already exist — create them up front with
+[`group create`](#group-create); there is no implicit creation. No SSH push —
+the peer pulls its tarball from `serve`.
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--groups` | — (**required**) | Comma-separated groups for the new peer (≥1, deduped). |
+| `--groups` | — (**required** for a new peer) | Comma-separated groups for the peer (≥1, deduped). Optional on a re-enroll, where it defaults to the peer's current groups. |
 | `--base-url` | persisted / fallback | Enroll base URL for the one-liner. Precedence: flag > `$CERTHOLD_BASE_URL` > the `base_url` persisted by `init` > `https://certhold.home.lan`. |
 | `--user` | — | Pin the install user; a hard constraint at install time. Use `--user root` (and run the one-liner as root) to manage `/root/.ssh`. |
 | `--address` | — | Network address (host or IP) certhold dials to reach this peer. Defaults to the source IP seen at install, then the peer name. See [Name vs. address](#name-vs-address). |
@@ -388,6 +444,7 @@ running/failed/done status and `esc` hint stay pinned below the transcript.
 | Key | View | Action |
 |---|---|---|
 | `e` | Peers, Groups | Enroll a new peer (form: name, groups, allowed-inbound, user, address, client toggle). The result screen shows the `curl … \| bash` one-liner; the pull token is never rendered. A duplicate name is rejected live as it is typed. |
+| `E` | Peers (detail pane) | [Re-enroll](#re-enrolling-an-existing-peer) the peer shown in the detail pane: the same form opens pre-filled with its current config (name fixed), and submit mints the staged one-liner — nothing changes on the peer until it runs. The manager's own row and revoked rows refuse with a footer note. |
 | `u` | Peers | Edit the selected peer's group membership (multi-pick, pre-checked with its current groups). |
 | `i` | Peers | Edit which groups may **connect into** the selected peer (allowed-inbound multi-pick). |
 | `x` | Peers | Revoke the selected peer (confirm → revoke + CA rekey to exclude it). |
@@ -398,7 +455,7 @@ running/failed/done status and `esc` hint stay pinned below the transcript.
 | `m` | Groups | Edit the selected group's membership (peer multi-pick). |
 
 No TUI picker can grant or revoke the reserved `manager` group. It is not
-offered as a choice in the peer group pickers (`e`, `u`, `i`): inbound access
+offered as a choice in the peer group pickers (`e`, `E`, `u`, `i`): inbound access
 from the manager is implicit on every peer, so there is nothing to grant, and a
 peer that already carries the principal — one enrolled with `--groups manager` —
 keeps it across those edits. Its row stays listed in the Groups view (it is real

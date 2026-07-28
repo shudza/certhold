@@ -16,13 +16,19 @@ type enrollResultModal struct {
 	peer     string
 	oneLiner string
 	client   bool
+	reenroll bool
 }
 
 func newEnrollResultModal(res ops.EnrollResult, client bool) enrollResultModal {
-	return enrollResultModal{peer: res.PeerName, oneLiner: res.OneLiner, client: client}
+	return enrollResultModal{peer: res.PeerName, oneLiner: res.OneLiner, client: client, reenroll: res.Reenroll}
 }
 
-func (e enrollResultModal) title() string { return "enrolled " + e.peer }
+func (e enrollResultModal) title() string {
+	if e.reenroll {
+		return "re-enroll " + e.peer
+	}
+	return "enrolled " + e.peer
+}
 
 func (e enrollResultModal) handle(msg tea.KeyMsg) (modal, modalResult) {
 	if msg.String() == "esc" || msg.String() == "enter" {
@@ -39,12 +45,21 @@ func (e enrollResultModal) view(w, _ int) []string {
 	if inner < 8 {
 		inner = 8
 	}
+	heading := "✓ minted enrollment for " + e.peer
+	runLabel := "run this on the new peer:"
+	if e.reenroll {
+		heading = "✓ minted re-enroll for " + e.peer
+		runLabel = "run this on the peer:"
+	}
 	lines := []string{
-		okStyle.Render("✓ minted enrollment for " + e.peer),
+		okStyle.Render(heading),
 		"",
-		labelStyle.Render("run this on the new peer:"),
+		labelStyle.Render(runLabel),
 	}
 	lines = append(lines, wrapPlain(e.oneLiner, inner)...)
+	if e.reenroll {
+		lines = append(lines, "", dimStyle.Render("nothing changes on the peer until this one-liner runs on it; it supersedes any earlier unredeemed one-liner for this peer."))
+	}
 	if e.client {
 		lines = append(lines, "", dimStyle.Render("client-style peer; manager cannot push to it; updates arrive via 'certhold-cli refresh'."))
 	}

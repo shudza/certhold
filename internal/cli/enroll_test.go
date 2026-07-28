@@ -327,21 +327,152 @@ func TestEnrollModeFlagRemoved(t *testing.T) {
 	}
 }
 
-func TestEnrollDuplicateName(t *testing.T) {
-	dbPath := setupDB(t)
+// seedExistingPeer inserts an inbound peer with groups+allowed {g} so CLI
+// re-enroll tests have an existing row to reconfigure.
+func seedExistingPeer(t *testing.T, dbPath, name, targetUser, g string) {
+	t.Helper()
+	ctx := context.Background()
 	d, err := db.Open(dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)
 	}
-	if err := d.InsertPeer(context.Background(), "new-vm", 1, "fp", []byte("k"), "", true, ""); err != nil {
+	defer d.Close()
+	if err := d.EnsureGroup(ctx, g); err != nil {
+		t.Fatalf("EnsureGroup: %v", err)
+	}
+	if err := d.InsertPeer(ctx, name, 1, "fp-"+name, []byte("ssh-ed25519 OLD-"+name), targetUser, true, "pull-"+name); err != nil {
 		t.Fatalf("InsertPeer setup: %v", err)
+	}
+	if err := d.SetPeerGroups(ctx, name, []string{g}); err != nil {
+		t.Fatalf("SetPeerGroups: %v", err)
+	}
+	if err := d.SetPeerAllowedGroups(ctx, name, []string{g}); err != nil {
+		t.Fatalf("SetPeerAllowedGroups: %v", err)
+	}
+}
+
+// TestEnrollExistingPeerReenrolls: enrolling a taken name no longer errors —
+// it mints a re-enroll one-liner (flags optional, defaults from the DB), prints
+// the distinct advisory, and leaves the peer row untouched until redemption.
+func TestEnrollExistingPeerReenrolls(t *testing.T) {
+	dbPath := setupDB(t)
+	seedExistingPeer(t, dbPath, "new-vm", "alice", "d")
+
+	stdout, stderr, err := runEnroll(t, dbPath, "new-vm")
+	if err != nil {
+		t.Fatalf("re-enroll without flags: err=%v stderr=%s", err, stderr)
+	}
+	lines := strings.Split(strings.TrimRight(stdout, "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("stdout = %q, want one-liner + re-enroll advisory", stdout)
+	}
+	if !strings.HasPrefix(lines[0], "curl -kfsSL ") || !strings.HasSuffix(lines[0], ".sh | bash") {
+		t.Errorf("line 1 = %q, want the curl one-liner", lines[0])
+	}
+	if !strings.Contains(lines[1], "re-enroll minted for existing peer new-vm") ||
+		!strings.Contains(lines[1], "until the one-liner runs on the peer") {
+		t.Errorf("line 2 = %q, want the re-enroll advisory", lines[1])
+	}
+
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer d.Close()
+	ctx := context.Background()
+	p, err := d.GetPeer(ctx, "new-vm")
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if string(p.AuthorizedKey) != "ssh-ed25519 OLD-new-vm" || p.Serial != 1 || p.PullToken != "pull-new-vm" {
+		t.Errorf("peer row changed by the mint: %+v", p)
+	}
+	tok := strings.TrimSuffix(strings.TrimPrefix(lines[0], "curl -kfsSL https://certhold.home.lan/enroll/"), ".sh | bash")
+	peerName, groupsCSV, targetUser, tarball, err := d.ConsumeToken(ctx, tok)
+	if err != nil {
+		t.Fatalf("ConsumeToken: %v", err)
+	}
+	if peerName != "new-vm" || groupsCSV != "d" || targetUser != "alice" || len(tarball) == 0 {
+		t.Errorf("token = (%q,%q,%q,%d bytes), want defaults from the DB", peerName, groupsCSV, targetUser, len(tarball))
+	}
+}
+
+// TestEnrollExistingPeerSecondMintSupersedes: minting twice leaves only the
+// second token redeemable.
+func TestEnrollExistingPeerSecondMintSupersedes(t *testing.T) {
+	dbPath := setupDB(t)
+	seedExistingPeer(t, dbPath, "vm-super", "alice", "d")
+
+	out1, _, err := runEnroll(t, dbPath, "vm-super")
+	if err != nil {
+		t.Fatalf("first re-enroll: %v", err)
+	}
+	out2, _, err := runEnroll(t, dbPath, "vm-super")
+	if err != nil {
+		t.Fatalf("second re-enroll: %v", err)
+	}
+	tokOf := func(out string) string {
+		line := strings.SplitN(out, "\n", 2)[0]
+		return strings.TrimSuffix(strings.TrimPrefix(line, "curl -kfsSL https://certhold.home.lan/enroll/"), ".sh | bash")
+	}
+
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer d.Close()
+	ctx := context.Background()
+	if _, _, _, _, err := d.LookupToken(ctx, tokOf(out1)); !errors.Is(err, db.ErrTokenNotFound) {
+		t.Errorf("first token lookup err = %v, want ErrTokenNotFound (superseded)", err)
+	}
+	if _, _, _, _, err := d.ConsumeToken(ctx, tokOf(out2)); err != nil {
+		t.Errorf("second token must redeem: %v", err)
+	}
+}
+
+// TestEnrollNewNameStillRequiresGroups: --groups stays mandatory for new names.
+func TestEnrollNewNameStillRequiresGroups(t *testing.T) {
+	dbPath := setupDB(t)
+	_, _, err := runEnroll(t, dbPath, "brand-new")
+	if err == nil {
+		t.Fatal("expected enroll of a new name without --groups to fail")
+	}
+	if !strings.Contains(err.Error(), "--groups is required") {
+		t.Errorf("err = %q, want --groups-required", err)
+	}
+}
+
+// TestEnrollExistingClientPeerKeepsClientAdvisory: re-enrolling a client peer
+// without flags stays client and prints the client advisory.
+func TestEnrollExistingClientPeerKeepsClientAdvisory(t *testing.T) {
+	dbPath := setupDB(t)
+	ctx := context.Background()
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	if err := d.EnsureGroup(ctx, "d"); err != nil {
+		t.Fatalf("EnsureGroup: %v", err)
+	}
+	if err := d.InsertPeer(ctx, "lap1", 1, "fp", []byte("k"), "alice", false, "pull-lap1"); err != nil {
+		t.Fatalf("InsertPeer: %v", err)
+	}
+	if err := d.SetPeerGroups(ctx, "lap1", []string{"d"}); err != nil {
+		t.Fatalf("SetPeerGroups: %v", err)
 	}
 	if err := d.Close(); err != nil {
 		t.Fatalf("db.Close: %v", err)
 	}
 
-	if _, _, err := runEnroll(t, dbPath, "new-vm", "--groups", "d"); err == nil {
-		t.Fatal("expected enroll to fail for existing peer row")
+	stdout, stderr, err := runEnroll(t, dbPath, "lap1")
+	if err != nil {
+		t.Fatalf("re-enroll client peer: err=%v stderr=%s", err, stderr)
+	}
+	if !strings.Contains(stdout, "re-enroll minted for existing peer lap1") {
+		t.Errorf("stdout missing re-enroll advisory:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "client-style peer; manager cannot push to it") {
+		t.Errorf("stdout missing client advisory (client-ness must default from the DB):\n%s", stdout)
 	}
 }
 

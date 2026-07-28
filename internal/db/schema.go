@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-const schemaVersion = 8
+const schemaVersion = 9
 
 // The peers table extends PLAN.md with authorized_key BLOB and created_at TIMESTAMP.
 // We persist the peer's pubkey so certhold can re-sign certs on update/rekey without
@@ -107,6 +107,9 @@ func (db *DB) migrate(ctx context.Context) error {
 		return err
 	}
 	if err := db.addPushReachableColumn(ctx); err != nil {
+		return err
+	}
+	if err := db.addStagedReenrollColumns(ctx); err != nil {
 		return err
 	}
 	if err := db.backfillActiveCAVersion(ctx); err != nil {
@@ -244,6 +247,40 @@ func (db *DB) addPushReachableColumn(ctx context.Context) error {
 		if _, err := db.sql.ExecContext(ctx,
 			`ALTER TABLE peers ADD COLUMN push_reachable INTEGER NOT NULL DEFAULT 1`); err != nil {
 			return fmt.Errorf("alter peers add push_reachable: %w", err)
+		}
+	}
+	return nil
+}
+
+// addStagedReenrollColumns adds the tokens.staged_* columns (schema_version=9)
+// carrying the material a re-enroll of an existing peer stages at mint: the
+// fresh keypair's public half, its cert, the new pull token, the inbound flag
+// and an optional address. A NULL staged_authorized_key marks an ordinary
+// (new-peer) token; a non-NULL one makes ConsumeToken commit the staged
+// material to the peer row in the same transaction. Presence-gated
+// (idempotent) and unconditional, like addPushReachableColumn.
+func (db *DB) addStagedReenrollColumns(ctx context.Context) error {
+	has, err := db.tableHasColumns(ctx, "tokens")
+	if err != nil {
+		return err
+	}
+	for _, col := range []struct{ name, ddl string }{
+		{"staged_authorized_key", `ALTER TABLE tokens ADD COLUMN staged_authorized_key BLOB`},
+		{"staged_fingerprint", `ALTER TABLE tokens ADD COLUMN staged_fingerprint TEXT NOT NULL DEFAULT ''`},
+		{"staged_serial", `ALTER TABLE tokens ADD COLUMN staged_serial INTEGER NOT NULL DEFAULT 0`},
+		{"staged_cert", `ALTER TABLE tokens ADD COLUMN staged_cert BLOB`},
+		{"staged_pull_token", `ALTER TABLE tokens ADD COLUMN staged_pull_token TEXT NOT NULL DEFAULT ''`},
+		{"staged_inbound", `ALTER TABLE tokens ADD COLUMN staged_inbound INTEGER NOT NULL DEFAULT 1`},
+		{"staged_address", `ALTER TABLE tokens ADD COLUMN staged_address TEXT NOT NULL DEFAULT ''`},
+		// Nullable on purpose: NULL = "allowed not explicitly chosen" (preserve
+		// or transition-default at commit), non-NULL CSV = explicit set.
+		{"staged_allowed", `ALTER TABLE tokens ADD COLUMN staged_allowed TEXT`},
+	} {
+		if has[col.name] {
+			continue
+		}
+		if _, err := db.sql.ExecContext(ctx, col.ddl); err != nil {
+			return fmt.Errorf("alter tokens add %s: %w", col.name, err)
 		}
 	}
 	return nil

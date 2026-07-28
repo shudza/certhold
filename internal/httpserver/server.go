@@ -115,8 +115,9 @@ func scriptHandler(database *db.DB) func(http.ResponseWriter, *http.Request, str
 
 // v2Script builds the install script. It targets the invoking user's ~/.ssh
 // ($HOME + id -un, so running as root targets /root/.ssh), untars the
-// namespaced identity files into a staging dir, installs them, appends this
-// instance's cert-authority line idempotently (grep-guarded by the CA pubkey),
+// namespaced identity files into a staging dir, installs them, converges this
+// instance's cert-authority line (append when absent, atomic replace when its
+// principals changed, no-op when byte-identical — keyed by the CA pubkey),
 // and splices the keyed client-config block with a per-instance,
 // version-agnostic sed so multiple certhold instances coexist. The block is
 // taken from the staged tarball `config` entry (hosts-bearing, built at mint),
@@ -159,17 +160,40 @@ func writeV2Body(sb *strings.Builder, curl, keyFile, block, instanceKey string) 
 	fmt.Fprintf(sb, "chmod 600 \"$USER_HOME/.ssh/authorized_keys\"\n")
 	// CA_KEY is the 3rd whitespace token of the shipped line
 	// ("cert-authority,principals=..." <type> <base64> <comment>) — the raw CA
-	// pubkey we grep for to dedupe. Workaround: TestEnrollV2User_Script pins the
-	// canonical `if ! grep -qF "$CA_KEY" ... cat ... fi` guard line byte-for-byte,
-	// so we can't fold an "appended" echo into it. Instead we capture the same
-	// condition into APPENDED_AK with an extra identical grep first, then run the
-	// pinned guard, then echo iff APPENDED_AK=1. Cost: one extra grep per install.
-	// Removing it requires either changing the test pin or rewriting the guard.
+	// pubkey identifying THIS instance's trust line. Three converging cases:
+	// no line with this key → append; a byte-identical line → leave the file
+	// untouched; a line with this key but different bytes (a re-enroll changed
+	// the allowed set, so the principals differ) → replace it, otherwise the
+	// peer would keep enforcing the stale principals forever. The replace
+	// builds the complete new content (foreign lines verbatim + the staged
+	// line) in a temp file and mv's it over authorized_keys, so a failure at
+	// any point leaves either the old file or the new file — never one with no
+	// trust line. The `|| true` keeps grep -v from killing the script under
+	// set -e when the trust line is the sole line.
 	fmt.Fprintf(sb, "CA_KEY=\"$(awk '{print $3}' \"$STAGE/ca_authorized_keys\")\"\n")
-	fmt.Fprintf(sb, "APPENDED_AK=0\n")
-	fmt.Fprintf(sb, "if ! grep -qF \"$CA_KEY\" \"$USER_HOME/.ssh/authorized_keys\"; then APPENDED_AK=1; fi\n")
-	fmt.Fprintf(sb, "if ! grep -qF \"$CA_KEY\" \"$USER_HOME/.ssh/authorized_keys\"; then cat \"$STAGE/ca_authorized_keys\" >> \"$USER_HOME/.ssh/authorized_keys\"; fi\n")
-	fmt.Fprintf(sb, "if [ \"$APPENDED_AK\" = \"1\" ]; then echo \"  ~ ~/.ssh/authorized_keys                   (appended cert-authority line)\"; fi\n")
+	fmt.Fprintf(sb, "CA_LINE=\"$(head -n1 \"$STAGE/ca_authorized_keys\")\"\n")
+	fmt.Fprintf(sb, "if ! grep -qF \"$CA_KEY\" \"$USER_HOME/.ssh/authorized_keys\"; then\n")
+	fmt.Fprintf(sb, "cat \"$STAGE/ca_authorized_keys\" >> \"$USER_HOME/.ssh/authorized_keys\"\n")
+	fmt.Fprintf(sb, "echo \"  ~ ~/.ssh/authorized_keys                   (appended cert-authority line)\"\n")
+	fmt.Fprintf(sb, "elif ! grep -qxF \"$CA_LINE\" \"$USER_HOME/.ssh/authorized_keys\"; then\n")
+	fmt.Fprintf(sb, "{ grep -vF \"$CA_KEY\" \"$USER_HOME/.ssh/authorized_keys\" || true; cat \"$STAGE/ca_authorized_keys\"; } > \"$USER_HOME/.ssh/.certhold_ak.tmp\"\n")
+	fmt.Fprintf(sb, "mv \"$USER_HOME/.ssh/.certhold_ak.tmp\" \"$USER_HOME/.ssh/authorized_keys\"\n")
+	fmt.Fprintf(sb, "chmod 600 \"$USER_HOME/.ssh/authorized_keys\"\n")
+	fmt.Fprintf(sb, "echo \"  ~ ~/.ssh/authorized_keys                   (replaced cert-authority line)\"\n")
+	fmt.Fprintf(sb, "fi\n")
+	// Client-style bundles stage no ca_authorized_keys but DO stage the bare CA
+	// pubkey (ca_pub): when an inbound peer is re-enrolled as a client, this
+	// branch strips THIS instance's stale cert-authority line (matched by the
+	// CA key, so other instances' lines and ordinary keys survive). A fresh
+	// client install finds no match and touches nothing.
+	fmt.Fprintf(sb, "elif [ -f \"$STAGE/ca_pub\" ] && [ -f \"$USER_HOME/.ssh/authorized_keys\" ]; then\n")
+	fmt.Fprintf(sb, "CA_KEY=\"$(awk '{print $2}' \"$STAGE/ca_pub\")\"\n")
+	fmt.Fprintf(sb, "if [ -n \"$CA_KEY\" ] && grep -qF \"$CA_KEY\" \"$USER_HOME/.ssh/authorized_keys\"; then\n")
+	fmt.Fprintf(sb, "grep -vF \"$CA_KEY\" \"$USER_HOME/.ssh/authorized_keys\" > \"$USER_HOME/.ssh/.certhold_ak.tmp\" || true\n")
+	fmt.Fprintf(sb, "mv \"$USER_HOME/.ssh/.certhold_ak.tmp\" \"$USER_HOME/.ssh/authorized_keys\"\n")
+	fmt.Fprintf(sb, "chmod 600 \"$USER_HOME/.ssh/authorized_keys\"\n")
+	fmt.Fprintf(sb, "echo \"  ~ ~/.ssh/authorized_keys                   (removed cert-authority line)\"\n")
+	fmt.Fprintf(sb, "fi\n")
 	fmt.Fprintf(sb, "fi\n")
 
 	fmt.Fprintf(sb, "touch \"$USER_HOME/.ssh/config\"\n")
@@ -224,7 +248,7 @@ func enrollHandler(database *db.DB, probe ReachabilityProbe) http.HandlerFunc {
 		// concurrent consume is acceptable: token is the secret; admin can re-issue.
 		// queryUser may be "root" (a --user root enrollment), which validUsername
 		// accepts and which targets /root/.ssh.
-		_, _, preTargetUser, preConsumed, err := database.LookupToken(ctx, token)
+		preName, _, preTargetUser, preConsumed, err := database.LookupToken(ctx, token)
 		if err != nil {
 			if errors.Is(err, db.ErrTokenNotFound) {
 				writeErr(w, http.StatusNotFound, "token not found")
@@ -256,6 +280,12 @@ func enrollHandler(database *db.DB, probe ReachabilityProbe) http.HandlerFunc {
 			case errors.Is(err, db.ErrTokenAlreadyConsumed):
 				writeErr(w, http.StatusGone, "token already consumed")
 			default:
+				// The peer's curl only sees a generic 500; surface the real
+				// error (e.g. a rolled-back re-enroll commit: group deleted or
+				// peer revoked since mint) on the manager side, matching the
+				// probe's stderr logging convention. The token stays
+				// unconsumed, so the one-liner is retryable once resolved.
+				fmt.Fprintf(os.Stderr, "enroll: redeeming token for peer %q failed (token preserved): %v\n", preName, err)
 				writeErr(w, http.StatusInternalServerError, "consume token failed")
 			}
 			return
