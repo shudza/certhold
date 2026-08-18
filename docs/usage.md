@@ -641,7 +641,7 @@ are in [revocation](maintenance-and-operations.md#revocation).
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--hostname` | OS hostname | Manager's own peer name (must match the self row); the rekey rotates it last. |
+| `--hostname` | name recorded at init | Manager's own peer name (must match the self row); the rekey rotates it last. |
 
 Unlocks the CA key and the manager peer key.
 
@@ -681,7 +681,7 @@ recovery, and
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--hostname` | OS hostname | Certhold's own peer name (must match the self row). |
+| `--hostname` | name recorded at init | Certhold's own peer name (must match the self row). |
 | `--rotate-passphrase` | `false` | Prompt for a fresh CA passphrase for the new key instead of reusing the current one. Affects the CA key only. |
 
 Unlocks the old CA key and the manager peer key; sets the new CA key's

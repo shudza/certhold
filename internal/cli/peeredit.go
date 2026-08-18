@@ -100,11 +100,6 @@ func runMakeClient(cmd *cobra.Command, name string) error {
 	}
 	defer d.Close()
 
-	hostname, err := osHostname()
-	if err != nil {
-		return fmt.Errorf("hostname: %w", err)
-	}
-
 	deps := opsDeps(cmd, d, dataDir, caUnlock, peerUnlock, peerEditDial)
-	return ops.MakeClient(ctx, deps, name, hostname)
+	return ops.MakeClient(ctx, deps, name, "")
 }

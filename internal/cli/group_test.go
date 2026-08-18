@@ -458,10 +458,6 @@ func TestGroupSSHOptionsPathsMatchInitLayout(t *testing.T) {
 	if err := initCmd.ExecuteContext(context.Background()); err != nil {
 		t.Fatalf("init: %v\n%s", err, initOut.String())
 	}
-	origHostname := osHostname
-	osHostname = func() (string, error) { return hostname, nil }
-	t.Cleanup(func() { osHostname = origHostname })
-
 	d, err := db.Open(dbPath)
 	if err != nil {
 		t.Fatalf("db.Open: %v", err)

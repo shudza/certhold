@@ -8,7 +8,6 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -288,18 +287,14 @@ func TestEnrollReachabilityProbeRealDialUnreachable(t *testing.T) {
 	dataDir := t.TempDir()
 	dbPath := filepath.Join(dataDir, "state.db")
 
-	host, err := os.Hostname()
-	if err != nil {
-		t.Fatalf("hostname: %v", err)
-	}
-	// init names the manager self peer after --hostname; use the real machine
-	// hostname so resolveSelfIdent (os.Hostname) finds the self row and the probe
-	// uses the manager's real self cert/key (encrypted via the init passphrases).
+	// init names the manager self peer after --hostname and persists it (the
+	// self_name meta key), so the probe resolves the self row and its real
+	// cert/key even though this name never matches the machine hostname.
 	icmd := NewRootCmd()
 	var iout bytes.Buffer
 	icmd.SetOut(&iout)
 	icmd.SetErr(&iout)
-	icmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", host, "--user", "root", "--listen-ip", "127.0.0.1", "--no-prompt"})
+	icmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", "mgr-probe", "--user", "root", "--listen-ip", "127.0.0.1", "--no-prompt"})
 	if err := icmd.Execute(); err != nil {
 		t.Fatalf("init: %v\n%s", err, iout.String())
 	}

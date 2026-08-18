@@ -54,7 +54,7 @@ func newTuiCmd() *cobra.Command {
 				return fmt.Errorf("get data-dir: %w", err)
 			}
 			dataDir = expandHome(dataDir)
-			hostname, _ := osHostname()
+			hostname, _ := ops.SelfName(ctx, d)
 
 			// BuildDeps wires ops.Deps from the TUI-owned passphrase closures
 			// (which bridge to the masked modal), the host-key confirm closure

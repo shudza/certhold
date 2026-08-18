@@ -1,12 +1,14 @@
 package ops
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/shudza/certhold/internal/db"
 	"github.com/shudza/certhold/internal/peerfiles"
 )
 
@@ -14,16 +16,31 @@ import (
 var osHostname = os.Hostname
 
 // resolveSelfName returns certhold's own peer name: hostname when the caller
-// has one, else os.Hostname(), mirroring how Rekey resolves it.
-func resolveSelfName(hostname string) (string, error) {
+// has one, else the name persisted at init (the self_name meta key), else
+// os.Hostname() for state written before the name was persisted. The OS
+// hostname alone is wrong whenever `init --hostname` named the manager
+// differently, or the host was renamed after init — the DB is authoritative.
+func resolveSelfName(ctx context.Context, d *db.DB, hostname string) (string, error) {
 	if hostname != "" {
 		return hostname, nil
+	}
+	if d != nil {
+		if v, ok, err := d.GetMeta(ctx, db.MetaSelfName); err == nil && ok && v != "" {
+			return v, nil
+		}
 	}
 	h, err := osHostname()
 	if err != nil {
 		return "", fmt.Errorf("hostname: %w", err)
 	}
 	return h, nil
+}
+
+// SelfName resolves certhold's own peer name for callers outside ops (CLI/TUI
+// wiring): the name persisted at init, falling back to os.Hostname() for
+// pre-feature state.
+func SelfName(ctx context.Context, d *db.DB) (string, error) {
+	return resolveSelfName(ctx, d, "")
 }
 
 // certPrincipals is the principal list a peer's cert carries: its own name
@@ -47,13 +64,13 @@ func certPrincipals(name string, groups []string, self bool) []string {
 }
 
 // guardNotSelfPeer refuses destructive peer operations aimed at the manager's
-// own peer row (seeded once by init, named for the manager host). hostname is
-// certhold's own peer name when the caller has one; empty means os.Hostname(),
-// mirroring how Rekey resolves it. There is deliberately no escape hatch:
-// deleting or altering the self row breaks rekey, revoke --rekey and all
-// pushes, and nothing re-creates it short of manual DB surgery.
-func guardNotSelfPeer(op, name, hostname string) error {
-	hostname, err := resolveSelfName(hostname)
+// own peer row (seeded once by init). hostname is certhold's own peer name when
+// the caller has one; empty resolves via resolveSelfName (persisted self name,
+// then os.Hostname()). There is deliberately no escape hatch: deleting or
+// altering the self row breaks rekey, revoke --rekey and all pushes, and
+// nothing re-creates it short of manual DB surgery.
+func guardNotSelfPeer(ctx context.Context, d *db.DB, op, name, hostname string) error {
+	hostname, err := resolveSelfName(ctx, d, hostname)
 	if err != nil {
 		return err
 	}

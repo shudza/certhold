@@ -28,7 +28,7 @@ func newRevokeCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().Bool("rekey", false, "rotate the CA around the peer instead of clearing it (for a compromised or unreachable peer)")
-	cmd.Flags().String("hostname", "", "certhold's own peer name for the --rekey path (default: os.Hostname())")
+	cmd.Flags().String("hostname", "", "certhold's own peer name for the --rekey path (default: the name recorded at init)")
 	return cmd
 }
 

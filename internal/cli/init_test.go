@@ -99,6 +99,16 @@ func TestInit_RootUser_HappyPath(t *testing.T) {
 		t.Errorf("instance_key %q is not 16 lowercase hex chars", key)
 	}
 
+	// init persists the self name so later resolution never depends on the OS
+	// hostname matching --hostname.
+	selfName, ok, err := database.GetMeta(context.Background(), db.MetaSelfName)
+	if err != nil || !ok {
+		t.Fatalf("GetMeta self_name: ok=%v err=%v", ok, err)
+	}
+	if selfName != "manager-test" {
+		t.Errorf("self_name: got %q want %q", selfName, "manager-test")
+	}
+
 	allowed, err := database.GetPeerAllowedGroups(context.Background(), "manager-test")
 	if err != nil {
 		t.Fatalf("GetPeerAllowedGroups: %v", err)

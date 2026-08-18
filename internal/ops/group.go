@@ -68,7 +68,7 @@ func GroupRename(ctx context.Context, deps Deps, oldName, newName, hostname stri
 	if err != nil {
 		return err
 	}
-	selfName, err := resolveSelfName(hostname)
+	selfName, err := resolveSelfName(ctx, deps.DB, hostname)
 	if err != nil {
 		return err
 	}
@@ -112,7 +112,7 @@ func GroupRename(ctx context.Context, deps Deps, oldName, newName, hostname stri
 		return fmt.Errorf("ensure instance key: %w", err)
 	}
 
-	self := SelfIdentFor(ctx, deps.DB, hostname)
+	self := SelfIdentFor(ctx, deps.DB, selfName)
 	var stragglers []string
 	var touched []string
 
@@ -198,7 +198,7 @@ func GroupDelete(ctx context.Context, deps Deps, name, hostname string) error {
 	if err != nil {
 		return err
 	}
-	selfName, err := resolveSelfName(hostname)
+	selfName, err := resolveSelfName(ctx, deps.DB, hostname)
 	if err != nil {
 		return err
 	}
@@ -232,7 +232,7 @@ func GroupDelete(ctx context.Context, deps Deps, name, hostname string) error {
 		return fmt.Errorf("ensure instance key: %w", err)
 	}
 
-	self := SelfIdentFor(ctx, deps.DB, hostname)
+	self := SelfIdentFor(ctx, deps.DB, selfName)
 	var stragglers []string
 	var touched []string
 
@@ -313,8 +313,8 @@ func GroupDelete(ctx context.Context, deps Deps, name, hostname string) error {
 // rev, then (for inbound peers) the authorized_keys principals rewrite and
 // config splice pushed over SSH. host overrides the dial target; empty means
 // the peer's DialHost(). hostname is certhold's own peer name anchoring the
-// self push identity. Client-style peers get the pending-refresh notice and no
-// dial.
+// self push identity; empty resolves via the persisted self name. Client-style
+// peers get the pending-refresh notice and no dial.
 func SetPeerAllowedGroups(ctx context.Context, deps Deps, peerName string, groups []string, host, hostname string) error {
 	peer, err := deps.DB.GetPeer(ctx, peerName)
 	if err != nil {
@@ -344,7 +344,11 @@ func SetPeerAllowedGroups(ctx context.Context, deps Deps, peerName string, group
 		return fmt.Errorf("ensure instance key: %w", err)
 	}
 
-	pushOpts := SelfPushOptions(deps.DataDir, SelfIdentFor(ctx, deps.DB, hostname), deps.PeerPass)
+	selfName, err := resolveSelfName(ctx, deps.DB, hostname)
+	if err != nil {
+		return err
+	}
+	pushOpts := SelfPushOptions(deps.DataDir, SelfIdentFor(ctx, deps.DB, selfName), deps.PeerPass)
 	pushOpts.User = pushUser(peer)
 	deps.emit(Event{Type: EventPeerStart, Peer: peerName})
 	pusher, err := dialPush(ctx, deps, host, pushOpts)

@@ -180,6 +180,9 @@ func newInitCmd() *cobra.Command {
 			if err := database.InsertPeer(ctx, hostname, serial, fingerprint, pubAuth, targetUser, true, ""); err != nil {
 				return fmt.Errorf("insert peer: %w", err)
 			}
+			if err := database.SetMeta(ctx, db.MetaSelfName, hostname); err != nil {
+				return fmt.Errorf("persist self name: %w", err)
+			}
 			if err := database.EnsureGroup(ctx, peerfiles.ManagerPrincipal); err != nil {
 				return fmt.Errorf("ensure group manager: %w", err)
 			}

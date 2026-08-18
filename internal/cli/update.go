@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 
 	"github.com/spf13/cobra"
 
@@ -72,28 +71,6 @@ func newUpdateCmd() *cobra.Command {
 	cmd.Flags().String("host", "", "host to push the cert to (default: <name>)")
 	_ = cmd.MarkFlagRequired("groups")
 	return cmd
-}
-
-var osHostname = os.Hostname
-
-func resolveSelfIdent(ctx context.Context, d *db.DB) ops.SelfIdent {
-	host, err := osHostname()
-	if err != nil {
-		return ops.SelfIdent{}
-	}
-	return ops.SelfIdentFor(ctx, d, host)
-}
-
-func selfPushOptions(dataDir string, self ops.SelfIdent, peerPassFn func() ([]byte, error)) sshpush.Options {
-	return ops.SelfPushOptions(dataDir, self, peerPassFn)
-}
-
-func peerCertRemotePath(p *db.Peer, instanceKey string) string {
-	return ops.PeerCertRemotePath(p, instanceKey)
-}
-
-func peerAuthorizedKeysRemotePath(p *db.Peer) string {
-	return ops.PeerAuthorizedKeysRemotePath(p)
 }
 
 func clientPeerNotice(w io.Writer, name string) {
