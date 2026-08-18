@@ -39,7 +39,7 @@ func certBlob(t *testing.T, validAfter, validBefore uint64) []byte {
 	if err := cert.SignCert(rand.Reader, signer); err != nil {
 		t.Fatalf("SignCert: %v", err)
 	}
-	return cert.Marshal()
+	return ssh.MarshalAuthorizedKey(cert)
 }
 
 func seedTuiDB(t *testing.T) (string, time.Time) {
@@ -197,6 +197,13 @@ func TestParseCertExpiry(t *testing.T) {
 	}
 	if got := parseCertExpiry(certBlob(t, 0, ssh.CertTimeInfinity)); got.state != certForever {
 		t.Errorf("infinity cert = %+v, want certForever", got)
+	}
+	pk, _, _, _, err := ssh.ParseAuthorizedKey(certBlob(t, 0, ssh.CertTimeInfinity))
+	if err != nil {
+		t.Fatalf("ParseAuthorizedKey: %v", err)
+	}
+	if got := parseCertExpiry(pk.Marshal()); got.state != certForever {
+		t.Errorf("wire-format cert = %+v, want certForever", got)
 	}
 }
 
