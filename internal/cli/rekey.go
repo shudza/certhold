@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"fmt"
-	"os"
 
 	"github.com/spf13/cobra"
 
@@ -37,17 +36,10 @@ func newRekeyCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("get hostname: %w", err)
 			}
-			if hostname == "" {
-				h, herr := os.Hostname()
-				if herr != nil {
-					return fmt.Errorf("hostname: %w", herr)
-				}
-				hostname = h
-			}
 			return runRekey(cmd, hostname)
 		},
 	}
-	cmd.Flags().String("hostname", "", "certhold's own peer name (default: os.Hostname())")
+	cmd.Flags().String("hostname", "", "certhold's own peer name (default: the name recorded at init)")
 	cmd.Flags().Bool("rotate-passphrase", false, "prompt for a fresh CA passphrase for the new key instead of reusing the current one")
 	return cmd
 }

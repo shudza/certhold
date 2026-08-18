@@ -80,8 +80,7 @@ func runGroupRename(cmd *cobra.Command, oldName, newName string) error {
 	peerUnlock := newPeerUnlocker()
 	defer peerUnlock.Zero()
 
-	hostname, _ := osHostname()
-	return ops.GroupRename(ctx, groupOpsDeps(cmd, d, dataDir, caUnlock, peerUnlock), oldName, newName, hostname)
+	return ops.GroupRename(ctx, groupOpsDeps(cmd, d, dataDir, caUnlock, peerUnlock), oldName, newName, "")
 }
 
 func newGroupDeleteCmd() *cobra.Command {
@@ -123,8 +122,7 @@ func runGroupDelete(cmd *cobra.Command, name string) error {
 	peerUnlock := newPeerUnlocker()
 	defer peerUnlock.Zero()
 
-	hostname, _ := osHostname()
-	return ops.GroupDelete(ctx, groupOpsDeps(cmd, d, dataDir, caUnlock, peerUnlock), name, hostname)
+	return ops.GroupDelete(ctx, groupOpsDeps(cmd, d, dataDir, caUnlock, peerUnlock), name, "")
 }
 
 func newGroupCreateCmd() *cobra.Command {
@@ -326,8 +324,7 @@ func runGroupAction(cmd *cobra.Command, group string, allow bool) error {
 	peerUnlock := newPeerUnlocker()
 	defer peerUnlock.Zero()
 
-	hostname, _ := osHostname()
-	if err := ops.SetPeerAllowedGroups(ctx, groupOpsDeps(cmd, d, dataDir, caUnlock, peerUnlock), peerName, current, host, hostname); err != nil {
+	if err := ops.SetPeerAllowedGroups(ctx, groupOpsDeps(cmd, d, dataDir, caUnlock, peerUnlock), peerName, current, host, ""); err != nil {
 		return err
 	}
 

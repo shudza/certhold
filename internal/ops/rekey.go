@@ -25,6 +25,7 @@ var generateCA = ca.GenerateWithPassphrase
 
 type RekeyOptions struct {
 	// Hostname is certhold's own peer name; its row anchors the self files.
+	// Empty resolves via the persisted self name (then os.Hostname()).
 	Hostname string
 	// Exclude names peers to skip (revoke rotates around the revoked peer).
 	Exclude map[string]bool
@@ -54,6 +55,11 @@ func Rekey(ctx context.Context, deps Deps, opts RekeyOptions) error {
 	instanceKey, err := EnsureInstanceKey(ctx, deps.DB)
 	if err != nil {
 		return fmt.Errorf("ensure instance key: %w", err)
+	}
+
+	opts.Hostname, err = resolveSelfName(ctx, deps.DB, opts.Hostname)
+	if err != nil {
+		return err
 	}
 
 	self, err := deps.DB.GetPeer(ctx, opts.Hostname)

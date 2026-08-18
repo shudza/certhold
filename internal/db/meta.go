@@ -11,6 +11,7 @@ import (
 const (
 	MetaInstanceKey = "instance_key"
 	MetaFleetRev    = "fleet_rev"
+	MetaSelfName    = "self_name"
 )
 
 func (db *DB) GetMeta(ctx context.Context, key string) (value string, ok bool, err error) {

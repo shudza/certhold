@@ -53,9 +53,14 @@ func SetPeerAddress(ctx context.Context, deps Deps, name, address string) error 
 // immediately; the trailing health check is best-effort — its failure is
 // reported as a warning, not an error, and the conversion stands. An
 // already-client peer is a clear no-op. hostname anchors the manager's
-// self-push identity (its own peer name).
+// self-push identity (its own peer name); empty resolves via the persisted
+// self name.
 func MakeClient(ctx context.Context, deps Deps, name, hostname string) error {
-	if err := guardNotSelfPeer("convert to client", name, hostname); err != nil {
+	hostname, err := resolveSelfName(ctx, deps.DB, hostname)
+	if err != nil {
+		return err
+	}
+	if err := guardNotSelfPeer(ctx, deps.DB, "convert to client", name, hostname); err != nil {
 		return err
 	}
 	peer, err := deps.DB.GetPeer(ctx, name)

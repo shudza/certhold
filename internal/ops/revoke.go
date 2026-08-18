@@ -28,9 +28,9 @@ import (
 // re-signs and pushes to every remaining peer, and hard-deletes the row only
 // once the rotation succeeded. The revoked host is never contacted, so this is
 // the path for a compromised or unreachable peer. hostname is certhold's own
-// peer name; empty means os.Hostname().
+// peer name; empty resolves via the persisted self name (then os.Hostname()).
 func RevokePeer(ctx context.Context, deps Deps, name, hostname string, rekey bool) error {
-	if err := guardNotSelfPeer("revoke", name, hostname); err != nil {
+	if err := guardNotSelfPeer(ctx, deps.DB, "revoke", name, hostname); err != nil {
 		return err
 	}
 	peer, err := deps.DB.GetPeer(ctx, name)
@@ -113,12 +113,9 @@ func revokeClear(ctx context.Context, deps Deps, peer *db.Peer) error {
 // every remaining reachable peer trusts it, so deleting the row last changes
 // nothing about who can authenticate.
 func revokeRekey(ctx context.Context, deps Deps, name, hostname string) error {
-	if hostname == "" {
-		h, herr := osHostname()
-		if herr != nil {
-			return fmt.Errorf("hostname: %w", herr)
-		}
-		hostname = h
+	hostname, err := resolveSelfName(ctx, deps.DB, hostname)
+	if err != nil {
+		return err
 	}
 
 	if err := deps.DB.SetPeerRevoked(ctx, name); err != nil {

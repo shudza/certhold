@@ -54,9 +54,9 @@ type SelfIdent struct {
 }
 
 // SelfIdentFor reads the manager's own peer row + instance key from the DB.
-// The manager peer is named for the host certhold runs on (os.Hostname at
-// init). When the row is absent (e.g. before init, or a renamed host) Resolved
-// stays false and SelfPushOptions targets /root/.ssh.
+// The manager peer is named at init (self_name meta, default os.Hostname).
+// When the row is absent (e.g. before init) Resolved stays false and
+// SelfPushOptions targets /root/.ssh.
 func SelfIdentFor(ctx context.Context, d *db.DB, host string) SelfIdent {
 	if host == "" {
 		return SelfIdent{}
@@ -70,7 +70,7 @@ func SelfIdentFor(ctx context.Context, d *db.DB, host string) SelfIdent {
 }
 
 func resolveSelfIdent(ctx context.Context, d *db.DB) SelfIdent {
-	host, err := os.Hostname()
+	host, err := resolveSelfName(ctx, d, "")
 	if err != nil {
 		return SelfIdent{}
 	}

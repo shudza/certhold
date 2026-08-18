@@ -15,7 +15,7 @@ import (
 // untouched; use RevokePeer when the host must be cleaned and the CA rotated
 // so the old cert stops being accepted.
 func RemovePeer(ctx context.Context, deps Deps, name string) error {
-	if err := guardNotSelfPeer("remove", name, ""); err != nil {
+	if err := guardNotSelfPeer(ctx, deps.DB, "remove", name, ""); err != nil {
 		return err
 	}
 	if _, err := deps.DB.GetPeer(ctx, name); err != nil {

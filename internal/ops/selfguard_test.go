@@ -205,6 +205,37 @@ func TestSelfGuardRevokeRefusesSelfRekey(t *testing.T) {
 	}
 }
 
+// TestSelfNamePrefersPersistedName pins the T168 regression: the self name
+// persisted at init wins over the OS hostname, so pushes and guards keep
+// working when `init --hostname` named the manager differently (or the host
+// was renamed after init).
+func TestSelfNamePrefersPersistedName(t *testing.T) {
+	selfGuardSetHostname(t, "os-name")
+	_, d := setupOpsEnv(t, "mgr", "alpha")
+	ctx := context.Background()
+	if err := d.SetMeta(ctx, db.MetaSelfName, "mgr"); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+
+	if got, err := SelfName(ctx, d); err != nil || got != "mgr" {
+		t.Fatalf("SelfName = (%q, %v), want (\"mgr\", nil)", got, err)
+	}
+
+	var events []Event
+	deps := noDialDeps(t, d, &events)
+	err := RemovePeer(ctx, deps, "mgr")
+	selfGuardCheckErr(t, err, "RemovePeer (persisted self name)")
+	selfGuardCheckRowIntact(t, d)
+}
+
+func TestSelfNameFallsBackToOSHostname(t *testing.T) {
+	selfGuardSetHostname(t, "legacy-host")
+	_, d := setupOpsEnv(t, "mgr")
+	if got, err := SelfName(context.Background(), d); err != nil || got != "legacy-host" {
+		t.Fatalf("SelfName = (%q, %v), want (\"legacy-host\", nil)", got, err)
+	}
+}
+
 func TestSelfGuardRevokeEmptyHostnameFallsBackToOSHostname(t *testing.T) {
 	selfGuardSetHostname(t, "mgr")
 	dataDir, d := setupOpsEnv(t, "mgr")

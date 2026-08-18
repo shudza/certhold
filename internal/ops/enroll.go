@@ -78,7 +78,7 @@ func MintEnroll(ctx context.Context, deps Deps, spec EnrollSpec) (EnrollResult, 
 	existing, err := deps.DB.GetPeer(ctx, spec.Name)
 	switch {
 	case err == nil:
-		if gerr := guardNotSelfPeer("re-enroll", spec.Name, ""); gerr != nil {
+		if gerr := guardNotSelfPeer(ctx, deps.DB, "re-enroll", spec.Name, ""); gerr != nil {
 			return EnrollResult{}, gerr
 		}
 		// Second signal beyond the hostname check: the self cert on disk names
