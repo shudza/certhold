@@ -60,15 +60,22 @@ type certExpiry struct {
 }
 
 // parseCertExpiry reads the validity window out of a stored SSH certificate
-// blob. A nil blob is a pre-feature row (certNone); an unparseable blob is
-// treated the same so the dashboard never errors on malformed data.
+// blob. The store writes authorized-keys text (ca.SignCert returns
+// ssh.MarshalAuthorizedKey output), so that format is tried first; raw wire
+// format is kept as a fallback. A nil blob is a pre-feature row (certNone);
+// an unparseable blob is treated the same so the dashboard never errors on
+// malformed data.
 func parseCertExpiry(blob []byte) certExpiry {
 	if len(blob) == 0 {
 		return certExpiry{state: certNone}
 	}
-	pk, err := ssh.ParsePublicKey(blob)
+	pk, _, _, _, err := ssh.ParseAuthorizedKey(blob)
 	if err != nil {
-		return certExpiry{state: certNone}
+		wire, wireErr := ssh.ParsePublicKey(blob)
+		if wireErr != nil {
+			return certExpiry{state: certNone}
+		}
+		pk = wire
 	}
 	cert, ok := pk.(*ssh.Certificate)
 	if !ok {
