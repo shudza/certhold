@@ -11,6 +11,8 @@ certhold ends it. One binary runs an SSH certificate authority. One pasted comma
 - **No cert juggling.** Enroll mints and installs the cert. Revoke kills it fleet-wide. Rekey rotates everything. You never look at a certificate.
 - **A real TUI.** `certhold tui` — the whole fleet on one screen, every operation without leaving it.
 
+![certhold tui — fleet dashboard, peer detail, groups, status and live reachability](docs/assets/tui.gif)
+
 ## Getting started
 
 On the machine that will be the manager:
