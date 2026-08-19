@@ -41,13 +41,8 @@ type RekeyOptions struct {
 // user-mode peers (where there is no native KRL).
 func Rekey(ctx context.Context, deps Deps, opts RekeyOptions) error {
 	caDir := filepath.Join(deps.DataDir, "ca")
-	oldCA, err := ca.LoadWithPassphrase(caDir, deps.CAUnlock)
-	if err != nil {
+	if _, err := ca.LoadWithPassphrase(caDir, deps.CAUnlock); err != nil {
 		return fmt.Errorf("load ca: %w", err)
-	}
-	oldCAPub, _, _, _, err := ssh.ParseAuthorizedKey(oldCA.PublicKeyAuthorizedKey())
-	if err != nil {
-		return fmt.Errorf("parse old ca pubkey: %w", err)
 	}
 
 	// The per-instance key is stable across CA rekey — meta is never touched
@@ -137,6 +132,16 @@ func Rekey(ctx context.Context, deps Deps, opts RekeyOptions) error {
 	}
 	newCAPub := newCA.PublicKeyAuthorizedKey()
 
+	// Every CA key this instance ever trusted peers with: the one being retired
+	// now plus each ca.old.* archive. The authorized_keys rewrite swaps ALL of
+	// them for the new line, so an orphaned line from a missed rotation is
+	// healed rather than carried forward. Computed before the swap below, while
+	// ca/ still holds the retiring key.
+	retiredCAPubs, err := instanceCAPubKeys(deps, "rekey", "")
+	if err != nil {
+		return fmt.Errorf("collect retired ca keys: %w", err)
+	}
+
 	// Self identity (which key/cert the manager presents) is fixed for the
 	// whole rotation; the login user is per peer — set inside the loop.
 	pushOpts := SelfPushOptions(deps.DataDir, SelfIdent{
@@ -190,7 +195,7 @@ func Rekey(ctx context.Context, deps Deps, opts RekeyOptions) error {
 		peerPushOpts := pushOpts
 		peerPushOpts.User = pushUser(&peerForPush)
 		deps.emit(Event{Type: EventPeerStart, Peer: p.Name})
-		rotated, err := pushPeerRekey(ctx, deps, &peerForPush, oldCAPub, newCAPub, instanceKey, certBytes, allowed, configBlock, peerPushOpts)
+		rotated, err := pushPeerRekey(ctx, deps, &peerForPush, retiredCAPubs, newCAPub, instanceKey, certBytes, allowed, configBlock, peerPushOpts)
 		if err != nil {
 			if rotated {
 				// The straggler's authorized_keys write was issued: it may now
@@ -227,7 +232,7 @@ func Rekey(ctx context.Context, deps Deps, opts RekeyOptions) error {
 		return deps.abortRekey(fmt.Errorf("sign self cert: %w", err), updated)
 	}
 
-	if err := writeSelfRekey(deps.DataDir, self, oldCAPub, newCAPub, instanceKey, selfCertBytes); err != nil {
+	if err := writeSelfRekey(deps.DataDir, self, retiredCAPubs, newCAPub, instanceKey, selfCertBytes); err != nil {
 		return deps.abortRekey(fmt.Errorf("update self files: %w", err), updated)
 	}
 	rotatedAny = true
@@ -368,13 +373,14 @@ func CAKeyEncrypted(caDir string) (bool, error) {
 }
 
 // pushPeerRekey delivers the new CA + cert to a single peer. It swaps this
-// instance's cert-authority line in <home>/.ssh/authorized_keys (preserving any
-// other instance's lines), pushes the namespaced cert, and splices the keyed
+// instance's cert-authority line(s) — the retiring CA and any orphaned
+// archived-CA line — in <home>/.ssh/authorized_keys for exactly one new line
+// (preserving any other instance's lines), pushes the namespaced cert, and splices the keyed
 // client-config block; no reload. rotated reports whether the peer's trust
 // root was (possibly) changed: true once the authorized_keys write has been
 // issued — an ambiguous write error is conservatively treated as rotated,
 // because the peer may already trust ONLY the new CA.
-func pushPeerRekey(ctx context.Context, deps Deps, p *db.Peer, oldCAPub ssh.PublicKey, newCAPub []byte, instanceKey string, certBytes []byte, allowed []string, configBlock string, opts sshpush.Options) (rotated bool, err error) {
+func pushPeerRekey(ctx context.Context, deps Deps, p *db.Peer, retiredCAPubs []ssh.PublicKey, newCAPub []byte, instanceKey string, certBytes []byte, allowed []string, configBlock string, opts sshpush.Options) (rotated bool, err error) {
 	if p.Name == "" {
 		return false, errors.New("empty host")
 	}
@@ -390,7 +396,7 @@ func pushPeerRekey(ctx context.Context, deps Deps, p *db.Peer, oldCAPub ssh.Publ
 	if err != nil {
 		return false, fmt.Errorf("read authorized_keys: %w", err)
 	}
-	akContent := peerfiles.ReplaceCALine(existing, oldCAPub, newLine)
+	akContent := peerfiles.ReplaceCALines(existing, retiredCAPubs, newLine)
 	if err := cl.WriteFileAtomic(ctx, akPath, akContent, fs.FileMode(0644)); err != nil {
 		return true, fmt.Errorf("write authorized_keys: %w", err)
 	}
@@ -446,7 +452,7 @@ func trimTrailingNewline(b []byte) []byte {
 	return b
 }
 
-func writeSelfRekey(dataDir string, self *db.Peer, oldCAPub ssh.PublicKey, newCAPub []byte, instanceKey string, selfCert []byte) error {
+func writeSelfRekey(dataDir string, self *db.Peer, retiredCAPubs []ssh.PublicKey, newCAPub []byte, instanceKey string, selfCert []byte) error {
 	homeRel := strings.TrimPrefix(peerfiles.HomeOf(selfHomeUser(self)), "/")
 	base := filepath.Join(dataDir, "self", homeRel, ".ssh")
 	if err := os.MkdirAll(base, 0700); err != nil {
@@ -455,7 +461,7 @@ func writeSelfRekey(dataDir string, self *db.Peer, oldCAPub ssh.PublicKey, newCA
 	newLine := userAuthorizedKeysLine(newCAPub, nil)
 	akPath := filepath.Join(base, "authorized_keys")
 	existing, _ := os.ReadFile(akPath)
-	if err := writeFileAtomicLocal(akPath, peerfiles.ReplaceCALine(existing, oldCAPub, newLine), 0644); err != nil {
+	if err := writeFileAtomicLocal(akPath, peerfiles.ReplaceCALines(existing, retiredCAPubs, newLine), 0644); err != nil {
 		return fmt.Errorf("write self authorized_keys: %w", err)
 	}
 	if err := writeFileAtomicLocal(filepath.Join(base, peerfiles.V2CertFileName(instanceKey)), selfCert, 0644); err != nil {

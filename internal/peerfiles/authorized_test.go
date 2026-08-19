@@ -177,3 +177,48 @@ func TestReplaceCALine_AppendsWhenAbsent(t *testing.T) {
 		t.Errorf("existing content must be preserved:\n%s", out)
 	}
 }
+
+// TestReplaceCALines_SweepsEveryRetiredCA pins T170: a peer that missed a
+// rotation and was re-enrolled carries an orphaned old-CA line next to the
+// current one. Given the active key PLUS the archived key, the rewrite must
+// consume both and write the new line exactly once (at the first match),
+// while a foreign instance's line and comments survive verbatim.
+func TestReplaceCALines_SweepsEveryRetiredCA(t *testing.T) {
+	caV1, caV1AK := newTestCAKey(t)
+	caV2, caV2AK := newTestCAKey(t)
+	caOther, caOtherAK := newTestCAKey(t)
+	_ = caOther
+	v1 := strings.TrimRight(string(caV1AK), "\n")
+	v2 := strings.TrimRight(string(caV2AK), "\n")
+	other := strings.TrimRight(string(caOtherAK), "\n")
+
+	existing := []byte(`# header
+cert-authority,principals="manager,infra" ` + v1 + `
+cert-authority,principals="manager,db" ` + other + `
+cert-authority,principals="manager,infra" ` + v2 + `
+`)
+	_, newAK := newTestCAKey(t)
+	v3 := strings.TrimRight(string(newAK), "\n")
+	newLine := []byte(`cert-authority,principals="manager,infra" ` + v3 + "\n")
+
+	out := string(ReplaceCALines(existing, []ssh.PublicKey{caV2, caV1}, newLine))
+	if strings.Contains(out, v1) {
+		t.Errorf("orphaned archived-CA (v1) line must be swept:\n%s", out)
+	}
+	if strings.Contains(out, v2) {
+		t.Errorf("current-CA (v2) line must be replaced:\n%s", out)
+	}
+	if got := strings.Count(out, v3); got != 1 {
+		t.Errorf("new line written %d times, want exactly once:\n%s", got, out)
+	}
+	if !strings.Contains(out, other) {
+		t.Errorf("foreign instance line must be preserved:\n%s", out)
+	}
+	if !strings.Contains(out, "# header") {
+		t.Errorf("comment must be preserved:\n%s", out)
+	}
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) != 3 || !strings.Contains(lines[1], v3) {
+		t.Errorf("new line should take the first match's position; got lines=%q", lines)
+	}
+}

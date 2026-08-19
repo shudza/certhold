@@ -60,11 +60,27 @@ func RewritePrincipals(existing []byte, caPubKey ssh.PublicKey, principals []str
 // ReplaceCALine rewrites a multi-instance authorized_keys so the cert-authority
 // line trusting oldCAPubKey is swapped for newLine (which already carries the
 // new CA's key bytes). Lines for other CAs are preserved verbatim. If no line
-// matches oldCAPubKey, newLine is appended. Used by v2 CA rekey: the line's key
-// changes (not just its principals), so RewritePrincipals — which preserves the
-// key — cannot be used.
+// matches oldCAPubKey, newLine is appended. See ReplaceCALines for the
+// multi-key form rekey uses.
 func ReplaceCALine(existing []byte, oldCAPubKey ssh.PublicKey, newLine []byte) []byte {
-	oldMarshalled := oldCAPubKey.Marshal()
+	return ReplaceCALines(existing, []ssh.PublicKey{oldCAPubKey}, newLine)
+}
+
+// ReplaceCALines is ReplaceCALine for a set of retired CA keys: every
+// cert-authority line trusting ANY of oldCAPubKeys is consumed and exactly one
+// newLine is written, at the position of the first match (any further matches
+// are dropped, not duplicated). Lines for other CAs are preserved verbatim; if
+// nothing matches, newLine is appended. Rekey feeds it the active CA plus every
+// archived one, so a peer that missed a rotation and was re-enrolled — leaving
+// an orphaned old-CA line behind — is healed by the next rotation instead of
+// carrying the stale trust forward forever.
+func ReplaceCALines(existing []byte, oldCAPubKeys []ssh.PublicKey, newLine []byte) []byte {
+	olds := make([][]byte, 0, len(oldCAPubKeys))
+	for _, k := range oldCAPubKeys {
+		if k != nil {
+			olds = append(olds, k.Marshal())
+		}
+	}
 	trimmedNew := bytes.TrimRight(newLine, "\n")
 
 	var out bytes.Buffer
@@ -78,9 +94,18 @@ func ReplaceCALine(existing []byte, oldCAPubKey ssh.PublicKey, newLine []byte) [
 			writeLine(&out, line)
 			continue
 		}
-		matched, err := lineMatchesCA(trim, oldMarshalled)
-		if err != nil || !matched {
+		matched := false
+		for _, old := range olds {
+			if m, err := lineMatchesCA(trim, old); err == nil && m {
+				matched = true
+				break
+			}
+		}
+		if !matched {
 			writeLine(&out, line)
+			continue
+		}
+		if replaced {
 			continue
 		}
 		out.Write(trimmedNew)

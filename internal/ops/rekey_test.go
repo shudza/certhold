@@ -502,3 +502,71 @@ func TestRekeyDialsEachPeerAsItsOwnUser(t *testing.T) {
 		}
 	}
 }
+
+// TestRekeySweepsOrphanedArchivedCALines pins T170: a peer that missed a
+// rotation and was then re-enrolled carries an orphaned old-CA line next to
+// the current one. Rekey used to swap only the current CA's line and carry
+// the orphan forward forever; it must now consume every retired key (current
+// + each ca.old.* archive) and write exactly one new line.
+func TestRekeySweepsOrphanedArchivedCALines(t *testing.T) {
+	dataDir, d := setupOpsEnv(t, "alpha", "mgr")
+	ctx := context.Background()
+
+	// A real archived CA, as a previous rekey would have left it.
+	archiveDir := filepath.Join(dataDir, "ca.old.20260101T000000")
+	if _, err := ca.Generate(archiveDir); err != nil {
+		t.Fatalf("generate archived ca: %v", err)
+	}
+	archivedPub, err := ca.LoadPublicKey(archiveDir)
+	if err != nil {
+		t.Fatalf("load archived ca pub: %v", err)
+	}
+	archivedTrim := strings.TrimRight(string(archivedPub), "\n")
+	orphanLine := `cert-authority,principals="manager,infra" ` + archivedTrim + "\n"
+	currentLine := string(opsCALine(t, dataDir, "manager", "infra"))
+	currentTrim := strings.TrimSpace(strings.SplitN(currentLine, " ", 2)[1])
+
+	dialer := &fakeDialer{
+		readData: map[string][]byte{
+			"/root/.ssh/authorized_keys": []byte("# keep me\n" + orphanLine + currentLine),
+		},
+	}
+	var events []Event
+	deps := collectingDeps(dataDir, d, dialer, &events)
+
+	if err := Rekey(ctx, deps, RekeyOptions{Hostname: "mgr"}); err != nil {
+		t.Fatalf("Rekey: %v", err)
+	}
+
+	var written string
+	for _, c := range dialer.snapshot() {
+		if c.host == "alpha" && c.op == "write" && c.path == "/root/.ssh/authorized_keys" {
+			written = string(c.content)
+		}
+	}
+	if written == "" {
+		t.Fatal("rekey did not write alpha's authorized_keys")
+	}
+	if strings.Contains(written, archivedTrim) {
+		t.Errorf("orphaned archived-CA line must be swept by rekey:\n%s", written)
+	}
+	if strings.Contains(written, currentTrim) {
+		t.Errorf("retiring current-CA line must be replaced:\n%s", written)
+	}
+	newPub, err := ca.LoadPublicKey(filepath.Join(dataDir, "ca"))
+	if err != nil {
+		t.Fatalf("load new ca pub: %v", err)
+	}
+	newTrim := strings.TrimRight(string(newPub), "\n")
+	if got := strings.Count(written, newTrim); got != 1 {
+		t.Errorf("new CA line written %d times, want exactly once:\n%s", got, written)
+	}
+	if !strings.Contains(written, "# keep me") {
+		t.Errorf("unrelated content must be preserved:\n%s", written)
+	}
+	for _, e := range events {
+		if e.Type == EventWarn {
+			t.Errorf("unexpected warn: %+v", e)
+		}
+	}
+}
