@@ -470,3 +470,35 @@ func TestRekeyHappyPathRemovesStagingDir(t *testing.T) {
 		}
 	}
 }
+
+// TestRekeyDialsEachPeerAsItsOwnUser pins the T169 regression: the manager
+// (root) must log in to each peer as THAT peer's target user, not its own.
+// Before the fix every rekey dial carried the manager's user, so any peer
+// installed under a different account failed auth, was reported as a
+// straggler, and stayed on the retired CA — locking the manager out.
+func TestRekeyDialsEachPeerAsItsOwnUser(t *testing.T) {
+	dataDir, d := setupOpsEnv(t, "alpha", "beta", "mgr")
+	ctx := context.Background()
+	if err := d.SetPeerTargetUser(ctx, "alpha", "deploy"); err != nil {
+		t.Fatalf("SetPeerTargetUser alpha: %v", err)
+	}
+	dialer := &fakeDialer{}
+	var events []Event
+	deps := collectingDeps(dataDir, d, dialer, &events)
+
+	if err := Rekey(ctx, deps, RekeyOptions{Hostname: "mgr"}); err != nil {
+		t.Fatalf("Rekey: %v", err)
+	}
+
+	if got := dialer.dialedUsers["alpha"]; got != "deploy" {
+		t.Errorf("alpha dialed as user %q, want its own target user %q", got, "deploy")
+	}
+	if got := dialer.dialedUsers["beta"]; got != "root" {
+		t.Errorf("beta dialed as user %q, want %q", got, "root")
+	}
+	for _, e := range events {
+		if e.Type == EventWarn {
+			t.Errorf("unexpected warn (straggler?) on a reachable mixed-user fleet: %+v", e)
+		}
+	}
+}

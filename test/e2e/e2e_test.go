@@ -509,6 +509,26 @@ func TestE2E(t *testing.T) {
 		if code := sshTryAs(ctx, t, "root", "peer3", "peer3"); code != 0 {
 			t.Fatalf("root@peer3->root@peer3 cert SSH failed (exit %d) after root install+update (want 0)", code)
 		}
+
+		// T169 regression: the fleet now mixes install users — manager and
+		// web01 are `deploy`, rootbox is `root`. A full rekey must log in to
+		// EACH peer as that peer's own user; it used to dial every peer as the
+		// manager's user, fail auth on rootbox, report it as a straggler (still
+		// exit 0), and leave it trusting the retired CA. Assert no straggler
+		// warning, then prove rootbox really rotated: a push into it must still
+		// succeed under the new CA, and a cert SSH as root must still work.
+		out = certhold(ctx, t, "rekey")
+		t.Logf("mixed-user rekey output:\n%s", out)
+		if strings.Contains(out, "could not reach") || strings.Contains(out, "STILL TRUST") {
+			t.Fatalf("mixed-user rekey reported stragglers (peer dialed as the wrong user?):\n%s", out)
+		}
+		out = certhold(ctx, t, "update", "rootbox", "--groups", "infra")
+		if !strings.Contains(out, "updated rootbox") {
+			t.Fatalf("update rootbox after mixed-user rekey did not confirm success:\n%s", out)
+		}
+		if code := sshTryAs(ctx, t, "root", "peer3", "peer3"); code != 0 {
+			t.Fatalf("root@peer3->root@peer3 cert SSH failed (exit %d) after mixed-user rekey (want 0)", code)
+		}
 	})
 
 	t.Run("10_client_peer_flow", func(t *testing.T) {
