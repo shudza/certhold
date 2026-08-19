@@ -50,7 +50,7 @@ func UpdatePeer(ctx context.Context, deps Deps, name string, groups []string, ho
 		return fmt.Errorf("parse peer pubkey: %w", err)
 	}
 
-	principals := certPrincipals(name, groups, false)
+	principals := CertPrincipals(name, groups, false)
 	certBytes, serial, err := caObj.SignCert(ca.SignOptions{
 		Pubkey:     pk,
 		KeyID:      name,

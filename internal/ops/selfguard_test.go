@@ -319,3 +319,31 @@ func TestSelfGuardMakeClientRefusesSelf(t *testing.T) {
 		t.Errorf("no event should be emitted on refusal; got %+v", events)
 	}
 }
+
+// TestCertPrincipalsSingleBuilder pins T171: one builder for every signing
+// path, each principal exactly once, and the manager principal present
+// exactly once on the self cert even when the peer is literally named
+// "manager" (init used to hand-roll [name, manager] with no dedupe).
+func TestCertPrincipalsSingleBuilder(t *testing.T) {
+	cases := []struct {
+		name   string
+		groups []string
+		self   bool
+		want   string
+	}{
+		{"mgr", nil, true, "mgr,manager"},
+		{"mgr", []string{"infra"}, true, "mgr,manager,infra"},
+		{"mgr", []string{"manager", "infra"}, true, "mgr,manager,infra"},
+		{"manager", nil, true, "manager"},
+		{"manager", []string{"infra"}, true, "manager,infra"},
+		{"alpha", []string{"infra", "db"}, false, "alpha,infra,db"},
+		{"alpha", []string{"infra", "infra", "alpha"}, false, "alpha,infra"},
+		{"alpha", []string{"", "infra"}, false, "alpha,infra"},
+	}
+	for _, c := range cases {
+		got := strings.Join(CertPrincipals(c.name, c.groups, c.self), ",")
+		if got != c.want {
+			t.Errorf("CertPrincipals(%q, %v, self=%v) = %q, want %q", c.name, c.groups, c.self, got, c.want)
+		}
+	}
+}

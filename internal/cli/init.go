@@ -12,6 +12,7 @@ import (
 
 	"github.com/shudza/certhold/internal/ca"
 	"github.com/shudza/certhold/internal/db"
+	"github.com/shudza/certhold/internal/ops"
 	"github.com/shudza/certhold/internal/passphrase"
 	"github.com/shudza/certhold/internal/peerfiles"
 	"github.com/spf13/cobra"
@@ -169,7 +170,7 @@ func newInitCmd() *cobra.Command {
 			certBytes, serial, err := caObj.SignCert(ca.SignOptions{
 				Pubkey:     sshPub,
 				KeyID:      hostname,
-				Principals: []string{hostname, peerfiles.ManagerPrincipal},
+				Principals: ops.CertPrincipals(hostname, nil, true),
 			})
 			if err != nil {
 				return fmt.Errorf("sign cert: %w", err)
