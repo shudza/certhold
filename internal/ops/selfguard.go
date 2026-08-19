@@ -43,22 +43,36 @@ func SelfName(ctx context.Context, d *db.DB) (string, error) {
 	return resolveSelfName(ctx, d, "")
 }
 
-// certPrincipals is the principal list a peer's cert carries: its own name
-// followed by its groups. The manager's self row additionally carries the
-// manager principal, which every peer authorizes inbound manager SSH with and
-// which is never a DB group — a re-sign of the self cert that drops it locks
-// the manager out of pushing to its whole fleet.
-func certPrincipals(name string, groups []string, self bool) []string {
+// CertPrincipals is the principal list a peer's cert carries: its own name
+// followed by its groups, each exactly once. The manager's self row
+// additionally carries the manager principal, which every peer authorizes
+// inbound manager SSH with and which is never a DB group — a re-sign of the
+// self cert that drops it locks the manager out of pushing to its whole
+// fleet. This is the single builder for every signing path (init, enroll,
+// update, group cascades, rekey) so they cannot drift; a peer literally named
+// "manager" still gets the principal once, not twice.
+func CertPrincipals(name string, groups []string, self bool) []string {
 	out := make([]string, 0, len(groups)+2)
-	out = append(out, name)
+	seen := map[string]struct{}{}
+	add := func(p string) {
+		if p == "" {
+			return
+		}
+		if _, dup := seen[p]; dup {
+			return
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	add(name)
 	if self {
-		out = append(out, peerfiles.ManagerPrincipal)
+		add(peerfiles.ManagerPrincipal)
 	}
 	for _, g := range groups {
 		if self && g == peerfiles.ManagerPrincipal {
 			continue
 		}
-		out = append(out, g)
+		add(g)
 	}
 	return out
 }

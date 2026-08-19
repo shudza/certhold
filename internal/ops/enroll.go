@@ -145,7 +145,7 @@ func MintEnroll(ctx context.Context, deps Deps, spec EnrollSpec) (EnrollResult, 
 	}
 	defer passphrase.Zero(priv)
 
-	principals := certPrincipals(spec.Name, groups, false)
+	principals := CertPrincipals(spec.Name, groups, false)
 	certBytes, serial, err := caObj.SignCert(ca.SignOptions{
 		Pubkey:     sshPub,
 		KeyID:      spec.Name,

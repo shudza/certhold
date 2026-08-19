@@ -444,7 +444,7 @@ func signAndStorePeerCert(ctx context.Context, d *db.DB, caObj *ca.CA, peer *db.
 	if err != nil {
 		return nil, fmt.Errorf("parse peer pubkey %q: %w", peer.Name, err)
 	}
-	principals := certPrincipals(peer.Name, groups, self)
+	principals := CertPrincipals(peer.Name, groups, self)
 	certBytes, serial, err := caObj.SignCert(ca.SignOptions{
 		Pubkey:     pk,
 		KeyID:      peer.Name,

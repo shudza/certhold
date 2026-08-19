@@ -416,3 +416,47 @@ func TestInit_TwoInstances_DistinctKeys(t *testing.T) {
 		t.Errorf("two inits produced the same instance key %q", k1)
 	}
 }
+
+// TestInit_HostnameManager_PrincipalOnce pins T171 on the real init path: a
+// manager literally named "manager" must carry the manager principal exactly
+// once on its self cert. init used to hand-roll [hostname, manager] with no
+// dedupe, signing [manager, manager], which every rekey then preserved.
+func TestInit_HostnameManager_PrincipalOnce(t *testing.T) {
+	setInitPassphrases(t)
+	dataDir := t.TempDir()
+	dbPath := filepath.Join(dataDir, "state.db")
+
+	cmd := cli.NewRootCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "init", "--hostname", "manager", "--user", "root", "--listen-ip", "127.0.0.1", "--no-prompt"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v\nout:\n%s", err, out.String())
+	}
+
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("db.Open: %v", err)
+	}
+	defer database.Close()
+	key, ok, err := database.GetMeta(context.Background(), db.MetaInstanceKey)
+	if err != nil || !ok {
+		t.Fatalf("GetMeta instance_key: ok=%v err=%v", ok, err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dataDir, "self", "root", ".ssh", "id_ed25519_"+key+"-cert.pub"))
+	if err != nil {
+		t.Fatalf("read self cert: %v", err)
+	}
+	pk, _, _, _, err := ssh.ParseAuthorizedKey(raw)
+	if err != nil {
+		t.Fatalf("parse self cert: %v", err)
+	}
+	cert, ok := pk.(*ssh.Certificate)
+	if !ok {
+		t.Fatalf("self cert is %T, want *ssh.Certificate", pk)
+	}
+	if got := strings.Join(cert.ValidPrincipals, ","); got != "manager" {
+		t.Errorf("self cert principals = %q, want exactly \"manager\" once", got)
+	}
+}
