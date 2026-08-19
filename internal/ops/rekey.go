@@ -137,12 +137,13 @@ func Rekey(ctx context.Context, deps Deps, opts RekeyOptions) error {
 	}
 	newCAPub := newCA.PublicKeyAuthorizedKey()
 
+	// Self identity (which key/cert the manager presents) is fixed for the
+	// whole rotation; the login user is per peer — set inside the loop.
 	pushOpts := SelfPushOptions(deps.DataDir, SelfIdent{
 		TargetUser:  selfHomeUser(self),
 		InstanceKey: instanceKey,
 		Resolved:    true,
 	}, deps.PeerPass)
-	pushOpts.User = pushUser(self)
 
 	var updated []string
 	var failed []straggler
@@ -186,8 +187,10 @@ func Rekey(ctx context.Context, deps Deps, opts RekeyOptions) error {
 			return deps.abortRekey(fmt.Errorf("reachable hosts for %s: %w", p.Name, err), updated)
 		}
 		configBlock := v2ConfigBlockForHosts(instanceKey, hosts)
+		peerPushOpts := pushOpts
+		peerPushOpts.User = pushUser(&peerForPush)
 		deps.emit(Event{Type: EventPeerStart, Peer: p.Name})
-		rotated, err := pushPeerRekey(ctx, deps, &peerForPush, oldCAPub, newCAPub, instanceKey, certBytes, allowed, configBlock, pushOpts)
+		rotated, err := pushPeerRekey(ctx, deps, &peerForPush, oldCAPub, newCAPub, instanceKey, certBytes, allowed, configBlock, peerPushOpts)
 		if err != nil {
 			if rotated {
 				// The straggler's authorized_keys write was issued: it may now

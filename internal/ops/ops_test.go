@@ -36,6 +36,7 @@ type fakeDialer struct {
 	verifyErr   map[string]error
 	readData    map[string][]byte
 	dialedHosts []string
+	dialedUsers map[string]string
 	captureSeen bool
 }
 
@@ -43,6 +44,10 @@ func (f *fakeDialer) dial(ctx context.Context, host string, opts sshpush.Options
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.dialedHosts = append(f.dialedHosts, host)
+	if f.dialedUsers == nil {
+		f.dialedUsers = map[string]string{}
+	}
+	f.dialedUsers[host] = opts.User
 	if opts.CaptureHostKey {
 		f.captureSeen = true
 	}
