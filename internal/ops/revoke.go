@@ -56,7 +56,7 @@ func revokeClear(ctx context.Context, deps Deps, peer *db.Peer) error {
 		return fmt.Errorf("peer %q is a no-inbound/client peer and cannot be cleared over SSH; use `certhold remove %s` (DB-only) or `certhold revoke --rekey %s` (rotate the CA)", name, name, name)
 	}
 
-	caPubs, err := instanceCAPubKeys(deps, name)
+	caPubs, err := instanceCAPubKeys(deps, "revoke", name)
 	if err != nil {
 		return err
 	}
@@ -135,12 +135,13 @@ func revokeRekey(ctx context.Context, deps Deps, name, hostname string) error {
 
 // instanceCAPubKeys returns every CA public key this instance has ever used:
 // the active CA's key plus the key of each archived old CA under
-// dataDir/ca.old.*. Revoke strips all of them off the peer, so a straggler that
-// missed a past rekey does not keep a stale old-CA cert-authority line behind a
-// clean-looking clear. Only the active key is required; an archive whose ca.pub
-// is missing or unreadable just warns, so a damaged archive cannot block a
-// revoke.
-func instanceCAPubKeys(deps Deps, peerName string) ([]ssh.PublicKey, error) {
+// dataDir/ca.old.*. Revoke strips all of them off the peer and rekey swaps all
+// of them for the new line, so a straggler that missed a past rekey does not
+// keep a stale old-CA cert-authority line behind a clean-looking clear or
+// rotation. Only the active key is required; an archive whose ca.pub is
+// missing or unreadable just warns, so a damaged archive cannot block the
+// operation. op names the caller for the warning.
+func instanceCAPubKeys(deps Deps, op, peerName string) ([]ssh.PublicKey, error) {
 	caPubBytes, err := ca.LoadPublicKey(filepath.Join(deps.DataDir, "ca"))
 	if err != nil {
 		return nil, fmt.Errorf("load ca public key: %w", err)
@@ -159,12 +160,12 @@ func instanceCAPubKeys(deps Deps, peerName string) ([]ssh.PublicKey, error) {
 		}
 		oldPubBytes, err := ca.LoadPublicKey(dir)
 		if err != nil {
-			deps.warn(peerName, fmt.Sprintf("revoke: cannot load archived CA public key from %s: %v; a cert-authority line for that CA may remain on the peer", dir, err))
+			deps.warn(peerName, fmt.Sprintf("%s: cannot load archived CA public key from %s: %v; a cert-authority line for that CA may remain on the peer", op, dir, err))
 			continue
 		}
 		oldPub, _, _, _, err := ssh.ParseAuthorizedKey(oldPubBytes)
 		if err != nil {
-			deps.warn(peerName, fmt.Sprintf("revoke: cannot parse archived CA public key from %s: %v; a cert-authority line for that CA may remain on the peer", dir, err))
+			deps.warn(peerName, fmt.Sprintf("%s: cannot parse archived CA public key from %s: %v; a cert-authority line for that CA may remain on the peer", op, dir, err))
 			continue
 		}
 		keys = append(keys, oldPub)
