@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -859,7 +860,7 @@ func TestEnrollV2Script_BashSyntax(t *testing.T) {
 		t.Skipf("bash not on PATH (%v); skipping syntax check", err)
 	}
 
-	script := v2Script("https://demo.example", "TOKEN123", testInstanceKey)
+	script := v2Script("https://demo.example", "TOKEN123", testInstanceKey, "", "")
 	tmpFile := filepath.Join(t.TempDir(), "install.sh")
 	if err := os.WriteFile(tmpFile, []byte(script), 0o600); err != nil {
 		t.Fatalf("write script: %v", err)
@@ -875,7 +876,7 @@ func TestEnrollV2Script_BashSyntax(t *testing.T) {
 // resolved via a portable best-effort chain that does not depend solely on the
 // `hostname` binary (minimal Alpine/busybox/embedded peers may lack it).
 func TestEnrollV2Script_PortableHostname(t *testing.T) {
-	script := v2Script("https://demo.example", "TOKEN123", testInstanceKey)
+	script := v2Script("https://demo.example", "TOKEN123", testInstanceKey, "", "")
 	for _, want := range []string{
 		"uname -n 2>/dev/null",
 		"cat /proc/sys/kernel/hostname 2>/dev/null",
@@ -901,7 +902,7 @@ func TestEnrollV2Script_ExecutionSmoke(t *testing.T) {
 
 	const baseURL = "https://demo.example"
 	const tok = "TOKEN123"
-	script := v2Script(baseURL, tok, testInstanceKey)
+	script := v2Script(baseURL, tok, testInstanceKey, "", "")
 	keyFile := peerfiles.V2KeyFileName(testInstanceKey)
 
 	// The staged config carries a Host alias, exactly like a tarball minted
@@ -1058,7 +1059,7 @@ func TestEnrollV2Script_ExecutionSmoke_ClientBundle(t *testing.T) {
 
 	const baseURL = "https://demo.example"
 	const tok = "TOKEN456"
-	script := v2Script(baseURL, tok, testInstanceKey)
+	script := v2Script(baseURL, tok, testInstanceKey, "", "")
 	keyFile := peerfiles.V2KeyFileName(testInstanceKey)
 
 	confName := "certhold_" + testInstanceKey + ".conf"
@@ -1380,7 +1381,7 @@ func TestEnrollReenrollCommitFailureIs500Retryable(t *testing.T) {
 // ca_pub is, this instance's cert-authority line is stripped from
 // authorized_keys.
 func TestEnrollV2Script_CarriesStaleTrustLineRemoval(t *testing.T) {
-	s := v2Script("https://demo.example", "TOKEN123", testInstanceKey)
+	s := v2Script("https://demo.example", "TOKEN123", testInstanceKey, "", "")
 	for _, m := range []string{
 		`elif [ -f "$STAGE/ca_pub" ] && [ -f "$USER_HOME/.ssh/authorized_keys" ]; then`,
 		`CA_KEY="$(awk '{print $2}' "$STAGE/ca_pub")"`,
@@ -1405,7 +1406,7 @@ func TestEnrollV2Script_ExecutionSmoke_ClientReenrollRemovesTrustLine(t *testing
 
 	const baseURL = "https://demo.example"
 	const tok = "TOKENRC1"
-	script := v2Script(baseURL, tok, testInstanceKey)
+	script := v2Script(baseURL, tok, testInstanceKey, "", "")
 	keyFile := peerfiles.V2KeyFileName(testInstanceKey)
 
 	fixturePath := writeFixtureTarball(t, []fixtureEntry{
@@ -1488,7 +1489,7 @@ func TestEnrollV2Script_ExecutionSmoke_ClientReenrollSoleTrustLine(t *testing.T)
 
 	const baseURL = "https://demo.example"
 	const tok = "TOKENRC2"
-	script := v2Script(baseURL, tok, testInstanceKey)
+	script := v2Script(baseURL, tok, testInstanceKey, "", "")
 	keyFile := peerfiles.V2KeyFileName(testInstanceKey)
 
 	fixturePath := writeFixtureTarball(t, []fixtureEntry{
@@ -1542,7 +1543,7 @@ func TestEnrollV2Script_ExecutionSmoke_NoStagedConfig(t *testing.T) {
 
 	const baseURL = "https://demo.example"
 	const tok = "TOKEN789"
-	script := v2Script(baseURL, tok, testInstanceKey)
+	script := v2Script(baseURL, tok, testInstanceKey, "", "")
 	keyFile := peerfiles.V2KeyFileName(testInstanceKey)
 
 	fixturePath := writeFixtureTarball(t, []fixtureEntry{
@@ -1597,7 +1598,7 @@ func setupTrustLineSmoke(t *testing.T, home, tok string, entries []fixtureEntry)
 	}
 
 	const baseURL = "https://demo.example"
-	script := v2Script(baseURL, tok, testInstanceKey)
+	script := v2Script(baseURL, tok, testInstanceKey, "", "")
 	fixturePath := writeFixtureTarball(t, entries)
 	curlLine := `curl -kfsSL ` + baseURL + `/enroll/` + tok + `?user=$TARGET_USER | tar -xzC "$STAGE"`
 	if !strings.Contains(script, curlLine) {
@@ -1743,5 +1744,175 @@ func TestEnrollV2Script_ExecutionSmoke_ReenrollUnchangedTrustLineNoop(t *testing
 	}
 	if string(ak) != seeded {
 		t.Errorf("unchanged trust line must leave the file bytes untouched:\ngot:\n%s\nwant:\n%s", ak, seeded)
+	}
+}
+
+func currentUnixUser(t *testing.T) string {
+	t.Helper()
+	out, err := exec.Command("id", "-un").Output()
+	if err != nil {
+		t.Skipf("id -un unavailable: %v", err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func otherUnixUser(current string) string {
+	if current == "root" {
+		return "certhold-nobody"
+	}
+	return "root"
+}
+
+func runScriptInHome(t *testing.T, script, home string) (string, string, error) {
+	t.Helper()
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skipf("bash not on PATH (%v)", err)
+	}
+	scriptPath := filepath.Join(t.TempDir(), "install.sh")
+	if err := os.WriteFile(scriptPath, []byte(script), 0o700); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	cmd := exec.Command(bashPath, scriptPath)
+	cmd.Env = append(os.Environ(), "HOME="+home, "CERTHOLD_NO_PASSPHRASE=1")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err = cmd.Run()
+	return stdout.String(), stderr.String(), err
+}
+
+func TestEnrollV2Script_PresetUserMismatchFailsBeforeAnyChange(t *testing.T) {
+	env := setupTestEnv(t)
+	ctx := context.Background()
+	current := currentUnixUser(t)
+	preset := otherUnixUser(current)
+	const tok = "tok-precheck-mismatch"
+	tb := env.seedUserTarball(t, "vmPre", preset, []string{"infra"})
+	env.seedPeerRow(t, "vmPre", preset)
+	if err := env.db.InsertToken(ctx, tok, "vmPre", "infra", preset, tb); err != nil {
+		t.Fatalf("InsertToken: %v", err)
+	}
+
+	var tarballHits atomic.Int32
+	inner := New(env.db)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, ".sh") {
+			tarballHits.Add(1)
+		}
+		inner.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+
+	fetch := func() string {
+		resp, err := http.Get(srv.URL + "/enroll/" + tok + ".sh")
+		if err != nil {
+			t.Fatalf("GET .sh: %v", err)
+		}
+		defer resp.Body.Close()
+		body := mustRead(t, resp.Body)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf(".sh status = %d; body=%s", resp.StatusCode, body)
+		}
+		return string(body)
+	}
+	script := fetch()
+
+	if iCheck, iMkdir := strings.Index(script, "id -un)\" != '"+preset+"'"), strings.Index(script, "mkdir"); iCheck < 0 || iCheck > iMkdir || iCheck > strings.Index(script, "curl -kfsSL "+srv.URL+"/enroll/"+tok+"?user=") {
+		t.Fatalf("user precheck must precede every mkdir/curl (check@%d, mkdir@%d)\n%s", iCheck, iMkdir, script)
+	}
+
+	home := t.TempDir()
+	_, stderr, err := runScriptInHome(t, script, home)
+	if err == nil {
+		t.Fatalf("script must exit non-zero for user mismatch; stderr:\n%s", stderr)
+	}
+	for _, want := range []string{
+		"pinned to user " + preset + ", but the script is running as " + current,
+		"curl -kfsSL " + srv.URL + "/enroll/" + tok + ".sh | sudo -H",
+		"certhold enroll vmPre --user " + current,
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr missing %q\nstderr:\n%s", want, stderr)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(home, ".ssh")); !os.IsNotExist(err) {
+		t.Errorf("~/.ssh must not be created on mismatch (stat err=%v)", err)
+	}
+	if n := tarballHits.Load(); n != 0 {
+		t.Errorf("tarball endpoint hit %d times, want 0", n)
+	}
+	if _, _, _, consumed, err := env.db.LookupToken(ctx, tok); err != nil || consumed {
+		t.Errorf("token must stay unconsumed: consumed=%v err=%v", consumed, err)
+	}
+	_ = fetch()
+}
+
+func TestEnrollV2Script_PresetUserMatchingRuns(t *testing.T) {
+	current := currentUnixUser(t)
+	const baseURL = "https://demo.example"
+	const tok = "TOKENMATCH"
+	script := v2Script(baseURL, tok, testInstanceKey, "vmMatch", current)
+	if !strings.Contains(script, "pinned to user") {
+		t.Fatalf("preset-user script must carry the precheck\n%s", script)
+	}
+	keyFile := peerfiles.V2KeyFileName(testInstanceKey)
+	fixturePath := writeFixtureTarball(t, []fixtureEntry{
+		{keyFile, []byte("FAKE_PRIVKEY\n")},
+		{keyFile + "-cert.pub", []byte("ssh-ed25519-cert-v01@openssh.com FAKECERT keyid\n")},
+		{"ca_authorized_keys", []byte(`cert-authority,principals="manager" ssh-ed25519 FAKECAKEY ca-comment` + "\n")},
+	})
+	curlLine := `curl -kfsSL ` + baseURL + `/enroll/` + tok + `?user=$TARGET_USER | tar -xzC "$STAGE"`
+	if !strings.Contains(script, curlLine) {
+		t.Fatalf("script missing curl line %q", curlLine)
+	}
+	patched := strings.Replace(script, curlLine, `tar -xzf `+fixturePath+` -C "$STAGE"`, 1)
+	home := t.TempDir()
+	stdout, stderr, err := runScriptInHome(t, patched, home)
+	if err != nil {
+		t.Fatalf("matching user must install: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "Success") || strings.Contains(stderr, "pinned to user") {
+		t.Errorf("matching user must pass the precheck\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+}
+
+func TestEnrollV2Script_NoPresetHasNoPrecheck(t *testing.T) {
+	script := v2Script("https://demo.example", "TOKEN123", testInstanceKey, "vm", "")
+	if strings.Contains(script, "pinned to") {
+		t.Errorf("no-preset script must not carry a user precheck\n%s", script)
+	}
+	if !strings.HasPrefix(script, "#!/usr/bin/env bash\nset -e\nTARGET_USER=\"$(id -un)\"\n") {
+		t.Errorf("no-preset script prologue changed\n%s", script)
+	}
+}
+
+func TestEnrollV2Script_PresetUserCannotInject(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "PWNED")
+	payload := "x'; touch " + marker + "; echo '"
+	for _, tc := range []struct {
+		name, peer, user string
+	}{
+		{"bad user", "vm", payload},
+		{"overlong user", "vm", strings.Repeat("a", 33)},
+		{"hostile peer name", payload + "$(touch " + marker + ")", otherUnixUser(currentUnixUser(t))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			script := v2Script("https://demo.example", "TOKEN123", testInstanceKey, tc.peer, tc.user)
+			home := t.TempDir()
+			_, stderr, err := runScriptInHome(t, script, home)
+			if err == nil {
+				t.Fatalf("script must fail; stderr:\n%s", stderr)
+			}
+			if _, err := os.Stat(marker); !os.IsNotExist(err) {
+				t.Fatalf("injected command ran (marker exists)\nscript:\n%s", script)
+			}
+			if _, err := os.Stat(filepath.Join(home, ".ssh")); !os.IsNotExist(err) {
+				t.Errorf("~/.ssh must not be created")
+			}
+			if !strings.Contains(stderr, "certhold enroll ") {
+				t.Errorf("stderr must explain how to re-mint\nstderr:\n%s", stderr)
+			}
+		})
 	}
 }

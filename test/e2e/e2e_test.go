@@ -484,6 +484,20 @@ func TestE2E(t *testing.T) {
 		certhold(ctx, t, "group", "create", "infra")
 		line := enrollOneLiner(ctx, t, "rootbox", "peer3", "root", "infra")
 
+		wrong := composeExec(ctx, t, "deploy", "peer3",
+			line+"; rc=$?; ls -d /home/deploy/.ssh/.certhold.* 2>/dev/null && echo STAGING_LEFT; exit $rc")
+		if wrong.exitCode == 0 {
+			t.Fatalf("install as deploy for a --user root token unexpectedly succeeded:\n%s", wrong.out)
+		}
+		for _, want := range []string{"pinned to user root, but the script is running as deploy", "sudo -H bash", "certhold enroll rootbox --user deploy"} {
+			if !strings.Contains(wrong.out, want) {
+				t.Errorf("wrong-user install output missing %q:\n%s", want, wrong.out)
+			}
+		}
+		if strings.Contains(wrong.out, "STAGING_LEFT") {
+			t.Errorf("wrong-user install left a staging dir:\n%s", wrong.out)
+		}
+
 		// Run the one-liner as root (no -u): the install must target /root/.ssh.
 		res := composeExec(ctx, t, "", "peer3", line)
 		if res.exitCode != 0 {

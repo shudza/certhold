@@ -81,7 +81,7 @@ func scriptHandler(database *db.DB) func(http.ResponseWriter, *http.Request, str
 			writeErr(w, http.StatusBadRequest, "missing token")
 			return
 		}
-		_, _, _, consumed, err := database.LookupToken(r.Context(), token)
+		peerName, _, presetUser, consumed, err := database.LookupToken(r.Context(), token)
 		if err != nil {
 			if errors.Is(err, db.ErrTokenNotFound) {
 				writeErr(w, http.StatusNotFound, "token not found")
@@ -105,7 +105,7 @@ func scriptHandler(database *db.DB) func(http.ResponseWriter, *http.Request, str
 			scheme = p
 		}
 		baseURL := fmt.Sprintf("%s://%s", scheme, r.Host)
-		body := v2Script(baseURL, token, instanceKey)
+		body := v2Script(baseURL, token, instanceKey, peerName, presetUser)
 		w.Header().Set("Content-Type", "application/x-shellscript; charset=utf-8")
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
 		w.WriteHeader(http.StatusOK)
@@ -123,18 +123,49 @@ func scriptHandler(database *db.DB) func(http.ResponseWriter, *http.Request, str
 // taken from the staged tarball `config` entry (hosts-bearing, built at mint),
 // falling back to a hosts-less inline copy when no entry is staged. It never reloads
 // sshd and carries NO TrustedUserCAKeys/AuthorizedPrincipalsFile/RevokedKeys/
-// HostCertificate directives.
-func v2Script(baseURL, token, instanceKey string) string {
+// HostCertificate directives. When the token pins a target user, the script
+// first refuses to run as anyone else, before touching the filesystem or
+// fetching the tarball.
+func v2Script(baseURL, token, instanceKey, peerName, presetUser string) string {
 	block := peerfiles.V2SshClientBlock(instanceKey)
 	keyFile := peerfiles.V2KeyFileName(instanceKey)
 
 	var sb strings.Builder
 	sb.WriteString("#!/usr/bin/env bash\nset -e\n")
+	if presetUser != "" {
+		writeUserPrecheck(&sb, baseURL, token, peerName, presetUser)
+	}
 	fmt.Fprintf(&sb, "TARGET_USER=\"$(id -un)\"\nUSER_HOME=\"$HOME\"\n")
 	fmt.Fprintf(&sb, "[ -n \"$USER_HOME\" ] || { echo \"no \\$HOME\" >&2; exit 1; }\n")
 	curl := fmt.Sprintf("curl -kfsSL %s/enroll/%s?user=$TARGET_USER", baseURL, token)
 	writeV2Body(&sb, curl, keyFile, block, instanceKey)
 	return sb.String()
+}
+
+func writeUserPrecheck(sb *strings.Builder, baseURL, token, peerName, presetUser string) {
+	if len(presetUser) > 32 || !validUsername.MatchString(presetUser) {
+		fmt.Fprintf(sb, "printf 'certhold: this enrollment is pinned to an invalid user name and can never be installed.\\nRe-mint it on the manager: certhold enroll %%s --user <user>\\n' %s >&2\n", shellQuote(peerName))
+		sb.WriteString("exit 1\n")
+		return
+	}
+	sudo := "sudo -H bash"
+	if presetUser != "root" {
+		sudo = "sudo -H -u " + presetUser + " bash"
+	}
+	rerun := fmt.Sprintf("curl -kfsSL %s/enroll/%s.sh | %s", baseURL, token, sudo)
+	fmt.Fprintf(sb, "if [ \"$(id -un)\" != %s ]; then\n", shellQuote(presetUser))
+	sb.WriteString("  {\n")
+	fmt.Fprintf(sb, "    printf 'certhold: this enrollment is pinned to user %%s, but the script is running as %%s.\\n' %s \"$(id -un)\"\n", shellQuote(presetUser))
+	fmt.Fprintf(sb, "    printf 'Nothing was changed and the token is still valid. Either:\\n'\n")
+	fmt.Fprintf(sb, "    printf '  - re-run the one-liner as %%s:  %%s\\n' %s %s\n", shellQuote(presetUser), shellQuote(rerun))
+	fmt.Fprintf(sb, "    printf '  - or re-mint it on the manager for this user:  certhold enroll %%s --user %%s\\n' %s \"$(id -un)\"\n", shellQuote(peerName))
+	sb.WriteString("  } >&2\n")
+	sb.WriteString("  exit 1\n")
+	sb.WriteString("fi\n")
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func writeV2Body(sb *strings.Builder, curl, keyFile, block, instanceKey string) {
