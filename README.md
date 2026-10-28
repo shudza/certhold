@@ -69,6 +69,15 @@ Trust model and hardening: [docs/security.md](docs/security.md). Design: [docs/a
 
 ## Installation
 
+Grab a prebuilt static binary (linux amd64/arm64) from [Releases](https://github.com/shudza/certhold/releases):
+
+```bash
+curl -fsSLo certhold https://github.com/shudza/certhold/releases/latest/download/certhold-linux-amd64
+sudo install -m 0755 certhold /usr/local/bin/certhold
+```
+
+Or build from source:
+
 ```bash
 git clone https://github.com/shudza/certhold && cd certhold
 make build                                   # → ./bin/certhold
