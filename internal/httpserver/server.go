@@ -20,15 +20,21 @@ import (
 var validUsername = regexp.MustCompile(`^[a-z_][a-z0-9_-]*\$?$`)
 
 // peerPassphraseBlock optionally encrypts the freshly installed peer key with a
-// passphrase the operator types at /dev/tty (or presets via env). It reads $KEY,
-// which each script body sets before splicing this in. Contains no '%' so it is
-// safe inside the fmt.Sprintf-built script bodies.
+// passphrase the operator types at /dev/tty (or presets via env). When no
+// terminal can be opened (CI, cloud-init, ssh without -t) it skips the prompt,
+// leaves the key unencrypted and warns on stderr. It reads $KEY, which each
+// script body sets before splicing this in. Contains no '%' so it is safe
+// inside the fmt.Sprintf-built script bodies.
 const peerPassphraseBlock = `if [ "${CERTHOLD_NO_PASSPHRASE:-}" != "1" ]; then
   PASS="${CERTHOLD_KEY_PASSPHRASE:-}"
-  if [ -z "$PASS" ] && [ -e /dev/tty ]; then
-    printf 'Passphrase for this peer key (empty = none): ' > /dev/tty
-    IFS= read -rs PASS < /dev/tty || PASS=""
-    printf '\n' > /dev/tty
+  if [ -z "$PASS" ]; then
+    if ( : </dev/tty >/dev/tty ) 2>/dev/null; then
+      printf 'Passphrase for this peer key (empty = none): ' > /dev/tty
+      IFS= read -rs PASS < /dev/tty || PASS=""
+      printf '\n' > /dev/tty
+    else
+      echo "certhold: warning: no terminal for the passphrase prompt; the peer key is left unencrypted (set CERTHOLD_KEY_PASSPHRASE to encrypt it, or CERTHOLD_NO_PASSPHRASE=1 to skip this warning)" >&2
+    fi
   fi
   if [ -n "$PASS" ]; then
     ssh-keygen -p -f "$KEY" -N "$PASS" -P "" >/dev/null 2>&1 || \

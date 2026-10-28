@@ -1916,3 +1916,187 @@ func TestEnrollV2Script_PresetUserCannotInject(t *testing.T) {
 		})
 	}
 }
+
+type passphraseRun struct {
+	stdout, stderr string
+	err            error
+}
+
+func passphraseTestEnv(home string, extra ...string) []string {
+	var env []string
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "CERTHOLD_") || strings.HasPrefix(kv, "HOME=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	return append(append(env, "HOME="+home), extra...)
+}
+
+func requireTools(t *testing.T, tools ...string) {
+	t.Helper()
+	for _, tool := range tools {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s not on PATH (%v)", tool, err)
+		}
+	}
+}
+
+func writePassphraseBlockScript(t *testing.T) (dir, key, script string) {
+	t.Helper()
+	dir = t.TempDir()
+	key = filepath.Join(dir, "id_test")
+	if out, err := exec.Command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", key).CombinedOutput(); err != nil {
+		t.Fatalf("ssh-keygen: %v\n%s", err, out)
+	}
+	script = filepath.Join(dir, "block.sh")
+	body := "#!/usr/bin/env bash\nset -e\nKEY=" + shellQuote(key) + "\n" + peerPassphraseBlock + "echo BLOCK_DONE\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatalf("write block script: %v", err)
+	}
+	return dir, key, script
+}
+
+func runWithoutTTY(t *testing.T, home, script string, extraEnv ...string) passphraseRun {
+	t.Helper()
+	cmd := exec.Command("setsid", "-w", "bash", script)
+	cmd.Env = passphraseTestEnv(home, extraEnv...)
+	cmd.Stdin = nil
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	return passphraseRun{stdout.String(), stderr.String(), err}
+}
+
+func keyIsUnencrypted(key string) bool {
+	return exec.Command("ssh-keygen", "-y", "-P", "", "-f", key).Run() == nil
+}
+
+const noTTYWarning = "certhold: warning: no terminal for the passphrase prompt"
+
+func TestPeerPassphraseBlock_NoTTY(t *testing.T) {
+	requireTools(t, "bash", "setsid", "ssh-keygen")
+
+	cases := []struct {
+		name        string
+		env         []string
+		wantWarning bool
+		wantPlain   bool
+	}{
+		{"no env", nil, true, true},
+		{"no passphrase opt-out", []string{"CERTHOLD_NO_PASSPHRASE=1"}, false, true},
+		{"preset passphrase", []string{"CERTHOLD_KEY_PASSPHRASE=x"}, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, key, script := writePassphraseBlockScript(t)
+			r := runWithoutTTY(t, dir, script, tc.env...)
+			if r.err != nil {
+				t.Fatalf("block aborted without a tty: %v\nstdout:\n%s\nstderr:\n%s", r.err, r.stdout, r.stderr)
+			}
+			if !strings.Contains(r.stdout, "BLOCK_DONE") {
+				t.Fatalf("block did not run to completion\nstdout:\n%s\nstderr:\n%s", r.stdout, r.stderr)
+			}
+			if got := strings.Contains(r.stderr, noTTYWarning); got != tc.wantWarning {
+				t.Errorf("warning on stderr = %v, want %v\nstderr:\n%s", got, tc.wantWarning, r.stderr)
+			}
+			if tc.wantWarning {
+				for _, want := range []string{"CERTHOLD_KEY_PASSPHRASE", "CERTHOLD_NO_PASSPHRASE=1"} {
+					if !strings.Contains(r.stderr, want) {
+						t.Errorf("warning does not name %s\nstderr:\n%s", want, r.stderr)
+					}
+				}
+				if strings.Count(strings.TrimSpace(r.stderr), "\n") != 0 {
+					t.Errorf("warning should be one line\nstderr:\n%s", r.stderr)
+				}
+			}
+			if got := keyIsUnencrypted(key); got != tc.wantPlain {
+				t.Errorf("key unencrypted = %v, want %v", got, tc.wantPlain)
+			}
+			if !tc.wantPlain {
+				if err := exec.Command("ssh-keygen", "-y", "-P", "x", "-f", key).Run(); err != nil {
+					t.Errorf("key does not open with the preset passphrase: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestPeerPassphraseBlock_InteractiveTTY(t *testing.T) {
+	requireTools(t, "bash", "script", "ssh-keygen")
+
+	cases := []struct {
+		name      string
+		typed     string
+		wantPlain bool
+	}{
+		{"typed passphrase", "s3cret\n", false},
+		{"empty answer", "\n", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, key, blockScript := writePassphraseBlockScript(t)
+			cmd := exec.Command("script", "-qec", "bash "+shellQuote(blockScript), "/dev/null")
+			cmd.Env = passphraseTestEnv(dir)
+			cmd.Stdin = strings.NewReader(tc.typed)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("interactive run failed: %v\noutput:\n%s", err, out)
+			}
+			if !strings.Contains(string(out), "Passphrase for this peer key") {
+				t.Errorf("prompt not shown on the terminal\noutput:\n%s", out)
+			}
+			if strings.Contains(string(out), noTTYWarning) {
+				t.Errorf("no-tty warning printed despite a terminal\noutput:\n%s", out)
+			}
+			if got := keyIsUnencrypted(key); got != tc.wantPlain {
+				t.Errorf("key unencrypted = %v, want %v", got, tc.wantPlain)
+			}
+			if !tc.wantPlain {
+				if err := exec.Command("ssh-keygen", "-y", "-P", "s3cret", "-f", key).Run(); err != nil {
+					t.Errorf("key does not open with the typed passphrase: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestEnrollV2Script_NoTTYCompletes(t *testing.T) {
+	requireTools(t, "bash", "setsid")
+
+	const baseURL = "https://demo.example"
+	const tok = "TOKENNOTTY"
+	script := v2Script(baseURL, tok, testInstanceKey, "", "")
+	keyFile := peerfiles.V2KeyFileName(testInstanceKey)
+	fixturePath := writeFixtureTarball(t, []fixtureEntry{
+		{keyFile, []byte("FAKE_PRIVKEY\n")},
+		{keyFile + "-cert.pub", []byte("ssh-ed25519-cert-v01@openssh.com FAKECERT keyid\n")},
+		{"known_hosts", []byte("manager.example ssh-ed25519 FAKEHOSTKEY\n")},
+		{"ca_authorized_keys", []byte(`cert-authority,principals="manager" ssh-ed25519 FAKECAKEY ca-comment` + "\n")},
+		{"certhold-cli", []byte("#!/usr/bin/env bash\necho certhold-cli stub\n")},
+		{"certhold_" + testInstanceKey + ".conf", []byte("BASE_URL=" + baseURL + "\nPULL_TOKEN=pt\nINSTANCE_KEY=" + testInstanceKey + "\nPEER_NAME=vm\nLAST_REV=0\n")},
+	})
+	curlLine := `curl -kfsSL ` + baseURL + `/enroll/` + tok + `?user=$TARGET_USER | tar -xzC "$STAGE"`
+	if !strings.Contains(script, curlLine) {
+		t.Fatalf("script missing curl line %q\nscript:\n%s", curlLine, script)
+	}
+	patched := strings.Replace(script, curlLine, `tar -xzf `+fixturePath+` -C "$STAGE"`, 1)
+
+	home := t.TempDir()
+	scriptPath := filepath.Join(home, "install.sh")
+	if err := os.WriteFile(scriptPath, []byte(patched), 0o700); err != nil {
+		t.Fatalf("write patched script: %v", err)
+	}
+
+	r := runWithoutTTY(t, home, scriptPath)
+	if r.err != nil {
+		t.Fatalf("install aborted without a tty: %v\nstdout:\n%s\nstderr:\n%s", r.err, r.stdout, r.stderr)
+	}
+	if !strings.Contains(r.stdout, "Success") {
+		t.Errorf("install stdout missing Success\nstdout:\n%s", r.stdout)
+	}
+	if !strings.Contains(r.stderr, noTTYWarning) {
+		t.Errorf("install stderr missing no-tty warning\nstderr:\n%s", r.stderr)
+	}
+}
