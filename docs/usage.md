@@ -122,8 +122,12 @@ authentication.
   root** targets `/root/.ssh`.
 - By default that user is **reported by the peer** at install time and recorded
   on the peer row (`target_user`). Pass `enroll --user <name>` to **pin** it: the
-  install request must then match, or the server rejects it (the token is
-  preserved, so it can be retried).
+  script then checks `id -un` before doing anything else, and when run as the
+  wrong user it stops with a message naming the expected and actual users and
+  how to fix it (re-run as the pinned user, e.g. `… | sudo -H bash` for root, or
+  re-mint with `enroll <name> --user <you>`). Nothing is changed and the token
+  stays valid. The server still rejects a mismatched install request as a
+  backstop.
 - **To manage root, enroll with `--user root` and run the one-liner as root.**
   There is no separate mode; root is just a target user whose home is `/root`.
 
