@@ -11,12 +11,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/ssh"
 
 	"github.com/shudza/certhold/internal/ca"
 	"github.com/shudza/certhold/internal/clientcli"
 	"github.com/shudza/certhold/internal/db"
+	"github.com/shudza/certhold/internal/qr"
 )
 
 func runEnroll(t *testing.T, dbPath string, args ...string) (string, string, error) {
@@ -1063,5 +1065,170 @@ func TestEnrollWrongCAPassphraseFails(t *testing.T) {
 	cmd.SetArgs([]string{"--db", dbPath, "--data-dir", dataDir, "enroll", "badvm", "--groups", "infra"})
 	if err := cmd.ExecuteContext(context.Background()); err == nil {
 		t.Fatal("enroll with wrong CA passphrase: want error, got nil")
+	}
+}
+
+func forceTerminal(t *testing.T, tty bool) {
+	t.Helper()
+	prev := stdoutIsTerminal
+	stdoutIsTerminal = func(io.Writer) bool { return tty }
+	t.Cleanup(func() { stdoutIsTerminal = prev })
+}
+
+func forceWidth(t *testing.T, cols int, known bool) {
+	t.Helper()
+	prev := stdoutWidth
+	stdoutWidth = func(io.Writer) (int, bool) { return cols, known }
+	t.Cleanup(func() { stdoutWidth = prev })
+}
+
+func TestEnrollNonTTYPrintsOnlyOneLiner(t *testing.T) {
+	dbPath := setupDB(t)
+	preCreateGroups(t, dbPath, "g")
+	stdout, stderr, err := runEnroll(t, dbPath, "plain", "--groups", "g")
+	if err != nil {
+		t.Fatalf("enroll: err=%v stderr=%s", err, stderr)
+	}
+	tok := extractToken(t, stdout, "https://certhold.home.lan")
+	if want := "curl -kfsSL https://certhold.home.lan/enroll/" + tok + ".sh | bash\n"; stdout != want {
+		t.Fatalf("non-tty stdout = %q, want exactly %q", stdout, want)
+	}
+	if strings.ContainsAny(stdout, "█▀▄\x1b") {
+		t.Fatalf("non-tty stdout carries QR output: %q", stdout)
+	}
+}
+
+func TestEnrollNonTTYNoQRFlagAccepted(t *testing.T) {
+	dbPath := setupDB(t)
+	preCreateGroups(t, dbPath, "g")
+	stdout, stderr, err := runEnroll(t, dbPath, "plain", "--groups", "g", "--no-qr")
+	if err != nil {
+		t.Fatalf("enroll --no-qr: err=%v stderr=%s", err, stderr)
+	}
+	extractToken(t, stdout, "https://certhold.home.lan")
+}
+
+func TestEnrollTTYPrintsQRAfterOneLiner(t *testing.T) {
+	forceTerminal(t, true)
+	forceWidth(t, 80, true)
+	dbPath := setupDB(t)
+	preCreateGroups(t, dbPath, "g")
+	stdout, stderr, err := runEnroll(t, dbPath, "laptop", "--groups", "g", "--client")
+	if err != nil {
+		t.Fatalf("enroll: err=%v stderr=%s", err, stderr)
+	}
+	oneLiner, rest, ok := strings.Cut(stdout, "\n")
+	if !ok || !strings.HasPrefix(oneLiner, "curl -kfsSL ") {
+		t.Fatalf("first line is not the one-liner: %q", stdout)
+	}
+	want, err := qr.Lines(oneLiner)
+	if err != nil {
+		t.Fatalf("qr.Lines: %v", err)
+	}
+	block := "\n" + strings.Join(qr.Color(want), "\n") + "\n\n"
+	if !strings.HasPrefix(rest, block) {
+		t.Fatalf("QR block missing right after the one-liner:\n%s", stdout)
+	}
+	if !strings.HasPrefix(strings.TrimPrefix(rest, block), "client-style peer;") {
+		t.Fatalf("client notice must follow the QR:\n%s", stdout)
+	}
+}
+
+func TestEnrollTTYNoQRFlagSuppressesQR(t *testing.T) {
+	forceTerminal(t, true)
+	dbPath := setupDB(t)
+	preCreateGroups(t, dbPath, "g")
+	stdout, stderr, err := runEnroll(t, dbPath, "plain", "--groups", "g", "--no-qr")
+	if err != nil {
+		t.Fatalf("enroll --no-qr: err=%v stderr=%s", err, stderr)
+	}
+	extractToken(t, stdout, "https://certhold.home.lan")
+	if strings.ContainsAny(stdout, "█▀▄\x1b") {
+		t.Fatalf("--no-qr still printed a QR: %q", stdout)
+	}
+}
+
+func TestStdoutIsTerminalRejectsNonFiles(t *testing.T) {
+	if stdoutIsTerminal(&bytes.Buffer{}) {
+		t.Fatal("a bytes.Buffer must not count as a terminal")
+	}
+	f, err := os.Create(filepath.Join(t.TempDir(), "out"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if stdoutIsTerminal(f) {
+		t.Fatal("a regular file must not count as a terminal")
+	}
+}
+
+func TestEnrollTTYNarrowPrintsNoteInsteadOfQR(t *testing.T) {
+	forceTerminal(t, true)
+	dbPath := setupDB(t)
+	preCreateGroups(t, dbPath, "g")
+	probe, err := qr.Lines("curl -kfsSL https://certhold.home.lan/enroll/zh7_ByXd9epfrwqyaA0w54t--_lUDRxUmAP8_VZb_ZE.sh | bash")
+	if err != nil {
+		t.Fatalf("qr.Lines: %v", err)
+	}
+	forceWidth(t, utf8.RuneCountInString(probe[0])-1, true)
+	stdout, stderr, err := runEnroll(t, dbPath, "laptop", "--groups", "g", "--client")
+	if err != nil {
+		t.Fatalf("enroll: err=%v stderr=%s", err, stderr)
+	}
+	if strings.ContainsAny(stdout, "█▀▄\x1b") {
+		t.Fatalf("narrow terminal still got a QR: %q", stdout)
+	}
+	oneLiner, rest, _ := strings.Cut(stdout, "\n")
+	if !strings.HasPrefix(oneLiner, "curl -kfsSL ") {
+		t.Fatalf("first line is not the one-liner: %q", stdout)
+	}
+	if !strings.HasPrefix(rest, qrTooNarrowNote+"\nclient-style peer;") {
+		t.Fatalf("narrow note must follow the one-liner, then the client notice: %q", stdout)
+	}
+}
+
+func TestEnrollTTYExactWidthPrintsQR(t *testing.T) {
+	forceTerminal(t, true)
+	dbPath := setupDB(t)
+	preCreateGroups(t, dbPath, "g")
+	probe, err := qr.Lines("curl -kfsSL https://certhold.home.lan/enroll/zh7_ByXd9epfrwqyaA0w54t--_lUDRxUmAP8_VZb_ZE.sh | bash")
+	if err != nil {
+		t.Fatalf("qr.Lines: %v", err)
+	}
+	forceWidth(t, utf8.RuneCountInString(probe[0]), true)
+	stdout, stderr, err := runEnroll(t, dbPath, "plain", "--groups", "g")
+	if err != nil {
+		t.Fatalf("enroll: err=%v stderr=%s", err, stderr)
+	}
+	if !strings.Contains(stdout, "\x1b[97;40m") || strings.Contains(stdout, qrTooNarrowNote) {
+		t.Fatalf("QR must print when the terminal is exactly as wide as the code: %q", stdout)
+	}
+}
+
+func TestEnrollTTYUnknownWidthPrintsQR(t *testing.T) {
+	forceTerminal(t, true)
+	forceWidth(t, 0, false)
+	dbPath := setupDB(t)
+	preCreateGroups(t, dbPath, "g")
+	stdout, stderr, err := runEnroll(t, dbPath, "plain", "--groups", "g")
+	if err != nil {
+		t.Fatalf("enroll: err=%v stderr=%s", err, stderr)
+	}
+	if !strings.Contains(stdout, "\x1b[97;40m") || strings.Contains(stdout, qrTooNarrowNote) {
+		t.Fatalf("QR must print when the width is unknown: %q", stdout)
+	}
+}
+
+func TestStdoutWidthUnknownForNonTerminals(t *testing.T) {
+	if _, ok := stdoutWidth(&bytes.Buffer{}); ok {
+		t.Fatal("a bytes.Buffer must not report a width")
+	}
+	f, err := os.Create(filepath.Join(t.TempDir(), "out"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, ok := stdoutWidth(f); ok {
+		t.Fatal("a regular file must not report a width")
 	}
 }

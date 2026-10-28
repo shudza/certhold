@@ -3,24 +3,37 @@ package tui
 import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 
 	"github.com/shudza/certhold/internal/ops"
+	"github.com/shudza/certhold/internal/qr"
+)
+
+var qrStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Background(lipgloss.Color("0"))
+
+const (
+	qrHint        = "enlarge the terminal to show a QR code"
+	qrNoColorHint = "QR code needs a colour terminal"
 )
 
 // enrollResultModal shows a completed mint: the onboarding one-liner rendered
 // FULL-WIDTH and wrapped (never truncated), plus the peer name and a client
 // notice. The one-liner carries an ENROLL token — that is intended to be shown
 // to the operator and is NOT a peer's stored pull_token (which is never
-// rendered anywhere). esc dismisses.
+// rendered anywhere). The one-liner's QR code sits under it whenever the whole
+// code fits the frame and colours are on; otherwise a dim hint replaces it.
+// esc dismisses.
 type enrollResultModal struct {
 	peer     string
 	oneLiner string
 	client   bool
 	reenroll bool
+	qr       []string
 }
 
 func newEnrollResultModal(res ops.EnrollResult, client bool) enrollResultModal {
-	return enrollResultModal{peer: res.PeerName, oneLiner: res.OneLiner, client: client, reenroll: res.Reenroll}
+	lines, _ := qr.Lines(res.OneLiner)
+	return enrollResultModal{peer: res.PeerName, oneLiner: res.OneLiner, client: client, reenroll: res.Reenroll, qr: lines}
 }
 
 func (e enrollResultModal) title() string {
@@ -37,7 +50,7 @@ func (e enrollResultModal) handle(msg tea.KeyMsg) (modal, modalResult) {
 	return e, modalKeep
 }
 
-func (e enrollResultModal) view(w, _ int) []string {
+func (e enrollResultModal) view(w, h int) []string {
 	// The modal frame draws a 2-cell border + 1-cell padding each side, so the
 	// inner content width is w-4 at most. Wrap the one-liner to that so it stays
 	// visible and legible at narrow widths (e.g. 60 cols) rather than truncated.
@@ -57,14 +70,33 @@ func (e enrollResultModal) view(w, _ int) []string {
 		labelStyle.Render(runLabel),
 	}
 	lines = append(lines, wrapPlain(e.oneLiner, inner)...)
+	var tail []string
 	if e.reenroll {
-		lines = append(lines, "", dimStyle.Render("nothing changes on the peer until this one-liner runs on it; it supersedes any earlier unredeemed one-liner for this peer."))
+		tail = append(tail, "", dimStyle.Render("nothing changes on the peer until this one-liner runs on it; it supersedes any earlier unredeemed one-liner for this peer."))
 	}
 	if e.client {
-		lines = append(lines, "", dimStyle.Render("client-style peer; manager cannot push to it; updates arrive via 'certhold-cli refresh'."))
+		tail = append(tail, "", dimStyle.Render("client-style peer; manager cannot push to it; updates arrive via 'certhold-cli refresh'."))
 	}
-	lines = append(lines, "", modalHintStyle.Render("esc dismiss"))
-	return lines
+	tail = append(tail, "", modalHintStyle.Render("esc dismiss"))
+
+	if len(e.qr) > 0 {
+		lines = append(lines, "")
+		switch {
+		case lipgloss.ColorProfile() == termenv.Ascii:
+			lines = append(lines, dimStyle.Render(qrNoColorHint))
+		case qrFits(e.qr, inner, h-len(lines)-len(tail)):
+			for _, l := range e.qr {
+				lines = append(lines, qrStyle.Render(l))
+			}
+		default:
+			lines = append(lines, dimStyle.Render(qrHint))
+		}
+	}
+	return append(lines, tail...)
+}
+
+func qrFits(code []string, width, height int) bool {
+	return len(code) <= height && lipgloss.Width(code[0]) <= width
 }
 
 // wrapPlain hard-wraps s to width cells, breaking only on cell width so the

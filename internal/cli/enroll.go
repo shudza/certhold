@@ -4,14 +4,34 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/shudza/certhold/internal/db"
 	"github.com/shudza/certhold/internal/ops"
+	"github.com/shudza/certhold/internal/qr"
 )
+
+var stdoutIsTerminal = func(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	return ok && term.IsTerminal(int(f.Fd()))
+}
+
+var stdoutWidth = func(w io.Writer) (int, bool) {
+	f, ok := w.(*os.File)
+	if !ok {
+		return 0, false
+	}
+	cols, _, err := term.GetSize(int(f.Fd()))
+	return cols, err == nil && cols > 0
+}
+
+const qrTooNarrowNote = "(terminal too narrow to show a QR code; widen it or use --no-qr to silence)"
 
 func newEnrollCmd() *cobra.Command {
 	const legacyBaseURL = "https://certhold.home.lan"
@@ -47,6 +67,10 @@ func newEnrollCmd() *cobra.Command {
 				return err
 			}
 			client, err := cmd.Flags().GetBool("client")
+			if err != nil {
+				return err
+			}
+			noQR, err := cmd.Flags().GetBool("no-qr")
 			if err != nil {
 				return err
 			}
@@ -100,7 +124,17 @@ func newEnrollCmd() *cobra.Command {
 				return err
 			}
 
-			fmt.Fprintf(cmd.OutOrStdout(), "%s\n", res.OneLiner)
+			out := cmd.OutOrStdout()
+			fmt.Fprintf(out, "%s\n", res.OneLiner)
+			if !noQR && stdoutIsTerminal(out) {
+				if lines, err := qr.Lines(res.OneLiner); err == nil {
+					if cols, ok := stdoutWidth(out); ok && cols < utf8.RuneCountInString(lines[0]) {
+						fmt.Fprintln(out, qrTooNarrowNote)
+					} else {
+						fmt.Fprintf(out, "\n%s\n\n", strings.Join(qr.Color(lines), "\n"))
+					}
+				}
+			}
 			if res.Reenroll {
 				fmt.Fprintf(cmd.OutOrStdout(), "re-enroll minted for existing peer %s: its current keys and config stay active until the one-liner runs on the peer; this supersedes any earlier unredeemed one-liner for it.\n", res.PeerName)
 			}
@@ -118,6 +152,7 @@ func newEnrollCmd() *cobra.Command {
 	cmd.Flags().String("address", "", "network address (host or IP) certhold uses to SSH to this peer; defaults to the source IP seen at install, then the peer name")
 	cmd.Flags().Bool("no-inbound", false, "enroll a client-style peer: no inbound trust line, other peers cannot SSH into it, updates arrive via certhold-cli refresh")
 	cmd.Flags().Bool("client", false, "alias for --no-inbound")
+	cmd.Flags().Bool("no-qr", false, "do not print the one-liner as a QR code (it is only printed when stdout is a terminal)")
 
 	return cmd
 }
