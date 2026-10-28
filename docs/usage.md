@@ -65,6 +65,14 @@ $ certhold enroll app1 --groups infra,databases
 curl -kfsSL https://192.168.1.10:8443/enroll/<token>.sh | bash
 ```
 
+When stdout is a terminal, `enroll` also prints the one-liner as a QR code
+under it, so you can scan it with a phone instead of retyping it; pass `--no-qr`
+to skip it. A terminal narrower than the code gets a one-line note instead.
+Piped or redirected output carries only the one-liner and notices.
+The TUI's enroll result shows the same QR code under the one-liner when the
+window is big enough for the whole code and colours are on, and a hint
+otherwise.
+
 Paste that one-liner on the new peer, as the user who should own the SSH files.
 That is the entire peer-side onboarding — the peer contacts no other peer, and
 existing peers need no update (they already trust anything the CA signed).
@@ -333,7 +341,7 @@ is given.
 ```
 certhold enroll <name> --groups <a,b,c> [--base-url URL]
                 [--user <name>] [--address <host>]
-                [--no-inbound | --client]
+                [--no-inbound | --client] [--no-qr]
 ```
 
 Mints a one-time token, signs the peer cert (sign-at-mint), builds and stores the
@@ -353,6 +361,7 @@ the peer pulls its tarball from `serve`.
 | `--address` | — | Network address (host or IP) certhold dials to reach this peer. Defaults to the source IP seen at install, then the peer name. See [Name vs. address](#name-vs-address). |
 | `--no-inbound` | `false` | Enroll a [client-style peer](#client-style-peers-enroll---client): no inbound trust line, other peers cannot SSH into it, updates arrive via `certhold-cli refresh`. |
 | `--client` | `false` | Alias for `--no-inbound`. |
+| `--no-qr` | `false` | Don't print the one-liner as a QR code. The QR code is only ever printed when stdout is a terminal. |
 
 (`--hostname` is accepted but unused under the current layout — host trust is
 TOFU `known_hosts`, so there is no host-label entry to set.)
