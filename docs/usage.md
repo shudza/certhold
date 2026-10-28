@@ -307,6 +307,8 @@ checked first so automation never blocks. No flag ever takes a passphrase value.
 | `CERTHOLD_CA_PASSPHRASE` | init, enroll, update, revoke, rekey | CA-key passphrase, non-interactive. |
 | `CERTHOLD_PEER_PASSPHRASE` | update, group, revoke, rekey | Manager peer-key passphrase, non-interactive. |
 | `CERTHOLD_BASE_URL` | enroll | Fallback enroll base URL when not pinned by `--base-url` or persisted at `init`. |
+| `CERTHOLD_KEY_PASSPHRASE` | install one-liner (on the peer) | Encrypts the peer's installed key with this passphrase, no prompt. |
+| `CERTHOLD_NO_PASSPHRASE` | install one-liner (on the peer) | `1` skips the peer-key passphrase prompt (and the no-terminal warning). See [security.md](security.md#per-peer-passphrases-install-side). |
 
 Which keys each command unlocks is summarized in
 [security.md](security.md#when-the-manager-prompts).

@@ -154,6 +154,9 @@ When the install one-liner runs, the script offers to encrypt that peer's key
 - Press Enter → key left unencrypted (the default).
 - Pre-set `CERTHOLD_KEY_PASSPHRASE=…` → used non-interactively.
 - Pre-set `CERTHOLD_NO_PASSPHRASE=1` → skip the prompt entirely.
+- No terminal to prompt on (CI, cloud-init, `ssh host '…'` without `-t`) → the
+  prompt is skipped, the key is left unencrypted, and a one-line warning on
+  stderr names both variables above (`CERTHOLD_NO_PASSPHRASE=1` silences it).
 
 The encryption step is best-effort and never aborts the install. This passphrase
 protects the peer's *outbound* credentials against compromise of the peer itself;

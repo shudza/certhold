@@ -358,15 +358,29 @@ func TestE2E(t *testing.T) {
 		if res.exitCode != 0 {
 			t.Fatalf("install on peer1 exit=%d:\n%s", res.exitCode, res.out)
 		}
+		if strings.Contains(res.out, "no terminal for the passphrase prompt") {
+			t.Fatalf("install on peer1 warned despite CERTHOLD_NO_PASSPHRASE=1:\n%s", res.out)
+		}
 		assertPeerInstall(ctx, t, "peer1", targetUser, "/home/"+targetUser, instanceKey, []string{"manager", "web"})
 	})
 
 	t.Run("03_enroll_db01_install_peer2", func(t *testing.T) {
 		certhold(ctx, t, "group", "create", "db")
 		line := enrollOneLiner(ctx, t, "db01", "peer2", targetUser, "db")
-		res := composeExec(ctx, t, targetUser, "peer2", line)
+		// T174: peer2 installs WITHOUT the compose-level CERTHOLD_NO_PASSPHRASE
+		// opt-out; exec -T gives no controlling tty, so the passphrase prompt
+		// must be skipped with a warning instead of aborting the install.
+		res := composeExec(ctx, t, targetUser, "peer2", "unset CERTHOLD_NO_PASSPHRASE; "+line)
 		if res.exitCode != 0 {
-			t.Fatalf("install on peer2 exit=%d:\n%s", res.exitCode, res.out)
+			t.Fatalf("install on peer2 (no tty) exit=%d:\n%s", res.exitCode, res.out)
+		}
+		if !strings.Contains(res.out, "no terminal for the passphrase prompt") || !strings.Contains(res.out, "CERTHOLD_KEY_PASSPHRASE") {
+			t.Fatalf("install on peer2 (no tty) printed no passphrase warning:\n%s", res.out)
+		}
+		plain := composeExec(ctx, t, targetUser, "peer2",
+			"ssh-keygen -y -P '' -f /home/"+targetUser+"/.ssh/id_ed25519_"+instanceKey+" >/dev/null")
+		if plain.exitCode != 0 {
+			t.Fatalf("peer2 key is not unencrypted after a no-tty install:\n%s", plain.out)
 		}
 		assertPeerInstall(ctx, t, "peer2", targetUser, "/home/"+targetUser, instanceKey, []string{"manager", "db"})
 
