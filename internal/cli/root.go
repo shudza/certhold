@@ -7,6 +7,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var Version = "dev"
+
 func NewRootCmd() *cobra.Command {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -20,6 +22,7 @@ func NewRootCmd() *cobra.Command {
 		Short:        "Certhold — homelab SSH access manager",
 		Long:         "Certhold is a homelab SSH access manager. It runs an SSH certificate authority, signs peer certs, and pushes config to peers over SSH.",
 		SilenceUsage: true,
+		Version:      Version,
 	}
 
 	cmd.PersistentFlags().String("db", defaultDB, "path to state database")

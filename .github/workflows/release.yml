@@ -20,7 +20,7 @@ jobs:
       - name: go test
         run: go test ./...
       - name: build static binaries
-        run: make static
+        run: make static VERSION="$GITHUB_REF_NAME"
       - name: publish release
         env:
           GH_TOKEN: ${{ github.token }}

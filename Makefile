@@ -1,7 +1,10 @@
 .PHONY: build test vet e2e e2e-systemd static clean
 
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+LDFLAGS := -X github.com/shudza/certhold/internal/cli.Version=$(VERSION)
+
 build:
-	go build -o ./bin/certhold ./cmd/certhold
+	go build -ldflags="$(LDFLAGS)" -o ./bin/certhold ./cmd/certhold
 
 test:
 	go test ./...
@@ -22,8 +25,8 @@ vet:
 
 static:
 	mkdir -p ./dist
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ./dist/certhold-linux-amd64 ./cmd/certhold
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o ./dist/certhold-linux-arm64 ./cmd/certhold
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w $(LDFLAGS)" -o ./dist/certhold-linux-amd64 ./cmd/certhold
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w $(LDFLAGS)" -o ./dist/certhold-linux-arm64 ./cmd/certhold
 	cd ./dist && sha256sum certhold-linux-amd64 certhold-linux-arm64 > SHA256SUMS
 
 clean:
